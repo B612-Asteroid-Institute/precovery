@@ -32,8 +32,7 @@ repos:
   hooks:
   - id: mypy
     additional_dependencies:
-      - types-requests
-      - types-paramiko
+      - numpy
 
 - repo: https://github.com/jazzband/pip-tools
   rev: 6.2.0
