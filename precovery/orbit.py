@@ -149,7 +149,7 @@ class Orbit:
 
     def compute_ephemeris(
         self,
-        obscode: int,
+        obscode: str,
         epoch: float,
         method: PropagationIntegrator = PropagationIntegrator.N_BODY,
     ) -> "Ephemeris":

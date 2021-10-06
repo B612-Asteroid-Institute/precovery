@@ -7,13 +7,15 @@ def test_precovery_database_add_observations():
     # updates the minimum_epoch and maximum_epoch attributes correctly.
     db = PrecoveryDatabase()
 
+    obscode = "568"
+
     # Add a single batch.
     batch1_epoch = 10
     batch1 = [
         Observation(0, 0, batch1_epoch, 1),
         Observation(0, 0, batch1_epoch, 2),
     ]
-    db.add_observations(batch1_epoch, batch1)
+    db.add_observations(batch1_epoch, obscode, batch1)
 
     # It should be the only thing in the DB.
     assert len(db.observations) == 1
@@ -30,7 +32,7 @@ def test_precovery_database_add_observations():
         Observation(0, 0, batch2_epoch, 4),
         Observation(0, 0, batch2_epoch, 5),
     ]
-    db.add_observations(batch2_epoch, batch2)
+    db.add_observations(batch2_epoch, obscode, batch2)
 
     # Check DB counts, values, and bounds.
     assert len(db.observations) == 2
@@ -44,7 +46,7 @@ def test_precovery_database_add_observations():
     batch3 = [
         Observation(0, 0, batch3_epoch, 6),
     ]
-    db.add_observations(batch3_epoch, batch3)
+    db.add_observations(batch3_epoch, obscode, batch3)
 
     # Check DB counts, values, and bounds.
     assert len(db.observations) == 3
@@ -63,7 +65,7 @@ def test_precovery_database_add_observations():
         Observation(0, 0, batch4_epoch, 9),
         Observation(0, 0, batch4_epoch, 10),
     ]
-    db.add_observations(batch4_epoch, batch4)
+    db.add_observations(batch4_epoch, obscode, batch4)
 
     # Check DB counts, values, and bounds.
     assert len(db.observations) == 4

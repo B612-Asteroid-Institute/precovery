@@ -1,8 +1,13 @@
 import bisect
-from typing import List, Sequence
+from typing import Iterator, List, Sequence
 
 from .observation import Observation
 from .orbit import Orbit
+
+
+def haversine_distance(ra1, dec1, ra2, dec2) -> float:
+    # TODO
+    return 0
 
 
 class _Exposure:
@@ -12,8 +17,9 @@ class _Exposure:
     TODO: This should mostly exist on disk, not in memory.
     """
 
-    def __init__(self, epoch: int, observations: Sequence[Observation]):
+    def __init__(self, epoch: int, obscode: str, observations: Sequence[Observation]):
         self.epoch = epoch
+        self.obscode = obscode
         self.observations = list(observations)
 
         # Keep track of the bounding box of ra, dec. This lets us quickly
@@ -45,6 +51,13 @@ class _Exposure:
     def __len__(self) -> int:
         return len(self.observations)
 
+    def cone_search(
+        self, ra: float, dec: float, tolerance: float
+    ) -> Iterator[Observation]:
+        for o in self.observations:
+            if haversine_distance(o.ra, o.dec, ra, dec) <= tolerance:
+                yield o
+
 
 class PrecoveryDatabase:
     def __init__(self):
@@ -54,15 +67,23 @@ class PrecoveryDatabase:
         self.maximum_epoch: int = -(1 << 32)
 
     def precover(self, orbit: Orbit):
-        pass
+        # v1 is naive: Compute ephem every time
+        for o in self.observations:
+            ephem = orbit.compute_ephemeris(o.obscode, o.epoch)
+            if o.contains(ephem.ra, ephem.dec, 0.5):
+                candidates = o.cone_search(ephem.ra, ephem.dec, 0.01)
+                for c in candidates:
+                    yield c
 
-    def add_observations(self, epoch: int, observations: Sequence[Observation]):
-        eo = _Exposure(epoch, observations)
+    def add_observations(
+        self, epoch: int, obscode: str, observations: Sequence[Observation]
+    ):
+        eo = _Exposure(epoch, obscode, observations)
 
         bisect.insort_left(self.observations, eo)
 
-        if eo.epoch < self.minimum_epoch:
-            self.minimum_epoch = eo.epoch
+        if epoch < self.minimum_epoch:
+            self.minimum_epoch = epoch
 
-        if eo.epoch > self.maximum_epoch:
-            self.maximum_epoch = eo.epoch
+        if epoch > self.maximum_epoch:
+            self.maximum_epoch = epoch
