@@ -9,6 +9,6 @@ python3.9 -m virtualenv virtualenv3.9
 source virtualenv3.9/bin/activate
 
 pip install pip --upgrade
-pip install pre-commit
+pip install -r requirements.txt -r dev-requirements.txt
 pre-commit install
 ```
