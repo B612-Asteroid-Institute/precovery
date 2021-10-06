@@ -14,6 +14,9 @@ class _EpochalObservations:
         self.epoch = epoch
         self.observations = list(observations)
 
+    def __lt__(self, other) -> bool:
+        return self.epoch < other.epoch
+
     def __len__(self) -> int:
         return len(self.observations)
 
@@ -31,7 +34,7 @@ class PrecoveryDatabase:
     def add_observations(self, epoch: int, observations: Sequence[Observation]):
         eo = _EpochalObservations(epoch, observations)
 
-        bisect.insort_left(self.observations, eo, key=lambda x: x.epoch)
+        bisect.insort_left(self.observations, eo)
 
         if eo.epoch < self.minimum_epoch:
             self.minimum_epoch = eo.epoch
