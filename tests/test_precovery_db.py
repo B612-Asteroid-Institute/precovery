@@ -5,7 +5,7 @@ from precovery.observation import Observation
 def test_precovery_database_add_observations():
     # Test that inserting observations maintains the proper sorted order and
     # updates the minimum_epoch and maximum_epoch attributes correctly.
-    db = PrecoveryDatabase()
+    db = PrecoveryDatabase(2)
 
     obscode = "568"
 
@@ -18,8 +18,9 @@ def test_precovery_database_add_observations():
     db.add_observations(batch1_epoch, obscode, batch1)
 
     # It should be the only thing in the DB.
-    assert len(db.observations) == 1
-    assert len(db.observations[0]) == 2
+    assert db.n_observations() == 2
+    assert db.n_exposures() == 1
+    assert db.n_exposure_bundles() == 1
 
     # Bounds should be correctly set.
     assert db.minimum_epoch == batch1_epoch
@@ -35,9 +36,10 @@ def test_precovery_database_add_observations():
     db.add_observations(batch2_epoch, obscode, batch2)
 
     # Check DB counts, values, and bounds.
-    assert len(db.observations) == 2
-    assert len(db.observations[0]) == 3
-    assert len(db.observations[1]) == 2
+    assert db.n_observations() == 5
+    assert db.n_exposures() == 2
+    assert db.n_exposure_bundles() == 2
+
     assert db.minimum_epoch == batch2_epoch
     assert db.maximum_epoch == batch1_epoch
 
@@ -49,10 +51,10 @@ def test_precovery_database_add_observations():
     db.add_observations(batch3_epoch, obscode, batch3)
 
     # Check DB counts, values, and bounds.
-    assert len(db.observations) == 3
-    assert len(db.observations[0]) == 3
-    assert len(db.observations[1]) == 2
-    assert len(db.observations[2]) == 1
+    assert db.n_observations() == 6
+    assert db.n_exposures() == 3
+    assert db.n_exposure_bundles() == 3
+
     assert db.minimum_epoch == batch2_epoch
     assert db.maximum_epoch == batch3_epoch
 
@@ -68,10 +70,9 @@ def test_precovery_database_add_observations():
     db.add_observations(batch4_epoch, obscode, batch4)
 
     # Check DB counts, values, and bounds.
-    assert len(db.observations) == 4
-    assert len(db.observations[0]) == 3
-    assert len(db.observations[1]) == 4
-    assert len(db.observations[2]) == 2
-    assert len(db.observations[3]) == 1
+    assert db.n_observations() == 10
+    assert db.n_exposures() == 4
+    assert db.n_exposure_bundles() == 3
+
     assert db.minimum_epoch == batch2_epoch
     assert db.maximum_epoch == batch3_epoch

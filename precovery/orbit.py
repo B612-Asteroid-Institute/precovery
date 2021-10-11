@@ -1,8 +1,11 @@
 import enum
+from typing import Tuple
 
 import numpy as np
 import numpy.typing as npt
 import pyoorb
+
+from .spherical_geom import propagate_linearly
 
 pyoorb_initialized = False
 
@@ -191,3 +194,43 @@ class Ephemeris:
         self.dec = raw_data[2]
         self.ra_velocity = raw_data[3]  # deg per day
         self.dec_velocity = raw_data[4]  # deg per day
+
+    def approximately_propagate(
+        self, obscode: str, orbit: Orbit, timedelta: float
+    ) -> Tuple[float, float]:
+        """
+        Roughly propagate the ephemeris to a new epoch, 'timedelta' days away along.
+
+        If timedelta is small and self.ra_velocity and self.dec_velocity are
+        small (indicating relatively slow motion across the sky), this uses a
+        linear motion approximation.
+
+        Otherwise, it uses a 2-body integration of the orbit.
+
+        Accuracy will decrease as timedelta increases.
+        """
+        if timedelta <= 3.0 and self.ra_velocity < 0.5 and self.dec_velocity < 0.5:
+            # Naively calculate the approximate location of the ephemeris
+            # when the orbit is "propagated" as naively as possible to the
+            # epoch of the observation: just use linear motion across the
+            # sky. This is a bad model for long or curving arcs, but it's
+            # roughly okay over very short time intervals, like <= 3 days.
+            approx_ra_rad, approx_dec_rad = propagate_linearly(
+                np.deg2rad(self.ra),
+                np.deg2rad(self.ra_velocity),
+                np.deg2rad(self.dec),
+                np.deg2rad(self.dec_velocity),
+                timedelta,
+            )
+            approx_ra = np.rad2deg(approx_ra_rad)
+            approx_dec = np.rad2deg(approx_dec_rad)
+        else:
+            approx_ephem = orbit.compute_ephemeris(
+                obscode,
+                self.mjd + timedelta,
+                method=PropagationIntegrator.TWO_BODY,
+            )
+            approx_ra = approx_ephem.ra
+            approx_dec = approx_ephem.dec
+
+        return approx_ra, approx_dec
