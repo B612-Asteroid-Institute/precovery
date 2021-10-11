@@ -1,3 +1,5 @@
 .eggs
 thorcontrol/version.py
 virtualenv3.10
+
+data/
