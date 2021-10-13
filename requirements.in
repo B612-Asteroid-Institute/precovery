@@ -1,2 +1,5 @@
 numpy
 numba
+sqlalchemy
+rich
+tables
