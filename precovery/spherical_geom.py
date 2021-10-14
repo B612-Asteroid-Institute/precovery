@@ -74,3 +74,17 @@ def haversine_distance(ra1: float, ra2: float, dec1: float, dec2: float) -> floa
     s2 = np.sin((ra2 - dec2) / 2)
     val = 2 * np.arcsin(np.sqrt(s1 * s1 + np.cos(ra1) * np.cos(dec1) * s2 * s2))
     return val
+
+
+def radec_box_contains(
+    ra_pt: float,
+    dec_pt: float,
+    ra_min: float,
+    ra_max: float,
+    dec_min: float,
+    dec_max: float,
+) -> bool:
+    """
+    Returns true iff the sky box defined by [ra_min, ra_max] and [dec_min,
+    dec_max] contains the point [ra_pt, dec_pt].
+    """

@@ -1,5 +1,5 @@
-from precovery.db import PrecoveryDatabase
 from precovery.observation import Observation
+from precovery.precovery_db import PrecoveryDatabase
 
 
 def test_precovery_database_add_observations():

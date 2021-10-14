@@ -2,39 +2,28 @@ import bisect
 from typing import Dict, List, Sequence
 
 from ._exposure import _Exposure
+from .exposure_db import ExposureDB
 from .observation import Observation
 from .orbit import Orbit, PropagationIntegrator
 
 
 class PrecoveryDatabase:
-    def __init__(self, days_per_bundle: int):
-        # invariant: self.observations is sorted by epoch
-        self._exposures_by_obscode: Dict[str, _ExposureDB] = {}
-        self.minimum_epoch: float = 1 << 31
-        self.maximum_epoch: float = -(1 << 32)
-        self.days_per_bundle = days_per_bundle
+    def __init__(self, exposure_db: ExposureDB, window_size: int):
+        self.exposure_db = exposure_db
+        self.window_size = window_size
+        self._exposures_by_obscode: dict = {}
 
     def precover(self, orbit: Orbit):
         # Hand the workload down to each observatory's worth of data
-        for edb in self._exposures_by_obscode.values():
-            for result in edb.precover(orbit):
-                yield result
+        bundles = self.exposure_db.idx.exposure_bundle_epochs(self.window_size)
+        for bundle in bundles:
+            orbit.compute_ephemeris(bundle.obscode, bundle.common_epoch)
+            raise NotImplementedError()
 
     def add_observations(
         self, epoch: float, obscode: str, observations: Sequence[Observation]
     ):
-        edb = self._exposures_by_obscode.get(obscode)
-        if edb is None:
-            edb = _ExposureDB(obscode, self.days_per_bundle)
-            self._exposures_by_obscode[obscode] = edb
-
-        edb.add_observations(epoch, observations)
-
-        if epoch < self.minimum_epoch:
-            self.minimum_epoch = epoch
-
-        if epoch > self.maximum_epoch:
-            self.maximum_epoch = epoch
+        raise NotImplementedError()
 
     def n_observations(self) -> int:
         return sum(edb.n_observations() for edb in self._exposures_by_obscode.values())
