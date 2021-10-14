@@ -33,6 +33,7 @@ repos:
   - id: mypy
     additional_dependencies:
       - numpy
+      - sqlalchemy
 
 - repo: https://github.com/jazzband/pip-tools
   rev: 6.2.0

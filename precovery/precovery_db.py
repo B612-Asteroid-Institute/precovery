@@ -1,139 +1,125 @@
-import bisect
-from typing import Dict, List, Sequence
+import dataclasses
+from typing import Iterator, Optional
 
-from ._exposure import _Exposure
-from .exposure_db import ExposureDB
-from .observation import Observation
-from .orbit import Orbit, PropagationIntegrator
+from .frame_db import FrameBundleDescription, FrameDB
+from .healpix_geom import radec_to_healpixel
+from .orbit import Orbit
+
+DEGREE = 1.0
+ARCMIN = DEGREE / 60
+ARCSEC = ARCMIN / 60
+
+
+@dataclasses.dataclass
+class PrecoveryCandidate:
+    ra: float
+    dec: float
+    obscode: str
+    mjd: float
+    catalog_id: str
+    id: str
 
 
 class PrecoveryDatabase:
-    def __init__(self, exposure_db: ExposureDB, window_size: int):
-        self.exposure_db = exposure_db
+    def __init__(self, frames: FrameDB, window_size: int):
+        self.frames = frames
         self.window_size = window_size
         self._exposures_by_obscode: dict = {}
-
-    def precover(self, orbit: Orbit):
-        # Hand the workload down to each observatory's worth of data
-        bundles = self.exposure_db.idx.exposure_bundle_epochs(self.window_size)
-        for bundle in bundles:
-            orbit.compute_ephemeris(bundle.obscode, bundle.common_epoch)
-            raise NotImplementedError()
-
-    def add_observations(
-        self, epoch: float, obscode: str, observations: Sequence[Observation]
-    ):
-        raise NotImplementedError()
-
-    def n_observations(self) -> int:
-        return sum(edb.n_observations() for edb in self._exposures_by_obscode.values())
-
-    def n_exposures(self) -> int:
-        return sum(edb.n_exposures() for edb in self._exposures_by_obscode.values())
-
-    def n_exposure_bundles(self) -> int:
-        return sum(
-            edb.n_exposure_bundles() for edb in self._exposures_by_obscode.values()
-        )
-
-
-class _ExposureDB:
-    def __init__(self, obscode: str, days_per_bundle: int):
-        """
-        A collection of _ExposureBundles which are from the same observatory.
-
-        The _ExposureBundles are groups of _Exposures which are nearby in time.
-        "Nearby" is given a precise meaning through the "days_per_bundle"
-        parameter.
-
-        obscode: The MPC observatory code for all observations in the bundle.
-        days_per_bundle: How many days of data should be included in one ExposureBundle?
-        """
-        self.obscode = obscode
-        self.exposure_bundles: Dict[int, _ExposureBundle] = {}
-        self.days_per_bundle = days_per_bundle
-
-    def _truncate_epoch(self, epoch: float):
-        return int(epoch) - (int(epoch) % self.days_per_bundle)
-
-    def add_observations(self, epoch: float, observations: Sequence[Observation]):
-        epoch_idx = self._truncate_epoch(epoch)
-        eb = self.exposure_bundles.get(epoch_idx)
-        if eb is None:
-            eb = _ExposureBundle(self.obscode, epoch)
-            self.exposure_bundles[epoch_idx] = eb
-
-        eb.add_observations(epoch, observations)
-
-    def precover(
-        self, orbit: Orbit, rough_tolerance: float = 0.5, fine_tolerance: float = 0.01
-    ):
-        # Find all the observations in the _ExposureDB which might be the
-        # orbit's ephemerides.
-        for eb in self.exposure_bundles.values():
-            for candidate in eb.precover(orbit, rough_tolerance, fine_tolerance):
-                yield candidate
-
-    def n_observations(self) -> int:
-        return sum(eb.n_observations() for eb in self.exposure_bundles.values())
-
-    def n_exposures(self) -> int:
-        return sum(eb.n_exposures() for eb in self.exposure_bundles.values())
-
-    def n_exposure_bundles(self) -> int:
-        return len(self.exposure_bundles)
-
-
-class _ExposureBundle:
-    """
-    A collection of _Exposures which are relatively nearby in time.
-    """
-
-    def __init__(self, obscode: str, epoch: float):
-        self.obscode = obscode
-        self.exposures: List[_Exposure] = []
-        self.epoch = epoch
 
     def precover(
         self,
         orbit: Orbit,
-        rough_tolerance: float,
-        fine_tolerance: float,
+        tolerance: float = 1.0 * ARCSEC,
+        max_matches: Optional[int] = None,
+        start_mjd: Optional[float] = None,
+        end_mjd: Optional[float] = None,
     ):
-        # Calculate ephemeris for the _ExposureBundle's epoch, which is nearly
-        # that of all of its exposures.
-        bundle_ephem = orbit.compute_ephemeris(self.obscode, self.epoch)
+        """
+        Find observations which match orbit in the database. Observations are
+        searched in descending order by mjd.
 
-        for exposure in self.exposures:
-            exposure_timedelta_in_days = exposure.epoch - self.epoch
+        orbit: The orbit to match.
 
+        max_matches: End once this many matches have been found. If None, find
+        all matches.
+
+        start_mjd: Only consider observations from after this epoch
+        (inclusive). If None, find all.
+
+        end_mjd: Only consider observations from before this epoch (inclusive).
+        If None, find all.
+        """
+        if start_mjd is None or end_mjd is None:
+            first, last = self.frames.idx.mjd_bounds()
+            if start_mjd is None:
+                start_mjd = first
+            if end_mjd is None:
+                end_mjd = last
+
+        n = 0
+        bundles = self.frames.idx.frame_bundles(self.window_size, start_mjd, end_mjd)
+        for bundle in bundles:
+            matches = self._check_bundle(bundle, orbit, tolerance)
+            for result in matches:
+                yield result
+                n += 1
+                if max_matches is not None and n >= max_matches:
+                    return
+
+    def _check_bundle(
+        self, bundle: FrameBundleDescription, orbit: Orbit, tolerance: float
+    ):
+        """
+        Find all observations that match orbit within a single FrameBundle.
+        """
+        bundle_epoch = bundle.epoch_midpoint()
+        bundle_ephem = orbit.compute_ephemeris(bundle.obscode, bundle_epoch)
+
+        for mjd, healpixels in self.frames.idx.propagation_targets(bundle):
+            timedelta = mjd - bundle_epoch
             approx_ra, approx_dec = bundle_ephem.approximately_propagate(
-                self.obscode,
+                bundle.obscode,
                 orbit,
-                exposure_timedelta_in_days,
+                timedelta,
+            )
+            approx_healpix = radec_to_healpixel(
+                approx_ra, approx_dec, self.frames.healpix_nside
             )
 
-            if exposure.contains(approx_ra, approx_dec, rough_tolerance):
-                # It looks like the approximate location is within the
-                # exposure, so it's worthwhile to compute the ephemeris
-                # more accurately, and do a cone search.
-                exact_ephem = orbit.compute_ephemeris(
-                    self.obscode,
-                    exposure.epoch,
-                    method=PropagationIntegrator.N_BODY,
-                )
-                candidates = exposure.cone_search(
-                    exact_ephem.ra, exact_ephem.dec, fine_tolerance
-                )
-                for c in candidates:
-                    yield c
+            if approx_healpix not in healpixels:
+                # No exposures anywhere near the ephem, so move on.
+                continue
 
-    def add_observations(self, epoch: float, observations: Sequence[Observation]):
-        eo = _Exposure(epoch, self.obscode, observations)
-        bisect.insort_left(self.exposures, eo)
+            matches = self._check_frames(
+                orbit, approx_healpix, bundle.obscode, mjd, tolerance
+            )
+            for m in matches:
+                yield m
 
-    def n_observations(self) -> int:
-        return sum(e.n_observations() for e in self.exposures)
-
-    def n_exposures(self) -> int:
-        return len(self.exposures)
+    def _check_frames(
+        self,
+        orbit: Orbit,
+        healpix: int,
+        obscode: str,
+        mjd: float,
+        tolerance: float,
+    ) -> Iterator[PrecoveryCandidate]:
+        """
+        Deeply inspect all frames that match the given obscode, mjd, and healpix to
+        see if they contain observations which match the ephemeris.
+        """
+        # Compute the position of the ephem carefully.
+        exact_ephem = orbit.compute_ephemeris(obscode, mjd)
+        frames = self.frames.idx.get_frames(obscode, mjd, healpix)
+        for f in frames:
+            for obs in self.frames.iterate_observations(f):
+                if obs.matches(exact_ephem, tolerance):
+                    candidate = PrecoveryCandidate(
+                        ra=obs.ra,
+                        dec=obs.dec,
+                        obscode=f.obscode,
+                        mjd=f.mjd,
+                        catalog_id=f.catalog_id,
+                        id=obs.id.decode(),
+                    )
+                    yield candidate

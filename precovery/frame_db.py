@@ -1,13 +1,16 @@
 import dataclasses
 import glob
+import itertools
 import os
 import struct
-from typing import Iterable, Iterator, List, Optional, Tuple
+from typing import Iterable, Iterator, Optional, Set, Tuple
 
 import sqlalchemy as sq
 from sqlalchemy.sql import func as sqlfunc
 
 from . import sourcecatalog
+from .orbit import Ephemeris
+from .spherical_geom import haversine_distance_deg
 
 
 @dataclasses.dataclass
@@ -25,9 +28,13 @@ class HealpixFrame:
 @dataclasses.dataclass
 class FrameBundleDescription:
     obscode: str
-    common_epoch: float
+    start_epoch: float
+    end_epoch: float
     healpixel: int
     n_frames: int
+
+    def epoch_midpoint(self) -> float:
+        return (self.start_epoch + self.end_epoch) / 2.0
 
 
 @dataclasses.dataclass
@@ -50,6 +57,11 @@ class Observation:
         """
         return cls(ra=so.ra, dec=so.dec, id=so.id)
 
+    def matches(self, ephem: Ephemeris, tolerance: float) -> bool:
+        return (
+            haversine_distance_deg(self.ra, ephem.ra, self.dec, ephem.dec) < tolerance
+        )
+
 
 class FrameIndex:
     def __init__(self, db_engine):
@@ -65,33 +77,58 @@ class FrameIndex:
     def close(self):
         self.dbconn.close()
 
-    def frame_bundles(
-        self, window_size_days: int
-    ) -> Iterator[Tuple[float, List[HealpixFrame]]]:
+    def propagation_targets(
+        self, bundle: FrameBundleDescription
+    ) -> Iterator[Tuple[float, Set[int]]]:
         """
-        Returns a generator which yields bundles of frames along with a time
-        (mjd float) which represents the central epoch for the bundle.
-
-        Each bundle of frames will be nearby in time. They will be within
-        window_size_days of each other.
+        Yields (mjd, {healpixels}) pairs for the FrameBundleDescription. mjd is a
+        float MJD epoch timestamp to propagate to, and {healpixels} is a set of
+        integer healpixel IDs.
         """
-        first, last = self.mjd_bounds()
-
-        window_start = first
-        window_center = first + window_size_days / 2
-        window_end = first + window_size_days
-
-        while window_start < last:
-            select_stmt = sq.select(self.frames).where(
-                self.frames.c.mjd >= window_start, self.frames.c.mjd < window_end
+        select_stmt = (
+            sq.select(
+                self.frames.c.mjd,
+                self.frames.c.healpixel,
             )
-            frames = self.dbconn.execute(select_stmt)
-            bundle = [HealpixFrame(*frame) for frame in frames]
-            yield (window_center, bundle)
+            .where(
+                self.frames.c.obscode == bundle.obscode,
+                self.frames.c.mjd >= bundle.start_epoch,
+                self.frames.c.mjd <= bundle.end_epoch,
+            )
+            .distinct()
+            .order_by(
+                self.frames.c.mjd.desc(),
+                self.frames.c.healpixel,
+            )
+        )
 
-            window_start += window_size_days
-            window_center += window_size_days
-            window_end += window_size_days
+        rows = self.dbconn.execute(select_stmt)
+        for mjd, group in itertools.groupby(rows, key=lambda pair: pair[0]):
+            healpixels = set(pixel for mjd, pixel in group)
+            yield (mjd, healpixels)
+
+    def get_frames(
+        self, obscode: str, mjd: float, healpixel: int
+    ) -> Iterator[HealpixFrame]:
+        pass
+
+    def frames_for_bundle(
+        self, bundle: FrameBundleDescription
+    ) -> Iterator[HealpixFrame]:
+        """
+        Yields frames which match a particular bundle.
+        """
+        select_stmt = (
+            sq.select(self.frames)
+            .where(
+                self.frames.c.mjd >= bundle.start_epoch,
+                self.frames.c.mjd <= bundle.end_epoch,
+            )
+            .order_by(self.frames.c.mjd.desc())
+        )
+        rows = self.dbconn.execute(select_stmt)
+        for row in rows:
+            yield HealpixFrame(*row)
 
     def mjd_bounds(self) -> Tuple[float, float]:
         """
@@ -104,12 +141,12 @@ class FrameIndex:
         first, last = self.dbconn.execute(select_stmt).fetchone()
         return first, last
 
-    def frame_bundle_epochs(
-        self, window_size_days: int
+    def frame_bundles(
+        self, window_size_days: int, mjd_start: float, mjd_end: float
     ) -> Iterator[FrameBundleDescription]:
         """
         Returns an iterator which yields descriptions of bundles of frames with
-        a common epoch.
+        a common epoch between start and end (inclusive).
         """
         first, _ = self.mjd_bounds()
         offset = -first + window_size_days / 2
@@ -118,19 +155,26 @@ class FrameIndex:
         #    (cast(mjd - first + (window_size_days / 2) as int) / windows_size_days)
         #     * window_size_days + first as common_epoch
         # from frames;
-        subq = sq.select(
-            self.frames.c.obscode,
-            self.frames.c.healpixel,
-            (
-                sq.cast(
-                    self.frames.c.mjd + offset,
-                    sq.Integer,
+        subq = (
+            sq.select(
+                self.frames.c.obscode,
+                self.frames.c.healpixel,
+                (
+                    sq.cast(
+                        self.frames.c.mjd + offset,
+                        sq.Integer,
+                    )
+                    / window_size_days
                 )
-                / window_size_days
+                * window_size_days
+                + first,
             )
-            * window_size_days
-            + first,
-        ).subquery()
+            .where(
+                self.frames.c.mjd >= mjd_start,
+                self.frames.c.mjd <= mjd_end,
+            )
+            .subquery()
+        )
         select_stmt = (
             sq.select(
                 subq.c.obscode,
@@ -143,10 +187,15 @@ class FrameIndex:
                 subq.c.common_epoch,
                 subq.c.healpixel,
             )
-            .order_by(subq.c.common_epoch)
+            .order_by(
+                subq.c.common_epoch.desc(),
+                subq.c.obscode,
+                subq.c.healpixel,
+            )
         )
 
         results = self.dbconn.execute(select_stmt)
+
         for row in results:
             yield FrameBundleDescription(*row)
 
@@ -203,13 +252,20 @@ class FrameIndex:
 
 
 class FrameDB:
-    def __init__(self, idx: FrameIndex, data_root: str, data_file_max_size=1e9):
+    def __init__(
+        self,
+        idx: FrameIndex,
+        data_root: str,
+        data_file_max_size=1e9,
+        healpix_nside: int = 32,
+    ):
         self.idx = idx
         self.data_root = data_root
         self.data_file_max_size = data_file_max_size
         self.data_files: dict = {}  # basename -> open file
         self._open_data_files()
         self.n_data_files = 0
+        self.healpix_nside = healpix_nside
 
     def close(self):
         self.idx.close()
@@ -217,7 +273,9 @@ class FrameDB:
             f.close()
 
     def load_hdf5(self, hdf5_file, limit):
-        for src_frame in sourcecatalog.iterate_frames(hdf5_file, limit):
+        for src_frame in sourcecatalog.iterate_frames(
+            hdf5_file, limit, nside=self.healpix_nside
+        ):
             observations = [Observation.from_srcobs(o) for o in src_frame.observations]
             data_uri, offset, length = self.store_observations(observations)
 
