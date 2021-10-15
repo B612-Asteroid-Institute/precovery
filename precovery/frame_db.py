@@ -272,7 +272,14 @@ class FrameDB:
         for f in self.data_files.values():
             f.close()
 
-    def load_hdf5(self, hdf5_file, limit):
+    def load_hdf5(self, hdf5_file: str, skip: int = 0, limit: Optional[int] = None):
+        """
+        Load data from an NSC HDF5 catalog file.
+
+        hdf5_file: Path to a file on disk.
+        skip: Number of frames to skip in the file.
+        limit: Maximum number of frames to load from the file. None means no limit.
+        """
         for src_frame in sourcecatalog.iterate_frames(
             hdf5_file, limit, nside=self.healpix_nside
         ):

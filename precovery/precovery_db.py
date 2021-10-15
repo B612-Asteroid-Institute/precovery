@@ -1,7 +1,8 @@
 import dataclasses
-from typing import Iterator, Optional
+import os.path
+from typing import Dict, Iterator, Optional
 
-from .frame_db import FrameBundleDescription, FrameDB
+from .frame_db import FrameBundleDescription, FrameDB, FrameIndex
 from .healpix_geom import radec_to_healpixel
 from .orbit import Orbit
 
@@ -25,6 +26,50 @@ class PrecoveryDatabase:
         self.frames = frames
         self.window_size = window_size
         self._exposures_by_obscode: dict = {}
+
+    @classmethod
+    def from_dir(cls, directory: str, create: bool = False):
+        if not os.path.exists(directory):
+            if create:
+                return cls.create(directory)
+
+        # todo: serialize config into file
+        config: Dict[str, int] = {
+            "healpix_nside": 32,
+            "data_file_max_size": int(1e9),
+            "window_size": 7,
+        }
+
+        frame_idx_db = "sqlite:///" + os.path.join(directory, "index.db")
+        frame_idx = FrameIndex.open(frame_idx_db)
+
+        data_path = os.path.join(directory, "data")
+        frame_db = FrameDB(
+            frame_idx, data_path, config["data_file_max_size"], config["healpix_nside"]
+        )
+        return cls(frame_db, config["window_size"])
+
+    @classmethod
+    def create(
+        cls,
+        directory: str,
+        healpix_nside: int = 32,
+        data_file_max_size: int = int(1e9),
+        window_size: int = 7,
+    ):
+        """
+        Create a new database on disk in the given directory.
+        """
+        os.makedirs(directory)
+
+        frame_idx_db = "sqlite:///" + os.path.join(directory, "index.db")
+        frame_idx = FrameIndex.open(frame_idx_db)
+
+        data_path = os.path.join(directory, "data")
+        os.makedirs(data_path)
+
+        frame_db = FrameDB(frame_idx, data_path, data_file_max_size, healpix_nside)
+        return cls(frame_db, window_size)
 
     def precover(
         self,

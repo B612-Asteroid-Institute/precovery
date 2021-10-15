@@ -35,9 +35,12 @@ class SourceFrame:
 
 
 def iterate_frames(
-    filename: str, limit: Optional[int] = None, nside: int = 32
+    filename: str,
+    limit: Optional[int] = None,
+    nside: int = 32,
+    skip: int = 0,
 ) -> Iterator[SourceFrame]:
-    for exp in iterate_exposures(filename, limit):
+    for exp in iterate_exposures(filename, limit, skip):
         for frame in source_exposure_to_frames(exp, nside):
             yield frame
 
@@ -62,7 +65,7 @@ def source_exposure_to_frames(
     return list(by_pixel.values())
 
 
-def iterate_exposures(filename, limit: Optional[int] = None):
+def iterate_exposures(filename, limit: Optional[int] = None, skip: int = 0):
     current_exposure: Optional[SourceExposure] = None
     n = 0
     for obs in iterate_observations(filename):
@@ -79,8 +82,11 @@ def iterate_exposures(filename, limit: Optional[int] = None):
             current_exposure.observations.append(obs)
         else:
             # New exposure
-            yield current_exposure
-            n += 1
+            if skip > 0:
+                skip -= 1
+            else:
+                yield current_exposure
+                n += 1
             if limit is not None and n >= limit:
                 return
             current_exposure = SourceExposure(
