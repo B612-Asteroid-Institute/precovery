@@ -7,8 +7,8 @@ def parse_args():
     parser = argparse.ArgumentParser(
         "precoverydb-load-hdf", "populate a precoverydb with data from NSC hdf5 files"
     )
-    parser.add_argument("db-dir", help="Directory holding the database")
-    parser.add_argument("data-file", help="Data file holding data to load")
+    parser.add_argument("db_dir", help="Directory holding the database")
+    parser.add_argument("data_file", help="Data file holding data to load")
     parser.add_argument(
         "--skip",
         type=int,
@@ -31,11 +31,12 @@ def parse_args():
 
 def main():
     args = parse_args()
+    print(args)
     db = PrecoveryDatabase.from_dir(args.db_dir, args.create)
     if args.max == -1:
         limit = None
     else:
-        limit == args.max
+        limit = args.max
     db.frames.load_hdf5(args.data_file, skip=args.skip, limit=limit)
 
 

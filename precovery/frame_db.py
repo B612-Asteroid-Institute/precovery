@@ -6,6 +6,7 @@ import struct
 from typing import Iterable, Iterator, Optional, Set, Tuple
 
 import sqlalchemy as sq
+from rich.progress import BarColumn, Progress, TimeElapsedColumn, TimeRemainingColumn
 from sqlalchemy.sql import func as sqlfunc
 
 from . import sourcecatalog
@@ -111,6 +112,32 @@ class FrameIndex:
         self, obscode: str, mjd: float, healpixel: int
     ) -> Iterator[HealpixFrame]:
         pass
+
+    def n_frames(self) -> int:
+        select_stmt = sq.select(sqlfunc.count(self.frames.c.id))
+        row = self.dbconn.execute(select_stmt).fetchone()
+        return row[0]
+
+    def n_bytes(self) -> int:
+        select_stmt = sq.select(sqlfunc.sum(self.frames.c.data_length))
+        row = self.dbconn.execute(select_stmt).fetchone()
+        return row[0]
+
+    def n_unique_frames(self) -> int:
+        """
+        Count the number of unique (obscode, mjd, healpixel) triples in the index.
+
+        This is not the same as the number of total frames, because those
+        triples might have multiple data URIs and offsets.
+        """
+        subq = (
+            sq.select(self.frames.c.obscode, self.frames.c.mjd, self.frames.c.healpixel)
+            .distinct()
+            .subquery()
+        )
+        stmt = sq.select(sqlfunc.count(subq.c.obscode))
+        row = self.dbconn.execute(stmt).fetchone()
+        return row[0]
 
     def frames_for_bundle(
         self, bundle: FrameBundleDescription
@@ -281,7 +308,10 @@ class FrameDB:
         limit: Maximum number of frames to load from the file. None means no limit.
         """
         for src_frame in sourcecatalog.iterate_frames(
-            hdf5_file, limit, nside=self.healpix_nside
+            hdf5_file,
+            limit,
+            nside=self.healpix_nside,
+            skip=skip,
         ):
             observations = [Observation.from_srcobs(o) for o in src_frame.observations]
             data_uri, offset, length = self.store_observations(observations)
@@ -381,46 +411,76 @@ class FrameDB:
         observations = []
         last_catalog_id = ""
 
-        for frame in self.idx.all_frames():
-            if cur_key[0] == "":
-                # First iteration
-                observations = list(self.iterate_observations(frame))
-                cur_key = (frame.obscode, frame.mjd, frame.healpixel)
+        n_bytes = self.idx.n_bytes()
+        with Progress(
+            "[progress.description]{task.description}",
+            BarColumn(),
+            "[progress.percentage]{task.completed} / {task.total}  {task.percentage:>3.0f}%",
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+        ) as progress:
+            read_frames = progress.add_task(
+                "loading frames...",
+                total=self.idx.n_frames(),
+            )
+            written_frames = progress.add_task(
+                "writing frames...",
+                total=self.idx.n_unique_frames(),
+            )
+            bytes_scanned = progress.add_task(
+                "reading bytes...",
+                total=n_bytes,
+            )
+            bytes_migrated = progress.add_task(
+                "migrating bytes...",
+                total=n_bytes,
+            )
+            for frame in self.idx.all_frames():
+                if cur_key[0] == "":
+                    # First iteration
+                    observations = list(self.iterate_observations(frame))
+                    cur_key = (frame.obscode, frame.mjd, frame.healpixel)
+                    last_catalog_id = frame.catalog_id
+                elif (frame.obscode, frame.mjd, frame.healpixel) == cur_key:
+                    # Extending existing frame
+                    observations.extend(self.iterate_observations(frame))
+
+                else:
+                    # On to the next key. Flush what we have and reset.
+                    data_uri, offset, length = new_db.store_observations(observations)
+                    new_frame = HealpixFrame(
+                        id=None,
+                        obscode=cur_key[0],
+                        mjd=cur_key[1],
+                        healpixel=cur_key[2],
+                        catalog_id=last_catalog_id,
+                        data_uri=data_uri,
+                        data_offset=offset,
+                        data_length=length,
+                    )
+                    new_db.idx.add_frame(new_frame)
+
+                    observations = list(self.iterate_observations(frame))
+                    cur_key = (frame.obscode, frame.mjd, frame.healpixel)
+                    progress.update(written_frames, advance=1)
+                    progress.update(bytes_migrated, advance=length)
+
                 last_catalog_id = frame.catalog_id
+                progress.update(bytes_scanned, advance=frame.data_length)
+                progress.update(read_frames, advance=1)
 
-            elif (frame.obscode, frame.mjd, frame.healpixel) == cur_key:
-                # Extending existing frame
-                observations.extend(self.iterate_observations(frame))
-
-            else:
-                # On to the next key. Flush what we have and reset.
-                data_uri, offset, length = new_db.store_observations(observations)
-                new_frame = HealpixFrame(
-                    id=None,
-                    obscode=cur_key[0],
-                    mjd=cur_key[1],
-                    healpixel=cur_key[2],
-                    catalog_id=last_catalog_id,
-                    data_uri=data_uri,
-                    data_offset=offset,
-                    data_length=length,
-                )
-                new_db.idx.add_frame(new_frame)
-
-                observations = list(self.iterate_observations(frame))
-                cur_key = (frame.obscode, frame.mjd, frame.healpixel)
-            last_catalog_id = frame.catalog_id
-
-        # Last frame was unflushed, so do that now.
-        data_uri, offset, length = new_db.store_observations(observations)
-        frame = HealpixFrame(
-            id=None,
-            obscode=cur_key[0],
-            mjd=cur_key[1],
-            healpixel=cur_key[2],
-            catalog_id=last_catalog_id,
-            data_uri=data_uri,
-            data_offset=offset,
-            data_length=length,
-        )
-        new_db.idx.add_frame(frame)
+            # Last frame was unflushed, so do that now.
+            data_uri, offset, length = new_db.store_observations(observations)
+            frame = HealpixFrame(
+                id=None,
+                obscode=cur_key[0],
+                mjd=cur_key[1],
+                healpixel=cur_key[2],
+                catalog_id=last_catalog_id,
+                data_uri=data_uri,
+                data_offset=offset,
+                data_length=length,
+            )
+            new_db.idx.add_frame(frame)
+            progress.update(written_frames, advance=1)
+            progress.update(bytes_migrated, advance=length)
