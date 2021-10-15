@@ -1,14 +1,18 @@
 import dataclasses
+import logging
 import os.path
 from typing import Dict, Iterator, Optional
 
-from .frame_db import FrameBundleDescription, FrameDB, FrameIndex
+from .frame_db import FrameDB, FrameIndex
 from .healpix_geom import radec_to_healpixel
 from .orbit import Orbit
 
 DEGREE = 1.0
 ARCMIN = DEGREE / 60
 ARCSEC = ARCMIN / 60
+
+logging.basicConfig()
+logger = logging.getLogger("precovery")
 
 
 @dataclasses.dataclass
@@ -94,6 +98,19 @@ class PrecoveryDatabase:
         end_mjd: Only consider observations from before this epoch (inclusive).
         If None, find all.
         """
+        # basically:
+        """
+        find all windows between start and end of given size
+        for each window:
+            propagate to window center
+            for each unique epoch,obscode in window:
+                propagate to epoch
+                find frames which match healpix of propagation
+                for each matching frame
+                    find matching observations
+                    for each matching observation
+                        yield match
+        """
         if start_mjd is None or end_mjd is None:
             first, last = self.frames.idx.mjd_bounds()
             if start_mjd is None:
@@ -102,42 +119,56 @@ class PrecoveryDatabase:
                 end_mjd = last
 
         n = 0
-        bundles = self.frames.idx.frame_bundles(self.window_size, start_mjd, end_mjd)
-        for bundle in bundles:
-            matches = self._check_bundle(bundle, orbit, tolerance)
+
+        windows = self.frames.idx.window_centers(start_mjd, end_mjd, self.window_size)
+        for mjd, obscode in windows:
+            matches = self._check_window(mjd, obscode, orbit, tolerance)
             for result in matches:
                 yield result
                 n += 1
                 if max_matches is not None and n >= max_matches:
                     return
 
-    def _check_bundle(
-        self, bundle: FrameBundleDescription, orbit: Orbit, tolerance: float
+    def _check_window(
+        self, window_midpoint: float, obscode: str, orbit: Orbit, tolerance: float
     ):
         """
-        Find all observations that match orbit within a single FrameBundle.
+        Find all observations that match orbit within a single window
         """
-        bundle_epoch = bundle.epoch_midpoint()
-        bundle_ephem = orbit.compute_ephemeris(bundle.obscode, bundle_epoch)
+        logger.info("checking window %.2f in obs=%s", window_midpoint, obscode)
+        window_ephem = orbit.compute_ephemeris(obscode, window_midpoint)
+        logger.info("propagated window midpoint to %s", window_ephem)
 
-        for mjd, healpixels in self.frames.idx.propagation_targets(bundle):
-            timedelta = mjd - bundle_epoch
-            approx_ra, approx_dec = bundle_ephem.approximately_propagate(
-                bundle.obscode,
+        start_mjd = window_midpoint - (self.window_size / 2)
+        end_mjd = window_midpoint + (self.window_size / 2)
+        for mjd, healpixels in self.frames.idx.propagation_targets(
+            start_mjd, end_mjd, obscode
+        ):
+            logger.info(
+                "propagating to %.6f for %s (healpixels: %r)", mjd, obscode, healpixels
+            )
+            timedelta = mjd - window_midpoint
+            approx_ra, approx_dec = window_ephem.approximately_propagate(
+                obscode,
                 orbit,
                 timedelta,
             )
             approx_healpix = radec_to_healpixel(
                 approx_ra, approx_dec, self.frames.healpix_nside
             )
+            logger.info(
+                "approx ra: %.3f\tdec: %.3f\thealpix: %d",
+                approx_ra,
+                approx_dec,
+                approx_healpix,
+            )
 
             if approx_healpix not in healpixels:
                 # No exposures anywhere near the ephem, so move on.
+                logger.info("no matching exposures, skip")
                 continue
 
-            matches = self._check_frames(
-                orbit, approx_healpix, bundle.obscode, mjd, tolerance
-            )
+            matches = self._check_frames(orbit, approx_healpix, obscode, mjd, tolerance)
             for m in matches:
                 yield m
 
@@ -157,7 +188,10 @@ class PrecoveryDatabase:
         exact_ephem = orbit.compute_ephemeris(obscode, mjd)
         frames = self.frames.idx.get_frames(obscode, mjd, healpix)
         for f in frames:
+            logger.info("checking frame: %s", f)
+            n = 0
             for obs in self.frames.iterate_observations(f):
+                n += 1
                 if obs.matches(exact_ephem, tolerance):
                     candidate = PrecoveryCandidate(
                         ra=obs.ra,
@@ -168,3 +202,4 @@ class PrecoveryDatabase:
                         id=obs.id.decode(),
                     )
                     yield candidate
+            logger.info("checked %d observations in frame", n)

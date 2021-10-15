@@ -195,6 +195,9 @@ class Ephemeris:
         self.ra_velocity = raw_data[3]  # deg per day
         self.dec_velocity = raw_data[4]  # deg per day
 
+    def __str__(self):
+        return f"<Ephemeris ra={self.ra:.4f} dec={self.dec:.4f} mjd={self.mjd:.6f}>"
+
     def approximately_propagate(
         self, obscode: str, orbit: Orbit, timedelta: float
     ) -> Tuple[float, float]:

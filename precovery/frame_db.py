@@ -1,6 +1,7 @@
 import dataclasses
 import glob
 import itertools
+import logging
 import os
 import struct
 from typing import Iterable, Iterator, Optional, Set, Tuple
@@ -12,6 +13,8 @@ from sqlalchemy.sql import func as sqlfunc
 from . import sourcecatalog
 from .orbit import Ephemeris
 from .spherical_geom import haversine_distance_deg
+
+logger = logging.getLogger("frame_db")
 
 
 @dataclasses.dataclass
@@ -32,6 +35,16 @@ class FrameBundleDescription:
     start_epoch: float
     end_epoch: float
     healpixel: int
+    n_frames: int
+
+    def epoch_midpoint(self) -> float:
+        return (self.start_epoch + self.end_epoch) / 2.0
+
+
+@dataclasses.dataclass
+class FrameWindow:
+    start_epoch: float
+    end_epoch: float
     n_frames: int
 
     def epoch_midpoint(self) -> float:
@@ -78,13 +91,53 @@ class FrameIndex:
     def close(self):
         self.dbconn.close()
 
+    def window_centers(
+        self, start_mjd: float, end_mjd: float, window_size_days: int
+    ) -> Iterator[Tuple[float, str]]:
+        """
+        Return the midpoint and obscode of all time windows with data in them.
+        """
+        offset = -start_mjd + window_size_days / 2
+
+        # select distinct
+        #     (cast(mjd - first + (window_size_days / 2) as int) / windows_size_days)
+        #     * window_size_days + first as common_epoch
+        # from frames;
+        stmt = (
+            sq.select(
+                (
+                    (
+                        sq.cast(
+                            self.frames.c.mjd + offset,
+                            sq.Integer,
+                        )
+                        / window_size_days
+                    )
+                    * window_size_days
+                    + start_mjd
+                ).label("common_epoch"),
+                self.frames.c.obscode,
+            )
+            .distinct()
+            .where(
+                self.frames.c.mjd >= start_mjd,
+                self.frames.c.mjd <= end_mjd,
+            )
+            .order_by("common_epoch")
+        )
+        rows = self.dbconn.execute(stmt)
+        for mjd, obscode in rows:
+            yield (mjd, obscode)
+
     def propagation_targets(
-        self, bundle: FrameBundleDescription
+        self, start_mjd: float, end_mjd: float, obscode: str
     ) -> Iterator[Tuple[float, Set[int]]]:
         """
-        Yields (mjd, {healpixels}) pairs for the FrameBundleDescription. mjd is a
-        float MJD epoch timestamp to propagate to, and {healpixels} is a set of
-        integer healpixel IDs.
+        Yields (mjd, {healpixels}) pairs for the given obscode in the given range
+        of MJDs.
+
+        The yielded mjd is a float MJD epoch timestamp to propagate to, and
+        {healpixels} is a set of integer healpixel IDs.
         """
         select_stmt = (
             sq.select(
@@ -92,9 +145,9 @@ class FrameIndex:
                 self.frames.c.healpixel,
             )
             .where(
-                self.frames.c.obscode == bundle.obscode,
-                self.frames.c.mjd >= bundle.start_epoch,
-                self.frames.c.mjd <= bundle.end_epoch,
+                self.frames.c.obscode == obscode,
+                self.frames.c.mjd >= start_mjd,
+                self.frames.c.mjd <= end_mjd,
             )
             .distinct()
             .order_by(
@@ -186,15 +239,18 @@ class FrameIndex:
             sq.select(
                 self.frames.c.obscode,
                 self.frames.c.healpixel,
+                self.frames.c.mjd,
                 (
-                    sq.cast(
-                        self.frames.c.mjd + offset,
-                        sq.Integer,
+                    (
+                        sq.cast(
+                            self.frames.c.mjd + offset,
+                            sq.Integer,
+                        )
+                        / window_size_days
                     )
-                    / window_size_days
-                )
-                * window_size_days
-                + first,
+                    * window_size_days
+                    + first
+                ).label("common_epoch"),
             )
             .where(
                 self.frames.c.mjd >= mjd_start,
@@ -204,8 +260,10 @@ class FrameIndex:
         )
         select_stmt = (
             sq.select(
-                subq.c.obscode,
                 subq.c.common_epoch,
+                subq.c.obscode,
+                sqlfunc.min(subq.c.mjd).label("start_epoch"),
+                sqlfunc.max(subq.c.mjd).label("end_epoch"),
                 subq.c.healpixel,
                 sqlfunc.count(1).label("n_frames"),
             )
@@ -220,7 +278,7 @@ class FrameIndex:
                 subq.c.healpixel,
             )
         )
-
+        logger.debug("executing query: %s", select_stmt)
         results = self.dbconn.execute(select_stmt)
 
         for row in results:
