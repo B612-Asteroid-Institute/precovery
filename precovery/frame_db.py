@@ -72,9 +72,17 @@ class Observation:
         return cls(ra=so.ra, dec=so.dec, id=so.id)
 
     def matches(self, ephem: Ephemeris, tolerance: float) -> bool:
-        return (
-            haversine_distance_deg(self.ra, ephem.ra, self.dec, ephem.dec) < tolerance
+        distance = haversine_distance_deg(self.ra, ephem.ra, self.dec, ephem.dec)
+        logger.debug(
+            "%.4f, %.4f -> %.4f, %.4f = %.6f\t(tol=%.6f)",
+            self.ra,
+            self.dec,
+            ephem.ra,
+            ephem.dec,
+            distance,
+            tolerance,
         )
+        return distance < tolerance
 
 
 class FrameIndex:
@@ -164,7 +172,27 @@ class FrameIndex:
     def get_frames(
         self, obscode: str, mjd: float, healpixel: int
     ) -> Iterator[HealpixFrame]:
-        pass
+        """
+        Yield all the frames which are for given obscode, MJD, healpix.
+        """
+        select_stmt = sq.select(
+            self.frames.c.id,
+            self.frames.c.obscode,
+            self.frames.c.catalog_id,
+            self.frames.c.mjd,
+            self.frames.c.healpixel,
+            self.frames.c.data_uri,
+            self.frames.c.data_offset,
+            self.frames.c.data_length,
+        ).where(
+            self.frames.c.obscode == obscode,
+            self.frames.c.healpixel == int(healpixel),
+            self.frames.c.mjd >= mjd - 0.001,
+            self.frames.c.mjd <= mjd + 0.001,
+        )
+        rows = self.dbconn.execute(select_stmt)
+        for r in rows:
+            yield HealpixFrame(*r)
 
     def n_frames(self) -> int:
         select_stmt = sq.select(sqlfunc.count(self.frames.c.id))

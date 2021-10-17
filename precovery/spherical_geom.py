@@ -70,9 +70,9 @@ def haversine_distance(ra1: float, ra2: float, dec1: float, dec2: float) -> floa
     Computes the great-circle distance between two points on a sphere, using
     the RA and Dec coordinate system (in radians).
     """
-    s1 = np.sin((ra1 - dec1) / 2)
-    s2 = np.sin((ra2 - dec2) / 2)
-    val = 2 * np.arcsin(np.sqrt(s1 * s1 + np.cos(ra1) * np.cos(dec1) * s2 * s2))
+    s1 = np.sin((dec2 - dec1) / 2)
+    s2 = np.sin((ra2 - ra1) / 2)
+    val = 2 * np.arcsin(np.sqrt(s1 * s1 + np.cos(dec1) * np.cos(dec2) * s2 * s2))
     return val
 
 

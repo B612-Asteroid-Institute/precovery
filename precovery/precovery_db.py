@@ -78,7 +78,7 @@ class PrecoveryDatabase:
     def precover(
         self,
         orbit: Orbit,
-        tolerance: float = 1.0 * ARCSEC,
+        tolerance: float = 30 * ARCSEC,
         max_matches: Optional[int] = None,
         start_mjd: Optional[float] = None,
         end_mjd: Optional[float] = None,
@@ -119,7 +119,13 @@ class PrecoveryDatabase:
                 end_mjd = last
 
         n = 0
-
+        logger.info(
+            "precovering orbit %s from %f.6f to %f.5f, window=%d",
+            orbit.orbit_id,
+            start_mjd,
+            end_mjd,
+            self.window_size,
+        )
         windows = self.frames.idx.window_centers(start_mjd, end_mjd, self.window_size)
         for mjd, obscode in windows:
             matches = self._check_window(mjd, obscode, orbit, tolerance)
@@ -135,16 +141,23 @@ class PrecoveryDatabase:
         """
         Find all observations that match orbit within a single window
         """
-        logger.info("checking window %.2f in obs=%s", window_midpoint, obscode)
+        logger.debug("checking window %.2f in obs=%s", window_midpoint, obscode)
         window_ephem = orbit.compute_ephemeris(obscode, window_midpoint)
-        logger.info("propagated window midpoint to %s", window_ephem)
+        window_healpixel = radec_to_healpixel(
+            window_ephem.ra, window_ephem.dec, self.frames.healpix_nside
+        )
+        logger.debug(
+            "propagated window midpoint to %s (healpixel: %d)",
+            window_ephem,
+            window_healpixel,
+        )
 
         start_mjd = window_midpoint - (self.window_size / 2)
         end_mjd = window_midpoint + (self.window_size / 2)
         for mjd, healpixels in self.frames.idx.propagation_targets(
             start_mjd, end_mjd, obscode
         ):
-            logger.info(
+            logger.debug(
                 "propagating to %.6f for %s (healpixels: %r)", mjd, obscode, healpixels
             )
             timedelta = mjd - window_midpoint
@@ -153,10 +166,10 @@ class PrecoveryDatabase:
                 orbit,
                 timedelta,
             )
-            approx_healpix = radec_to_healpixel(
-                approx_ra, approx_dec, self.frames.healpix_nside
+            approx_healpix = int(
+                radec_to_healpixel(approx_ra, approx_dec, self.frames.healpix_nside)
             )
-            logger.info(
+            logger.debug(
                 "approx ra: %.3f\tdec: %.3f\thealpix: %d",
                 approx_ra,
                 approx_dec,
@@ -165,7 +178,7 @@ class PrecoveryDatabase:
 
             if approx_healpix not in healpixels:
                 # No exposures anywhere near the ephem, so move on.
-                logger.info("no matching exposures, skip")
+                logger.debug("no matching exposures, skip")
                 continue
 
             matches = self._check_frames(orbit, approx_healpix, obscode, mjd, tolerance)
@@ -187,6 +200,10 @@ class PrecoveryDatabase:
         # Compute the position of the ephem carefully.
         exact_ephem = orbit.compute_ephemeris(obscode, mjd)
         frames = self.frames.idx.get_frames(obscode, mjd, healpix)
+        logger.info(
+            "checking frames for healpix=%d obscode=%s mjd=%f", healpix, obscode, mjd
+        )
+        n_frame = 0
         for f in frames:
             logger.info("checking frame: %s", f)
             n = 0
@@ -203,3 +220,5 @@ class PrecoveryDatabase:
                     )
                     yield candidate
             logger.info("checked %d observations in frame", n)
+            n_frame += 1
+        logger.info("checked %d frames", n_frame)
