@@ -157,9 +157,7 @@ class PrecoveryDatabase:
         for mjd, healpixels in self.frames.idx.propagation_targets(
             start_mjd, end_mjd, obscode
         ):
-            logger.debug(
-                "propagating to %.6f for %s (healpixels: %r)", mjd, obscode, healpixels
-            )
+            logger.debug("mjd=%.6f:\thealpixels with data: %r", mjd, healpixels)
             timedelta = mjd - window_midpoint
             approx_ra, approx_dec = window_ephem.approximately_propagate(
                 obscode,
@@ -170,7 +168,8 @@ class PrecoveryDatabase:
                 radec_to_healpixel(approx_ra, approx_dec, self.frames.healpix_nside)
             )
             logger.debug(
-                "approx ra: %.3f\tdec: %.3f\thealpix: %d",
+                "mjd=%.6f:\tephemeris at ra=%.3f\tdec=%.3f\thealpix=%d",
+                mjd,
                 approx_ra,
                 approx_dec,
                 approx_healpix,
@@ -178,9 +177,8 @@ class PrecoveryDatabase:
 
             if approx_healpix not in healpixels:
                 # No exposures anywhere near the ephem, so move on.
-                logger.debug("no matching exposures, skip")
                 continue
-
+            logger.debug("mjd=%.6f: healpixel collision, checking frames", mjd)
             matches = self._check_frames(orbit, approx_healpix, obscode, mjd, tolerance)
             for m in matches:
                 yield m
