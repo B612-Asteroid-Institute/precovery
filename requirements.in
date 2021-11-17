@@ -1,5 +1,5 @@
-numpy
-numba
+numpy>=1.21
+numba==0.53.1
 sqlalchemy
 rich
 tables
