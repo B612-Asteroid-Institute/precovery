@@ -39,8 +39,10 @@ def iterate_frames(
     limit: Optional[int] = None,
     nside: int = 32,
     skip: int = 0,
+    key: str = "data",
+    chunksize: int = 100000
 ) -> Iterator[SourceFrame]:
-    for exp in iterate_exposures(filename, limit, skip):
+    for exp in iterate_exposures(filename, limit, skip, key, chunksize):
         for frame in source_exposure_to_frames(exp, nside):
             yield frame
 
@@ -65,10 +67,17 @@ def source_exposure_to_frames(
     return list(by_pixel.values())
 
 
-def iterate_exposures(filename, limit: Optional[int] = None, skip: int = 0):
+def iterate_exposures(
+        filename,
+        limit:
+        Optional[int] = None,
+        skip: int = 0,
+        key: str = "data",
+        chunksize: int = 100000
+    ):
     current_exposure: Optional[SourceExposure] = None
     n = 0
-    for obs in iterate_observations(filename):
+    for obs in iterate_observations(filename, key=key, chunksize=chunksize):
         if current_exposure is None:
             # first iteration
             current_exposure = SourceExposure(
