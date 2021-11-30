@@ -1,7 +1,7 @@
 import dataclasses
 from typing import Dict, Iterator, List, Optional
 
-import tables
+import pandas as pd
 from rich.progress import BarColumn, Progress, TimeElapsedColumn, TimeRemainingColumn
 
 from . import healpix_geom
@@ -98,27 +98,12 @@ def iterate_exposures(filename, limit: Optional[int] = None, skip: int = 0):
     yield current_exposure
 
 
-def iterate_observations(filename: str) -> Iterator[SourceObservation]:
-    with tables.open_file(filename, mode="r") as f:
-        table = f.get_node("/data/table")
+def iterate_observations(filename: str, key="data", chunksize=10000) -> Iterator[SourceObservation]:
 
-        expected_format = [
-            "class_star",
-            "dec",
-            "decerr",
-            "deltamjd",
-            "mag_auto",
-            "magerr_auto",
-            "mean_dec",
-            "mean_mjd",
-            "mean_ra",
-            "mjd",
-            "ra",
-            "raerr",
-        ]
-        assert table.attrs["values_block_0_kind"] == expected_format
+    with pd.HDFStore(filename, key=key, mode="r") as store:
 
-        n_rows = table.nrows
+        n_rows = store.get_storer(key).nrows
+
         with Progress(
             "[progress.description]{task.description}",
             BarColumn(),
@@ -129,18 +114,19 @@ def iterate_observations(filename: str) -> Iterator[SourceObservation]:
             read_observations = progress.add_task(
                 "loading observations...", total=n_rows
             )
-            for row in table.iterrows():
-                exposure_id = row["exposure"]
-                obscode = _obscode_from_exposure_id(exposure_id)
-                id = row["id"]
-                dec = row["values_block_0"][1]
-                ra = row["values_block_0"][10]
+            for chunk in pd.read_hdf(store, key=key, iterator=True, chunksize=chunksize):
+                for i, row in chunk.iterrows():
 
-                epoch = row["values_block_0"][9]
+                    exposure_id = row.exposure_id
+                    obscode = _obscode_from_exposure_id(exposure_id)
+                    id = row.obs_id.encode()
+                    dec = row.dec
+                    ra = row.ra
+                    epoch = row.mjd_utc
 
-                obs = SourceObservation(exposure_id, obscode, id, ra, dec, epoch)
-                yield (obs)
-                progress.update(read_observations, advance=1)
+                    obs = SourceObservation(exposure_id, obscode, id, ra, dec, epoch)
+                    yield (obs)
+                    progress.update(read_observations, advance=1)
 
 
 def _obscode_from_exposure_id(exposure_id: bytes) -> str:
