@@ -113,7 +113,7 @@ class Orbit:
                     ascending_node_longitude_deg,
                     periapsis_argument_deg,
                     mean_anomaly_deg,
-                    OrbitElementType.COMETARY.value,
+                    OrbitElementType.KEPLERIAN.value,
                     osculating_element_epoch_mjd,
                     epoch_timescale.value,
                     abs_magnitude,
