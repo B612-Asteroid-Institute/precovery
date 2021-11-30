@@ -120,19 +120,24 @@ def iterate_observations(filename: str, key="data", chunksize=100000) -> Iterato
                 chunksize=chunksize,
                 columns=["obs_id", "exposure_id", "mjd_utc", "ra", "dec"]
             ):
-                for i, row in chunk.iterrows():
+                exposure_ids = chunk.exposure_id.values
+                ids = chunk.obs_id.values
+                decs = chunk.dec.values
+                ras = chunk.ra.values
+                epochs = chunk.mjd_utc.values
 
-                    exposure_id = row.exposure_id
-                    obscode = _obscode_from_exposure_id(exposure_id)
-                    id = row.obs_id.encode()
-                    dec = row.dec
-                    ra = row.ra
-                    epoch = row.mjd_utc
+                for exposure_id, id, ra, dec, epoch in zip(
+                    exposure_ids,
+                    ids,
+                    ras,
+                    decs,
+                    epochs
+                ):
+                    obscode = _obscode_from_exposure_id(exposure_id.encode())
 
-                    obs = SourceObservation(exposure_id, obscode, id, ra, dec, epoch)
+                    obs = SourceObservation(exposure_id, obscode, id.encode(), ra, dec, epoch)
                     yield (obs)
                     progress.update(read_observations, advance=1)
-
 
 def _obscode_from_exposure_id(exposure_id: bytes) -> str:
     # The table has no explicit information on which instrument sourced the
