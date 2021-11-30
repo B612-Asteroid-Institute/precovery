@@ -114,8 +114,7 @@ def iterate_observations(filename: str, key="data", chunksize=100000) -> Iterato
             read_observations = progress.add_task(
                 "loading observations...", total=n_rows
             )
-            for chunk in pd.read_hdf(
-                store,
+            for chunk in store.select(
                 key=key,
                 iterator=True,
                 chunksize=chunksize,
