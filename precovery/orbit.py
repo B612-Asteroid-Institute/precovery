@@ -97,7 +97,6 @@ class Orbit:
         ascending_node_longitude_deg: float,
         periapsis_argument_deg: float,
         mean_anomaly_deg: float,
-        _,
         osculating_element_epoch_mjd: float,
         epoch_timescale: EpochTimescale,
         abs_magnitude: float,
@@ -113,7 +112,45 @@ class Orbit:
                     ascending_node_longitude_deg,
                     periapsis_argument_deg,
                     mean_anomaly_deg,
-                    OrbitElementType.COMETARY.value,
+                    OrbitElementType.KEPLERIAN.value,
+                    osculating_element_epoch_mjd,
+                    epoch_timescale.value,
+                    abs_magnitude,
+                    photometric_slope_parameter,
+                ]
+            ],
+            dtype=np.double,
+            order="F",
+        )
+
+        return cls(orbit_id, state_vector)
+
+    @classmethod
+    def cartesian(
+        cls,
+        orbit_id: int,
+        x: float,
+        y: float,
+        z: float,
+        vx: float,
+        vy: float,
+        vz: float,
+        osculating_element_epoch_mjd: float,
+        epoch_timescale: EpochTimescale,
+        abs_magnitude: float,
+        photometric_slope_parameter: float,
+    ):
+        state_vector = np.array(
+            [
+                [
+                    orbit_id,
+                    x,
+                    y,
+                    z,
+                    vx,
+                    vy,
+                    vz,
+                    OrbitElementType.CARTESIAN.value,
                     osculating_element_epoch_mjd,
                     epoch_timescale.value,
                     abs_magnitude,
