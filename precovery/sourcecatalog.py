@@ -98,7 +98,7 @@ def iterate_exposures(filename, limit: Optional[int] = None, skip: int = 0):
     yield current_exposure
 
 
-def iterate_observations(filename: str, key="data", chunksize=10000) -> Iterator[SourceObservation]:
+def iterate_observations(filename: str, key="data", chunksize=100000) -> Iterator[SourceObservation]:
 
     with pd.HDFStore(filename, key=key, mode="r") as store:
 
@@ -114,7 +114,13 @@ def iterate_observations(filename: str, key="data", chunksize=10000) -> Iterator
             read_observations = progress.add_task(
                 "loading observations...", total=n_rows
             )
-            for chunk in pd.read_hdf(store, key=key, iterator=True, chunksize=chunksize):
+            for chunk in pd.read_hdf(
+                store,
+                key=key,
+                iterator=True,
+                chunksize=chunksize,
+                columns=["obs_id", "exposure_id", "mjd_utc", "ra", "dec"]
+            ):
                 for i, row in chunk.iterrows():
 
                     exposure_id = row.exposure_id
