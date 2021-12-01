@@ -142,16 +142,16 @@ def iterate_observations(filename: str, key="data", chunksize=100000) -> Iterato
                     decs,
                     epochs
                 ):
-                    obscode = _obscode_from_exposure_id(exposure_id.encode())
+                    obscode = _obscode_from_exposure_id(exposure_id)
 
                     obs = SourceObservation(exposure_id, obscode, id.encode(), ra, dec, epoch)
                     yield (obs)
                     progress.update(read_observations, advance=1)
 
-def _obscode_from_exposure_id(exposure_id: bytes) -> str:
+def _obscode_from_exposure_id(exposure_id: str) -> str:
     # The table has no explicit information on which instrument sourced the
     # exposure. We have to glean it out of the exposure ID.
-    exp_prefix = exposure_id[:3].decode()
+    exp_prefix = exposure_id[:3]
     if exp_prefix == "c4d":
         # The CTIO-4m with DECam.
         return "807"
@@ -163,5 +163,5 @@ def _obscode_from_exposure_id(exposure_id: bytes) -> str:
         return "695"
     else:
         raise ValueError(
-            f"can't determine instrument for exposure {exposure_id.decode()}"
+            f"can't determine instrument for exposure {exposure_id}"
         )
