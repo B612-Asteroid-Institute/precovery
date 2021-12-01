@@ -1,7 +1,7 @@
 import dataclasses
 from typing import Dict, Iterator, List, Optional
 
-import tables
+import pandas as pd
 from rich.progress import BarColumn, Progress, TimeElapsedColumn, TimeRemainingColumn
 
 from . import healpix_geom
@@ -39,8 +39,10 @@ def iterate_frames(
     limit: Optional[int] = None,
     nside: int = 32,
     skip: int = 0,
+    key: str = "data",
+    chunksize: int = 100000
 ) -> Iterator[SourceFrame]:
-    for exp in iterate_exposures(filename, limit, skip):
+    for exp in iterate_exposures(filename, limit, skip, key, chunksize):
         for frame in source_exposure_to_frames(exp, nside):
             yield frame
 
@@ -65,10 +67,17 @@ def source_exposure_to_frames(
     return list(by_pixel.values())
 
 
-def iterate_exposures(filename, limit: Optional[int] = None, skip: int = 0):
+def iterate_exposures(
+        filename,
+        limit:
+        Optional[int] = None,
+        skip: int = 0,
+        key: str = "data",
+        chunksize: int = 100000
+    ):
     current_exposure: Optional[SourceExposure] = None
     n = 0
-    for obs in iterate_observations(filename):
+    for obs in iterate_observations(filename, key=key, chunksize=chunksize):
         if current_exposure is None:
             # first iteration
             current_exposure = SourceExposure(
@@ -98,27 +107,12 @@ def iterate_exposures(filename, limit: Optional[int] = None, skip: int = 0):
     yield current_exposure
 
 
-def iterate_observations(filename: str) -> Iterator[SourceObservation]:
-    with tables.open_file(filename, mode="r") as f:
-        table = f.get_node("/data/table")
+def iterate_observations(filename: str, key="data", chunksize=100000) -> Iterator[SourceObservation]:
 
-        expected_format = [
-            "class_star",
-            "dec",
-            "decerr",
-            "deltamjd",
-            "mag_auto",
-            "magerr_auto",
-            "mean_dec",
-            "mean_mjd",
-            "mean_ra",
-            "mjd",
-            "ra",
-            "raerr",
-        ]
-        assert table.attrs["values_block_0_kind"] == expected_format
+    with pd.HDFStore(filename, key=key, mode="r") as store:
 
-        n_rows = table.nrows
+        n_rows = store.get_storer(key).nrows
+
         with Progress(
             "[progress.description]{task.description}",
             BarColumn(),
@@ -129,24 +123,35 @@ def iterate_observations(filename: str) -> Iterator[SourceObservation]:
             read_observations = progress.add_task(
                 "loading observations...", total=n_rows
             )
-            for row in table.iterrows():
-                exposure_id = row["exposure"]
-                obscode = _obscode_from_exposure_id(exposure_id)
-                id = row["id"]
-                dec = row["values_block_0"][1]
-                ra = row["values_block_0"][10]
+            for chunk in store.select(
+                key=key,
+                iterator=True,
+                chunksize=chunksize,
+                columns=["obs_id", "exposure_id", "mjd_utc", "ra", "dec"]
+            ):
+                exposure_ids = chunk.exposure_id.values
+                ids = chunk.obs_id.values
+                decs = chunk.dec.values
+                ras = chunk.ra.values
+                epochs = chunk.mjd_utc.values
 
-                epoch = row["values_block_0"][9]
+                for exposure_id, id, ra, dec, epoch in zip(
+                    exposure_ids,
+                    ids,
+                    ras,
+                    decs,
+                    epochs
+                ):
+                    obscode = _obscode_from_exposure_id(exposure_id)
 
-                obs = SourceObservation(exposure_id, obscode, id, ra, dec, epoch)
-                yield (obs)
-                progress.update(read_observations, advance=1)
+                    obs = SourceObservation(exposure_id, obscode, id.encode(), ra, dec, epoch)
+                    yield (obs)
+                    progress.update(read_observations, advance=1)
 
-
-def _obscode_from_exposure_id(exposure_id: bytes) -> str:
+def _obscode_from_exposure_id(exposure_id: str) -> str:
     # The table has no explicit information on which instrument sourced the
     # exposure. We have to glean it out of the exposure ID.
-    exp_prefix = exposure_id[:3].decode()
+    exp_prefix = exposure_id[:3]
     if exp_prefix == "c4d":
         # The CTIO-4m with DECam.
         return "807"
@@ -158,5 +163,5 @@ def _obscode_from_exposure_id(exposure_id: bytes) -> str:
         return "695"
     else:
         raise ValueError(
-            f"can't determine instrument for exposure {exposure_id.decode()}"
+            f"can't determine instrument for exposure {exposure_id}"
         )

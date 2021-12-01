@@ -385,19 +385,31 @@ class FrameDB:
         for f in self.data_files.values():
             f.close()
 
-    def load_hdf5(self, hdf5_file: str, skip: int = 0, limit: Optional[int] = None):
+    def load_hdf5(
+            self,
+            hdf5_file: str,
+            skip: int = 0,
+            limit: Optional[int] = None,
+            key: str = "data",
+            chunksize: int = 100000
+        ):
         """
         Load data from an NSC HDF5 catalog file.
 
         hdf5_file: Path to a file on disk.
         skip: Number of frames to skip in the file.
         limit: Maximum number of frames to load from the file. None means no limit.
+        key: Name of observations table in the hdf5 file.
+        chunksize: Load observations in chunks of this size and then iterate over the chunks
+            to load observations.
         """
         for src_frame in sourcecatalog.iterate_frames(
             hdf5_file,
             limit,
             nside=self.healpix_nside,
             skip=skip,
+            key=key,
+            chunksize=chunksize
         ):
             observations = [Observation.from_srcobs(o) for o in src_frame.observations]
             data_uri, offset, length = self.store_observations(observations)
