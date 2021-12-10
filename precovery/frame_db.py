@@ -71,8 +71,10 @@ class Observation:
         """
         return cls(ra=so.ra, dec=so.dec, id=so.id)
 
-    def matches(self, ephem: Ephemeris, tolerance: float) -> bool:
+    def matches(self, ephem: Ephemeris, tolerance: float) -> Tuple[bool, float, float, float]:
         distance = haversine_distance_deg(self.ra, ephem.ra, self.dec, ephem.dec)
+        dra = ephem.ra - self.ra
+        ddec = ephem.dec - self.dec
         logger.debug(
             "%.4f, %.4f -> %.4f, %.4f = %.6f\t(tol=%.6f)",
             self.ra,
@@ -82,7 +84,7 @@ class Observation:
             distance,
             tolerance,
         )
-        return distance < tolerance
+        return distance < tolerance, dra, ddec, distance
 
 
 class FrameIndex:
