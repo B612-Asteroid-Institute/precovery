@@ -107,8 +107,11 @@ def iterate_exposures(
     yield current_exposure
 
 
-def iterate_observations(filename: str, key="data", chunksize=100000) -> Iterator[SourceObservation]:
-
+def iterate_observations(
+        filename: str,
+        key: str = "data",
+        chunksize: int = 100000
+    ) -> Iterator[SourceObservation]:
     with pd.HDFStore(filename, key=key, mode="r") as store:
 
         n_rows = store.get_storer(key).nrows
@@ -127,41 +130,23 @@ def iterate_observations(filename: str, key="data", chunksize=100000) -> Iterato
                 key=key,
                 iterator=True,
                 chunksize=chunksize,
-                columns=["obs_id", "exposure_id", "mjd_utc", "ra", "dec"]
+                columns=["obs_id", "exposure_id", "mjd_utc", "ra", "dec", "observatory_code"]
             ):
                 exposure_ids = chunk.exposure_id.values
+                obscodes = chunk.observatory_code.values
                 ids = chunk.obs_id.values
-                decs = chunk.dec.values
                 ras = chunk.ra.values
+                decs = chunk.dec.values
                 epochs = chunk.mjd_utc.values
 
-                for exposure_id, id, ra, dec, epoch in zip(
+                for exposure_id, obscode, id, ra, dec, epoch in zip(
                     exposure_ids,
+                    obscodes,
                     ids,
                     ras,
                     decs,
                     epochs
                 ):
-                    obscode = _obscode_from_exposure_id(exposure_id)
-
                     obs = SourceObservation(exposure_id, obscode, id.encode(), ra, dec, epoch)
                     yield (obs)
                     progress.update(read_observations, advance=1)
-
-def _obscode_from_exposure_id(exposure_id: str) -> str:
-    # The table has no explicit information on which instrument sourced the
-    # exposure. We have to glean it out of the exposure ID.
-    exp_prefix = exposure_id[:3]
-    if exp_prefix == "c4d":
-        # The CTIO-4m with DECam.
-        return "807"
-    elif exp_prefix == "ksb":
-        # The Bok 2.3m with 90Prime
-        return "V00"
-    elif exp_prefix == "k4m":
-        # The KPNO 4pm with Mosaic3
-        return "695"
-    else:
-        raise ValueError(
-            f"can't determine instrument for exposure {exposure_id}"
-        )
