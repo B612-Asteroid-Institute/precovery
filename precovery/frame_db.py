@@ -176,6 +176,11 @@ class FrameIndex:
     ) -> Iterator[HealpixFrame]:
         """
         Yield all the frames which are for given obscode, MJD, healpix.
+
+        MJDs are checked to within +- 1e-7 days or 8.64 ms. Any frames that
+        are within 8.64 ms of the given mjd will be returned. This does not garauntee
+        that they will represent the desired exposure time and may lead to multiple
+        matches computed at the wrong observation time.
         """
         select_stmt = sq.select(
             self.frames.c.id,
@@ -189,8 +194,8 @@ class FrameIndex:
         ).where(
             self.frames.c.obscode == obscode,
             self.frames.c.healpixel == int(healpixel),
-            self.frames.c.mjd >= mjd - 0.001,
-            self.frames.c.mjd <= mjd + 0.001,
+            self.frames.c.mjd >= mjd - 1e-7,
+            self.frames.c.mjd <= mjd + 1e-7,
         )
         rows = self.dbconn.execute(select_stmt)
         for r in rows:
