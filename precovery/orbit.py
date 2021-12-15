@@ -249,7 +249,7 @@ class Ephemeris:
 
         Accuracy will decrease as timedelta increases.
         """
-        if np.abs(timedelta) <= 3.0 and self.ra_velocity < 1 and self.dec_velocity < 1:
+        if np.abs(timedelta) <= -1.0 and self.ra_velocity < 1 and self.dec_velocity < 1:
             # Naively calculate the approximate location of the ephemeris
             # when the orbit is "propagated" as naively as possible to the
             # epoch of the observation: just use linear motion across the
