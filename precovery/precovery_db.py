@@ -19,6 +19,8 @@ logger = logging.getLogger("precovery")
 class PrecoveryCandidate:
     ra: float
     dec: float
+    ra_sigma: float
+    dec_sigma: float
     obscode: str
     mjd: float
     catalog_id: str
@@ -211,6 +213,8 @@ class PrecoveryDatabase:
                     candidate = PrecoveryCandidate(
                         ra=obs.ra,
                         dec=obs.dec,
+                        ra_sigma=obs.ra_sigma,
+                        dec_sigma=obs.dec_sigma,
                         obscode=f.obscode,
                         mjd=f.mjd,
                         catalog_id=f.catalog_id,
