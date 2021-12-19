@@ -14,6 +14,8 @@ class SourceObservation:
     id: bytes
     ra: float
     dec: float
+    ra_sigma: float
+    dec_sigma: float
     epoch: float
 
 
@@ -130,23 +132,27 @@ def iterate_observations(
                 key=key,
                 iterator=True,
                 chunksize=chunksize,
-                columns=["obs_id", "exposure_id", "mjd_utc", "ra", "dec", "observatory_code"]
+                columns=["obs_id", "exposure_id", "mjd_utc", "ra", "dec", "ra_sigma", "dec_sigma", "observatory_code"]
             ):
                 exposure_ids = chunk.exposure_id.values
                 obscodes = chunk.observatory_code.values
                 ids = chunk.obs_id.values
                 ras = chunk.ra.values
                 decs = chunk.dec.values
+                ra_sigmas = chunk.ra_sigma.values
+                dec_sigmas = chunk.dec_sigma.values
                 epochs = chunk.mjd_utc.values
 
-                for exposure_id, obscode, id, ra, dec, epoch in zip(
+                for exposure_id, obscode, id, ra, dec, ra_sigma, dec_sigma, epoch in zip(
                     exposure_ids,
                     obscodes,
                     ids,
                     ras,
                     decs,
+                    ra_sigmas,
+                    dec_sigmas,
                     epochs
                 ):
-                    obs = SourceObservation(exposure_id, obscode, id.encode(), ra, dec, epoch)
+                    obs = SourceObservation(exposure_id, obscode, id.encode(), ra, dec, ra_sigma, dec_sigma, epoch)
                     yield (obs)
                     progress.update(read_observations, advance=1)
