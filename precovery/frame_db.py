@@ -14,8 +14,10 @@ from . import sourcecatalog
 from .orbit import Ephemeris
 from .spherical_geom import haversine_distance_deg
 
-logger = logging.getLogger("frame_db")
+# ra, dec, ra_sigma, dec_sigma, id
+DATA_LAYOUT = "<ddddl"
 
+logger = logging.getLogger("frame_db")
 
 @dataclasses.dataclass
 class HealpixFrame:
@@ -55,13 +57,15 @@ class FrameWindow:
 class Observation:
     ra: float
     dec: float
+    ra_sigma: float
+    dec_sigma: float
     id: bytes
 
-    data_layout = struct.Struct("<ddl")
-    datagram_size = struct.calcsize("<ddl")
+    data_layout = struct.Struct(DATA_LAYOUT)
+    datagram_size = struct.calcsize(DATA_LAYOUT)
 
     def to_bytes(self) -> bytes:
-        prefix = self.data_layout.pack(self.ra, self.dec, len(self.id))
+        prefix = self.data_layout.pack(self.ra, self.dec, self.ra_sigma, self.dec_sigma, len(self.id))
         return prefix + self.id
 
     @classmethod
@@ -69,7 +73,7 @@ class Observation:
         """
         Cast a SourceObservation to an Observation.
         """
-        return cls(ra=so.ra, dec=so.dec, id=so.id)
+        return cls(ra=so.ra, dec=so.dec, ra_sigma=so.ra_sigma, dec_sigma=so.dec_sigma, id=so.id)
 
     def matches(self, ephem: Ephemeris, tolerance: float) -> Tuple[bool, float, float, float]:
         distance = haversine_distance_deg(self.ra, ephem.ra, self.dec, ephem.dec)
@@ -464,15 +468,15 @@ class FrameDB:
         """
         f = self.data_files[exp.data_uri]
         f.seek(exp.data_offset)
-        data_layout = struct.Struct("<ddl")
-        datagram_size = struct.calcsize("<ddl")
+        data_layout = struct.Struct(DATA_LAYOUT)
+        datagram_size = struct.calcsize(DATA_LAYOUT)
         bytes_read = 0
         while bytes_read < exp.data_length:
             raw = f.read(datagram_size)
-            ra, dec, id_size = data_layout.unpack(raw)
+            ra, dec, ra_sigma, dec_sigma, id_size = data_layout.unpack(raw)
             id = f.read(id_size)
             bytes_read += datagram_size + id_size
-            yield Observation(ra, dec, id)
+            yield Observation(ra, dec, ra_sigma, dec_sigma, id)
 
     def store_observations(self, observations: Iterable[Observation]):
         """
