@@ -75,20 +75,23 @@ class Observation:
         """
         return cls(ra=so.ra, dec=so.dec, ra_sigma=so.ra_sigma, dec_sigma=so.dec_sigma, id=so.id)
 
-    def matches(self, ephem: Ephemeris, tolerance: float) -> Tuple[bool, float, float, float]:
+    def distance(self, ephem: Ephemeris) -> Tuple[float, float, float]:
+        """
+        Calculate the Haversine distance and residuals in degrees between this observation
+        and a predicted ephemeris.
+        """
         distance = haversine_distance_deg(self.ra, ephem.ra, self.dec, ephem.dec)
         dra = ephem.ra - self.ra
         ddec = ephem.dec - self.dec
         logger.debug(
-            "%.4f, %.4f -> %.4f, %.4f = %.6f\t(tol=%.6f)",
+            "%.4f, %.4f -> %.4f, %.4f = %.6f",
             self.ra,
             self.dec,
             ephem.ra,
             ephem.dec,
             distance,
-            tolerance,
         )
-        return distance < tolerance, dra, ddec, distance
+        return distance, dra, ddec
 
 
 class FrameIndex:

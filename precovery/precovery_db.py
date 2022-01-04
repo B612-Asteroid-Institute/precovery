@@ -212,8 +212,8 @@ class PrecoveryDatabase:
             n = 0
             for obs in self.frames.iterate_observations(f):
                 n += 1
-                matches, dra, ddec, distance = obs.matches(exact_ephem, tolerance)
-                if matches:
+                distance, dra, ddec = obs.distance(exact_ephem)
+                if distance < tolerance:
                     candidate = PrecoveryCandidate(
                         ra=obs.ra,
                         dec=obs.dec,
