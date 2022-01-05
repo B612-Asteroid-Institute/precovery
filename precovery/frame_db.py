@@ -204,7 +204,21 @@ class FrameIndex:
             self.frames.c.mjd >= mjd - 1e-7,
             self.frames.c.mjd <= mjd + 1e-7,
         )
-        rows = self.dbconn.execute(select_stmt)
+        result = self.dbconn.execute(select_stmt)
+        # Turn result into a list so we can iterate over it twice: once
+        # to check the MJDs for uniqueness and a second time to actually
+        # yield the individual rows
+        rows = list(result)
+
+        # Loop through rows and track MJDs
+        mjds = set()
+        for r in rows:
+            # id, obscode, catalog_id, mjd, healpixel, data uri, data offset, data length
+            mjds.add(r[3])
+
+        if len(mjds) > 1:
+            logger.warn(f"Query returned non-unique MJDs for mjd: {mjd}, healpix: {int(healpixel)}, obscode: {obscode}.")
+
         for r in rows:
             yield HealpixFrame(*r)
 
