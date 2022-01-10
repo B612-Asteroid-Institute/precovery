@@ -14,8 +14,8 @@ from . import sourcecatalog
 from .orbit import Ephemeris
 from .spherical_geom import haversine_distance_deg
 
-# ra, dec, ra_sigma, dec_sigma, id
-DATA_LAYOUT = "<ddddl"
+# ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id
+DATA_LAYOUT = "<ddddddl"
 
 logger = logging.getLogger("frame_db")
 
@@ -24,6 +24,7 @@ class HealpixFrame:
     id: Optional[int]
     obscode: str
     catalog_id: str
+    filter: str
     mjd: float
     healpixel: int
     data_uri: str
@@ -59,13 +60,23 @@ class Observation:
     dec: float
     ra_sigma: float
     dec_sigma: float
+    mag: float
+    mag_sigma: float
     id: bytes
 
     data_layout = struct.Struct(DATA_LAYOUT)
     datagram_size = struct.calcsize(DATA_LAYOUT)
 
     def to_bytes(self) -> bytes:
-        prefix = self.data_layout.pack(self.ra, self.dec, self.ra_sigma, self.dec_sigma, len(self.id))
+        prefix = self.data_layout.pack(
+            self.ra,
+            self.dec,
+            self.ra_sigma,
+            self.dec_sigma,
+            self.mag,
+            self.mag_sigma,
+            len(self.id)
+        )
         return prefix + self.id
 
     @classmethod
@@ -73,7 +84,15 @@ class Observation:
         """
         Cast a SourceObservation to an Observation.
         """
-        return cls(ra=so.ra, dec=so.dec, ra_sigma=so.ra_sigma, dec_sigma=so.dec_sigma, id=so.id)
+        return cls(
+            ra=so.ra,
+            dec=so.dec,
+            ra_sigma=so.ra_sigma,
+            dec_sigma=so.dec_sigma,
+            mag=so.mag,
+            mag_sigma=so.mag_sigma,
+            id=so.id
+        )
 
     def matches(self, ephem: Ephemeris, tolerance: float) -> bool:
         distance = haversine_distance_deg(self.ra, ephem.ra, self.dec, ephem.dec)
@@ -183,6 +202,7 @@ class FrameIndex:
             self.frames.c.id,
             self.frames.c.obscode,
             self.frames.c.catalog_id,
+            self.frames.c.filter,
             self.frames.c.mjd,
             self.frames.c.healpixel,
             self.frames.c.data_uri,
@@ -324,6 +344,7 @@ class FrameIndex:
             self.frames.c.id,
             self.frames.c.obscode,
             self.frames.c.catalog_id,
+            self.frames.c.filter,
             self.frames.c.mjd,
             self.frames.c.healpixel,
             self.frames.c.data_uri,
@@ -338,6 +359,7 @@ class FrameIndex:
         insert = self.frames.insert().values(
             obscode=frame.obscode,
             catalog_id=frame.catalog_id,
+            filter=frame.filter,
             mjd=frame.mjd,
             healpixel=int(frame.healpixel),
             data_uri=frame.data_uri,
@@ -359,6 +381,7 @@ class FrameIndex:
             ),
             sq.Column("obscode", sq.String),
             sq.Column("catalog_id", sq.String),
+            sq.Column("filter", sq.String),
             sq.Column("mjd", sq.Float),
             sq.Column("healpixel", sq.Integer),
             sq.Column("data_uri", sq.String),
@@ -373,7 +396,7 @@ class FrameDB:
         self,
         idx: FrameIndex,
         data_root: str,
-        data_file_max_size=1e9,
+        data_file_max_size: float = 1e9,
         healpix_nside: int = 32,
     ):
         self.idx = idx
@@ -422,6 +445,7 @@ class FrameDB:
                 id=None,
                 obscode=src_frame.obscode,
                 catalog_id=src_frame.exposure_id,
+                filter=src_frame.filter,
                 mjd=src_frame.mjd,
                 healpixel=src_frame.healpixel,
                 data_uri=data_uri,
@@ -466,10 +490,10 @@ class FrameDB:
         bytes_read = 0
         while bytes_read < exp.data_length:
             raw = f.read(datagram_size)
-            ra, dec, ra_sigma, dec_sigma, id_size = data_layout.unpack(raw)
+            ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id_size = data_layout.unpack(raw)
             id = f.read(id_size)
             bytes_read += datagram_size + id_size
-            yield Observation(ra, dec, ra_sigma, dec_sigma, id)
+            yield Observation(ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id)
 
     def store_observations(self, observations: Iterable[Observation]):
         """
@@ -541,9 +565,9 @@ class FrameDB:
                 if cur_key[0] == "":
                     # First iteration
                     observations = list(self.iterate_observations(frame))
-                    cur_key = (frame.obscode, frame.mjd, frame.healpixel)
+                    cur_key = (frame.obscode, frame.filter, frame.mjd, frame.healpixel)
                     last_catalog_id = frame.catalog_id
-                elif (frame.obscode, frame.mjd, frame.healpixel) == cur_key:
+                elif (frame.obscode, frame.filter, frame.mjd, frame.healpixel) == cur_key:
                     # Extending existing frame
                     observations.extend(self.iterate_observations(frame))
 
@@ -553,8 +577,9 @@ class FrameDB:
                     new_frame = HealpixFrame(
                         id=None,
                         obscode=cur_key[0],
-                        mjd=cur_key[1],
-                        healpixel=cur_key[2],
+                        filter=cur_key[1],
+                        mjd=cur_key[2],
+                        healpixel=cur_key[3],
                         catalog_id=last_catalog_id,
                         data_uri=data_uri,
                         data_offset=offset,
@@ -563,7 +588,7 @@ class FrameDB:
                     new_db.idx.add_frame(new_frame)
 
                     observations = list(self.iterate_observations(frame))
-                    cur_key = (frame.obscode, frame.mjd, frame.healpixel)
+                    cur_key = (frame.obscode, frame.mjd, frame.mjd, frame.healpixel)
                     progress.update(written_frames, advance=1)
                     progress.update(bytes_migrated, advance=length)
 
@@ -576,8 +601,9 @@ class FrameDB:
             frame = HealpixFrame(
                 id=None,
                 obscode=cur_key[0],
-                mjd=cur_key[1],
-                healpixel=cur_key[2],
+                filter=cur_key[1],
+                mjd=cur_key[2],
+                healpixel=cur_key[3],
                 catalog_id=last_catalog_id,
                 data_uri=data_uri,
                 data_offset=offset,

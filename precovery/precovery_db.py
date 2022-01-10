@@ -21,6 +21,9 @@ class PrecoveryCandidate:
     dec: float
     ra_sigma: float
     dec_sigma: float
+    mag: float
+    mag_sigma: float
+    filter: str
     obscode: str
     mjd: float
     catalog_id: str
@@ -215,6 +218,9 @@ class PrecoveryDatabase:
                         dec=obs.dec,
                         ra_sigma=obs.ra_sigma,
                         dec_sigma=obs.dec_sigma,
+                        mag=obs.mag,
+                        mag_sigma=obs.mag_sigma,
+                        filter=f.filter,
                         obscode=f.obscode,
                         mjd=f.mjd,
                         catalog_id=f.catalog_id,
