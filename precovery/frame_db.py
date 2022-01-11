@@ -233,8 +233,8 @@ class FrameIndex:
         # Loop through rows and track MJDs
         mjds = set()
         for r in rows:
-            # id, obscode, catalog_id, mjd, healpixel, data uri, data offset, data length
-            mjds.add(r[3])
+            # id, obscode, catalog_id, filter, mjd, healpixel, data uri, data offset, data length
+            mjds.add(r[4])
 
         if len(mjds) > 1:
             logger.warn(f"Query returned non-unique MJDs for mjd: {mjd}, healpix: {int(healpixel)}, obscode: {obscode}.")
