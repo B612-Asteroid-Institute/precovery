@@ -28,6 +28,9 @@ class PrecoveryCandidate:
     mjd: float
     catalog_id: str
     id: str
+    dra: float
+    ddec: float
+    distance: float
 
 
 class PrecoveryDatabase:
@@ -212,7 +215,8 @@ class PrecoveryDatabase:
             n = 0
             for obs in self.frames.iterate_observations(f):
                 n += 1
-                if obs.matches(exact_ephem, tolerance):
+                distance, dra, ddec = obs.distance(exact_ephem)
+                if distance < tolerance:
                     candidate = PrecoveryCandidate(
                         ra=obs.ra,
                         dec=obs.dec,
@@ -225,6 +229,9 @@ class PrecoveryDatabase:
                         mjd=f.mjd,
                         catalog_id=f.catalog_id,
                         id=obs.id.decode(),
+                        dra=dra,
+                        ddec=ddec,
+                        distance=distance,
                     )
                     yield candidate
             logger.info("checked %d observations in frame", n)
