@@ -75,18 +75,23 @@ class Observation:
         """
         return cls(ra=so.ra, dec=so.dec, ra_sigma=so.ra_sigma, dec_sigma=so.dec_sigma, id=so.id)
 
-    def matches(self, ephem: Ephemeris, tolerance: float) -> bool:
+    def distance(self, ephem: Ephemeris) -> Tuple[float, float, float]:
+        """
+        Calculate the Haversine distance and residuals in degrees between this observation
+        and a predicted ephemeris.
+        """
         distance = haversine_distance_deg(self.ra, ephem.ra, self.dec, ephem.dec)
+        dra = ephem.ra - self.ra
+        ddec = ephem.dec - self.dec
         logger.debug(
-            "%.4f, %.4f -> %.4f, %.4f = %.6f\t(tol=%.6f)",
+            "%.4f, %.4f -> %.4f, %.4f = %.6f",
             self.ra,
             self.dec,
             ephem.ra,
             ephem.dec,
             distance,
-            tolerance,
         )
-        return distance < tolerance
+        return distance, dra, ddec
 
 
 class FrameIndex:
@@ -178,6 +183,11 @@ class FrameIndex:
     ) -> Iterator[HealpixFrame]:
         """
         Yield all the frames which are for given obscode, MJD, healpix.
+
+        MJDs are checked to within +- 1e-7 days or 8.64 ms. Any frames that
+        are within 8.64 ms of the given mjd will be returned. This does not garauntee
+        that they will represent the desired exposure time and may lead to multiple
+        matches computed at the wrong observation time.
         """
         select_stmt = sq.select(
             self.frames.c.id,
@@ -191,10 +201,24 @@ class FrameIndex:
         ).where(
             self.frames.c.obscode == obscode,
             self.frames.c.healpixel == int(healpixel),
-            self.frames.c.mjd >= mjd - 0.001,
-            self.frames.c.mjd <= mjd + 0.001,
+            self.frames.c.mjd >= mjd - 1e-7,
+            self.frames.c.mjd <= mjd + 1e-7,
         )
-        rows = self.dbconn.execute(select_stmt)
+        result = self.dbconn.execute(select_stmt)
+        # Turn result into a list so we can iterate over it twice: once
+        # to check the MJDs for uniqueness and a second time to actually
+        # yield the individual rows
+        rows = list(result)
+
+        # Loop through rows and track MJDs
+        mjds = set()
+        for r in rows:
+            # id, obscode, catalog_id, mjd, healpixel, data uri, data offset, data length
+            mjds.add(r[3])
+
+        if len(mjds) > 1:
+            logger.warn(f"Query returned non-unique MJDs for mjd: {mjd}, healpix: {int(healpixel)}, obscode: {obscode}.")
+
         for r in rows:
             yield HealpixFrame(*r)
 
