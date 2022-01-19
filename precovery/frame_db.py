@@ -557,7 +557,7 @@ class FrameDB:
         self.data_files[self._current_data_file_name()] = f
 
     def defragment(self, new_index: FrameIndex, new_db: "FrameDB"):
-        cur_key = ("", 0.0, 0)
+        cur_key = ("", "", 0.0, 0)
         observations = []
         last_catalog_id = ""
 
@@ -612,7 +612,7 @@ class FrameDB:
                     new_db.idx.add_frame(new_frame)
 
                     observations = list(self.iterate_observations(frame))
-                    cur_key = (frame.obscode, frame.mjd, frame.mjd, frame.healpixel)
+                    cur_key = (frame.obscode, frame.filter, frame.mjd, frame.healpixel)
                     progress.update(written_frames, advance=1)
                     progress.update(bytes_migrated, advance=length)
 
