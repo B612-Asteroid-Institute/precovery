@@ -1,6 +1,7 @@
 import dataclasses
 import logging
 import os.path
+import numpy as np
 from typing import Dict, Iterator, Optional
 
 from .frame_db import FrameDB, FrameIndex
@@ -207,6 +208,8 @@ class PrecoveryDatabase:
             "checking frames for healpix=%d obscode=%s mjd=%f", healpix, obscode, mjd
         )
         n_frame = 0
+        exact_ephem.ra = np.deg2rad(exact_ephem.ra)
+        exact_ephem.dec = np.deg2rad(exact_ephem.dec)
         for f in frames:
             logger.info("checking frame: %s", f)
             n = 0
