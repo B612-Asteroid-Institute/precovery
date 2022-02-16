@@ -16,6 +16,9 @@ class SourceObservation:
     dec: float
     ra_sigma: float
     dec_sigma: float
+    mag: float
+    mag_sigma: float
+    filter: str
     epoch: float
 
 
@@ -23,6 +26,7 @@ class SourceObservation:
 class SourceExposure:
     exposure_id: str
     obscode: str
+    filter: str
     mjd: float
     observations: List[SourceObservation]
 
@@ -31,6 +35,7 @@ class SourceExposure:
 class SourceFrame:
     exposure_id: str
     obscode: str
+    filter: str
     mjd: float
     healpixel: int
     observations: List[SourceObservation]
@@ -60,6 +65,7 @@ def source_exposure_to_frames(
             frame = SourceFrame(
                 exposure_id=src_exp.exposure_id,
                 obscode=src_exp.obscode,
+                filter=src_exp.filter,
                 mjd=src_exp.mjd,
                 healpixel=pixel,
                 observations=[],
@@ -85,6 +91,7 @@ def iterate_exposures(
             current_exposure = SourceExposure(
                 exposure_id=obs.exposure_id,
                 obscode=obs.obscode,
+                filter=obs.filter,
                 mjd=obs.epoch,
                 observations=[obs],
             )
@@ -103,6 +110,7 @@ def iterate_exposures(
             current_exposure = SourceExposure(
                 exposure_id=obs.exposure_id,
                 obscode=obs.obscode,
+                filter=obs.filter,
                 mjd=obs.epoch,
                 observations=[obs],
             )
@@ -132,18 +140,26 @@ def iterate_observations(
                 key=key,
                 iterator=True,
                 chunksize=chunksize,
-                columns=["obs_id", "exposure_id", "mjd_utc", "ra", "dec", "ra_sigma", "dec_sigma", "observatory_code"]
+                columns=[
+                    "obs_id", "exposure_id", "mjd_utc",
+                    "ra", "dec", "ra_sigma", "dec_sigma",
+                    "mag", "mag_sigma", "filter",
+                    "observatory_code"
+                ]
             ):
-                exposure_ids = chunk.exposure_id.values
-                obscodes = chunk.observatory_code.values
-                ids = chunk.obs_id.values
-                ras = chunk.ra.values
-                decs = chunk.dec.values
-                ra_sigmas = chunk.ra_sigma.values
-                dec_sigmas = chunk.dec_sigma.values
-                epochs = chunk.mjd_utc.values
+                exposure_ids = chunk["exposure_id"].values
+                obscodes = chunk["observatory_code"].values
+                ids = chunk["obs_id"].values
+                ras = chunk["ra"].values
+                decs = chunk["dec"].values
+                ra_sigmas = chunk["ra_sigma"].values
+                dec_sigmas = chunk["dec_sigma"].values
+                mags = chunk["mag"].values
+                mag_sigmas = chunk["mag_sigma"].values
+                filters = chunk["filter"].values
+                epochs = chunk["mjd_utc"].values
 
-                for exposure_id, obscode, id, ra, dec, ra_sigma, dec_sigma, epoch in zip(
+                for exposure_id, obscode, id, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, filter, epoch in zip(
                     exposure_ids,
                     obscodes,
                     ids,
@@ -151,8 +167,23 @@ def iterate_observations(
                     decs,
                     ra_sigmas,
                     dec_sigmas,
+                    mags,
+                    mag_sigmas,
+                    filters,
                     epochs
                 ):
-                    obs = SourceObservation(exposure_id, obscode, id.encode(), ra, dec, ra_sigma, dec_sigma, epoch)
+                    obs = SourceObservation(
+                        exposure_id,
+                        obscode,
+                        id.encode(),
+                        ra,
+                        dec,
+                        ra_sigma,
+                        dec_sigma,
+                        mag,
+                        mag_sigma,
+                        filter,
+                        epoch
+                    )
                     yield (obs)
                     progress.update(read_observations, advance=1)
