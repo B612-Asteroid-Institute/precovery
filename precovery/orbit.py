@@ -64,6 +64,7 @@ class Orbit:
         abs_magnitude: float,
         photometric_slope_parameter: float,
     ):
+        #Orbits class takes in degrees, but state vectors are given in radians
         state_vector = np.array(
             [
                 [
@@ -102,6 +103,7 @@ class Orbit:
         abs_magnitude: float,
         photometric_slope_parameter: float,
     ):
+        #Orbits class takes in degrees, but state vectors are given in radians
         state_vector = np.array(
             [
                 [
