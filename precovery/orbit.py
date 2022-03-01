@@ -64,15 +64,16 @@ class Orbit:
         abs_magnitude: float,
         photometric_slope_parameter: float,
     ):
+        #Orbits class takes in degrees, but state vectors are given in radians
         state_vector = np.array(
             [
                 [
                     orbit_id,
                     perihelion_au,
                     eccentricity,
-                    inclination_deg,
-                    ascending_node_longitude_deg,
-                    periapsis_argument_deg,
+                    np.deg2rad(inclination_deg),
+                    np.deg2rad(ascending_node_longitude_deg),
+                    np.deg2rad(periapsis_argument_deg),
                     perihelion_epoch_mjd,
                     OrbitElementType.COMETARY.value,
                     osculating_element_epoch_mjd,
@@ -102,16 +103,17 @@ class Orbit:
         abs_magnitude: float,
         photometric_slope_parameter: float,
     ):
+        #Orbits class takes in degrees, but state vectors are given in radians
         state_vector = np.array(
             [
                 [
                     orbit_id,
                     semimajor_axis_au,
                     eccentricity,
-                    inclination_deg,
-                    ascending_node_longitude_deg,
-                    periapsis_argument_deg,
-                    mean_anomaly_deg,
+                    np.deg2rad(inclination_deg),
+                    np.deg2rad(ascending_node_longitude_deg),
+                    np.deg2rad(periapsis_argument_deg),
+                    np.deg2rad(mean_anomaly_deg),
                     OrbitElementType.KEPLERIAN.value,
                     osculating_element_epoch_mjd,
                     epoch_timescale.value,
