@@ -5,3 +5,4 @@ rich
 tables
 pandas
 healpy
+requests
