@@ -4,7 +4,7 @@ import numba
 import numpy as np
 
 
-@numba.jit
+@numba.jit(nopython=True, cache=True)
 def propagate_linearly(
     ra0: float, dec0: float, vra: float, vdec: float, dt: float
 ) -> Tuple[float, float]:
@@ -64,7 +64,7 @@ def propagate_linearly(
     return ra1, dec1
 
 
-@numba.jit
+@numba.jit(nopython=True, cache=True)
 def haversine_distance(ra1: float, ra2: float, dec1: float, dec2: float) -> float:
     """
     Computes the great-circle distance between two points on a sphere, using
