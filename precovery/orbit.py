@@ -1,11 +1,11 @@
 import enum
-from typing import Tuple
+from typing import Iterable, Tuple
 
 import numpy as np
 import numpy.typing as npt
 import pyoorb
 
-from .spherical_geom import propagate_linearly
+from .spherical_geom import propagate_linearly, propagate_linearly_opt
 
 pyoorb_initialized = False
 
@@ -64,7 +64,7 @@ class Orbit:
         abs_magnitude: float,
         photometric_slope_parameter: float,
     ):
-        #Orbits class takes in degrees, but state vectors are given in radians
+        # Orbits class takes in degrees, but state vectors are given in radians
         state_vector = np.array(
             [
                 [
@@ -103,7 +103,7 @@ class Orbit:
         abs_magnitude: float,
         photometric_slope_parameter: float,
     ):
-        #Orbits class takes in degrees, but state vectors are given in radians
+        # Orbits class takes in degrees, but state vectors are given in radians
         state_vector = np.array(
             [
                 [
@@ -222,6 +222,45 @@ class Orbit:
         assert err == 0
         return Ephemeris(eph[0][0])
 
+    def compute_ephemeris_opt(
+        self,
+        obscode: str,
+        epochs: Iterable[float],
+        method: PropagationIntegrator = PropagationIntegrator.N_BODY,
+    ) -> "Ephemeris":
+        """
+        Compute ephemeris for the orbit, propagated to an epoch, and observed from
+        a location represented by obscode.
+
+        obscode should be a Minor Planet Center observatory code.
+        """
+        _ensure_pyoorb_initialized()
+        epochs_array = np.array(
+            [[epoch, self._epoch_timescale.value] for epoch in epochs],
+            dtype=np.double,
+            order="F",
+        )
+        # print(len(epochs))
+        # print(epochs_array.shape)
+
+        if method == PropagationIntegrator.N_BODY:
+            dynmodel = "N"
+        elif method == PropagationIntegrator.TWO_BODY:
+            dynmodel = "2"
+        else:
+            raise ValueError("unexpected propagation method %r" % method)
+
+        eph, err = pyoorb.pyoorb.oorb_ephemeris_basic(
+            in_orbits=self._state_vector,
+            in_obscode=obscode,
+            in_date_ephems=epochs_array,
+            in_dynmodel=dynmodel,
+        )
+        # print(epochs_array.shape)
+        # print(eph.shape)
+        assert err == 0
+        return [Ephemeris(eph[0, i, :]) for i in range(epochs_array.shape[0])]
+
 
 class Ephemeris:
     def __init__(self, raw_data: npt.NDArray[np.float64]):
@@ -276,3 +315,58 @@ class Ephemeris:
             approx_dec = approx_ephem.dec
 
         return approx_ra, approx_dec
+
+    def approximately_propagate_opt(
+        self, obscode: str, orbit: Orbit, timedeltas: Iterable[float]
+    ) -> Tuple[float, float]:
+        """
+        Roughly propagate the ephemeris to several new epochs, each 'timedelta' days away along.
+
+        If timedelta is small and self.ra_velocity and self.dec_velocity are
+        small (indicating relatively slow motion across the sky), this uses a
+        linear motion approximation.
+
+        Otherwise, it uses a 2-body integration of the orbit.
+
+        Accuracy will decrease as timedelta increases.
+        """
+        timedeltas = np.array(timedeltas)
+        do_linear_timedelta = timedeltas[np.where(timedeltas <= 1.0)]
+        approx_ras = np.zeros(timedeltas.shape[0])
+        approx_decs = np.zeros(timedeltas.shape[0])
+        # TODO: set timedeltas <= 1
+        if self.ra_velocity < 1 and self.dec_velocity < 1:
+            linear = np.where(np.abs(timedeltas) <= -1.0)
+            approx_ras_rad, approx_decs_rad = propagate_linearly_opt(
+                np.deg2rad(self.ra),
+                np.deg2rad(self.ra_velocity),
+                np.deg2rad(self.dec),
+                np.deg2rad(self.dec_velocity),
+                timedeltas[linear],
+            )
+            approx_ras[linear] = np.rad2deg(approx_ras_rad)
+            approx_decs[linear] = np.rad2deg(approx_decs_rad)
+
+            two_body = np.where(np.abs(timedeltas) > -1.0)
+            if len(timedeltas[two_body]) > 0:
+                approx_ephems = orbit.compute_ephemeris_opt(
+                    obscode,
+                    self.mjd + timedeltas[two_body],
+                    method=PropagationIntegrator.TWO_BODY,
+                )
+                approx_ras[two_body] = np.array(
+                    [approx_ephem.ra for approx_ephem in approx_ephems]
+                )
+                approx_decs[two_body] = np.array(
+                    [approx_ephem.dec for approx_ephem in approx_ephems]
+                )
+        else:
+            approx_ephems = orbit.compute_ephemeris_opt(
+                obscode,
+                self.mjd + timedeltas,
+                method=PropagationIntegrator.TWO_BODY,
+            )
+            approx_ras = np.array([approx_ephem.ra for approx_ephem in approx_ephems])
+            approx_dec = np.array([approx_ephem.dec for approx_ephem in approx_ephems])
+
+        return approx_ras, approx_decs

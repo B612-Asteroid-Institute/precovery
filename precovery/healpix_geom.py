@@ -19,7 +19,15 @@ def radec_to_thetaphi(ra: float, dec: float) -> Tuple[float, float]:
     phi = np.deg2rad(ra)
     return theta, phi
 
+def radec_to_thetaphi_opt(ra: npt.NDArray[np.float64], dec: npt.NDArray[np.float64]) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    theta = 0.5 * np.pi - np.deg2rad(dec)
+    phi = np.deg2rad(ra)
+    return theta, phi
 
 def radec_to_healpixel(ra: float, dec: float, nside: int) -> int:
     theta, phi = radec_to_thetaphi(ra, dec)
     return healpy.ang2pix(nside, theta, phi, nest=True)
+
+def radec_to_healpixel_opt(ra: npt.NDArray[np.float64], dec: npt.NDArray[np.float64], nside: int) -> npt.NDArray[np.intc]:
+    theta, phi = radec_to_thetaphi(ra, dec)
+    return healpy.ang2pix(nside, theta, phi, nest=True).astype(np.intc)
