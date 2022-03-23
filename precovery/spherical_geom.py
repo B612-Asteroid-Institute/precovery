@@ -4,7 +4,7 @@ import numba
 import numpy as np
 
 
-@numba.jit
+@numba.jit(nopython=True, cache=True)
 def propagate_linearly(
     ra0: float, dec0: float, vra: float, vdec: float, dt: float
 ) -> Tuple[float, float]:
@@ -64,7 +64,7 @@ def propagate_linearly(
     return ra1, dec1
 
 
-@numba.jit
+@numba.jit(nopython=True, cache=True)
 def propagate_linearly_opt(
     ra0: float, dec0: float, vra: float, vdec: float, dt: np.ndarray
 ) -> Tuple[float, float]:
@@ -111,31 +111,13 @@ def propagate_linearly_opt(
     dec1 = np.arcsin(z1 / r1)
 
     # Normalize values, since RA is always in [0, 2pi) and dec is in [-pi/2, pi/2].
-    # below = ra1 < 0
-    # above = ra1 >= 2 * np.pi
-    # ra1[below] += 2 * np.pi
-    # ra1[above] -= 2 * np.pi
     ra1 = ra1 % (2 * np.pi)
     dec1 = (dec1 + np.pi) % (2 * np.pi) - np.pi
-    # below = dec1 < 0
-    # above = dec1 >= 2 * np.pi
-    # dec1[below] += np.pi
-    # dec1[above] -= np.pi
-
-    # if ra1 < 0:
-    #     ra1 += 2 * np.pi
-    # elif ra1 >= 2 * np.pi:
-    #     ra1 -= 2 * np.pi
-
-    # if dec1 < -(np.pi / 2):
-    #     dec1 += np.pi
-    # elif dec1 > (np.pi / 2):
-    #     dec1 -= np.pi
 
     return ra1, dec1
 
 
-@numba.jit
+@numba.jit(nopython=True, cache=True)
 def haversine_distance(ra1: float, ra2: float, dec1: float, dec2: float) -> float:
     """
     Computes the great-circle distance between two points on a sphere, using

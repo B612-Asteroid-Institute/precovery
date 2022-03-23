@@ -146,7 +146,17 @@ class FrameIndex:
         self.initialize_tables()
 
     @classmethod
-    def open(cls, db_uri):
+    def open(cls, db_uri, mode: str = "r"):
+
+        if (mode != "r") and (mode != "w"):
+            err = (
+                "mode should be one of {'r', 'w'}"
+            )
+            raise ValueError(err)
+
+        if db_uri.startswith('sqlite:///') and (mode == "r"):
+            db_uri += "?mode=ro"
+
         engine = sq.create_engine(db_uri)
         return cls(engine)
 

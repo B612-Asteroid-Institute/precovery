@@ -44,7 +44,7 @@ class PrecoveryDatabase:
         self._exposures_by_obscode: dict = {}
 
     @classmethod
-    def from_dir(cls, directory: str, create: bool = False):
+    def from_dir(cls, directory: str, create: bool = False, mode: str = "r"):
         if not os.path.exists(directory):
             if create:
                 return cls.create(directory)
@@ -57,7 +57,7 @@ class PrecoveryDatabase:
         }
 
         frame_idx_db = "sqlite:///" + os.path.join(directory, "index.db")
-        frame_idx = FrameIndex.open(frame_idx_db)
+        frame_idx = FrameIndex.open(frame_idx_db, mode=mode)
 
         data_path = os.path.join(directory, "data")
         frame_db = FrameDB(
