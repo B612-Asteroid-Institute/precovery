@@ -22,6 +22,7 @@ def _ensure_pyoorb_initialized(*args, **kwargs):
     global pyoorb_initialized
     if not pyoorb_initialized:
         pyoorb.pyoorb.oorb_init(*args, **kwargs)
+        pyoorb_initialized = True
 
 
 class OrbitElementType(enum.Enum):
@@ -175,7 +176,7 @@ class Orbit:
     def propagate(
         self, epoch: float, method: PropagationIntegrator = PropagationIntegrator.N_BODY
     ) -> "Orbit":
-        _ensure_pyoorb_initialized()
+        _ensure_pyoorb_initialized(error_verbosity = 1)
 
         epoch_array = np.array(
             [epoch, self._epoch_timescale.value], dtype=np.double, order="F"
@@ -208,7 +209,7 @@ class Orbit:
 
         obscode should be a Minor Planet Center observatory code.
         """
-        _ensure_pyoorb_initialized()
+        _ensure_pyoorb_initialized(error_verbosity=1)
         epoch_array = np.array(
             [[epoch, self._epoch_timescale.value]], dtype=np.double, order="F"
         )
