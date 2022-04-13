@@ -367,6 +367,6 @@ class Ephemeris:
                 method=PropagationIntegrator.TWO_BODY,
             )
             approx_ras = np.array([approx_ephem.ra for approx_ephem in approx_ephems])
-            approx_dec = np.array([approx_ephem.dec for approx_ephem in approx_ephems])
+            approx_decs = np.array([approx_ephem.dec for approx_ephem in approx_ephems])
 
         return approx_ras, approx_decs
