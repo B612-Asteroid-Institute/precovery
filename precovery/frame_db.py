@@ -592,7 +592,7 @@ class FrameDB:
         state to write to it.
         """
         self.n_data_files += 1
-        f = open(self._current_data_file_full(), "rb")
+        f = open(self._current_data_file_full(), "a+b")
         self.data_files[self._current_data_file_name()] = f
 
     def defragment(self, new_index: FrameIndex, new_db: "FrameDB"):
