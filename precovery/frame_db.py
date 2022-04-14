@@ -441,17 +441,16 @@ class FrameIndex:
                 sq.Sequence("frame_id_seq"),
                 primary_key=True,
             ),
-            sq.Column("obscode", sq.String),
+            sq.Column("obscode", sq.String, index=True),
             sq.Column("catalog_id", sq.String),
             sq.Column("filter", sq.String),
-            sq.Column("mjd", sq.Float),
-            sq.Column("healpixel", sq.Integer),
+            sq.Column("mjd", sq.Float, index=True),
+            sq.Column("healpixel", sq.Integer, index=True),
             sq.Column("data_uri", sq.String),
             sq.Column("data_offset", sq.Integer),
             sq.Column("data_length", sq.Integer),
         )
         self._metadata.create_all(self.db)
-
 
 class FrameDB:
     def __init__(
