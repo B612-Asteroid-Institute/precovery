@@ -65,7 +65,7 @@ def propagate_linearly(
 
 
 @numba.jit(nopython=True, cache=True)
-def propagate_linearly_opt(
+def propagate_linearly(
     ra0: float, dec0: float, vra: float, vdec: float, dt: np.ndarray
 ) -> Tuple[float, float]:
     """

@@ -1,7 +1,5 @@
 import argparse
-import glob
 import logging
-import os
 
 import numpy as np
 import pandas as pd
@@ -83,7 +81,6 @@ if __name__ == "__main__":
         type=int,
         help="Number of orbits from orbits_file to run through precovery database.",
     )
-    parser.add_argument("--opt", action="store_true", help="Run with optimizations")
     args = parser.parse_args()
 
     db = precovery_db.PrecoveryDatabase.from_dir(args.database_dir, create=True)
@@ -111,10 +108,7 @@ if __name__ == "__main__":
             0.15,
         )
 
-        if args.opt:
-            matches = [m for m in db.precover_opt(orbit, tolerance=1 / 3600)]
-        else:
-            matches = [m for m in db.precover(orbit, tolerance=1 / 3600)]
+        matches = [m for m in db.precover(orbit, tolerance=1/3600)]
         matches_df = matches_to_df(matches)
         matches_df.insert(0, "orbit_id", orbit_id)
         matches_dfs.append(matches_df)

@@ -96,25 +96,7 @@ class Observation:
             id=so.id,
         )
 
-    def distance(self, ephem: Ephemeris) -> Tuple[float, float, float]:
-        """
-        Calculate the Haversine distance and residuals in degrees between this observation
-        and a predicted ephemeris.
-        """
-        distance = haversine_distance_deg(self.ra, ephem.ra, self.dec, ephem.dec)
-        dra = ephem.ra - self.ra
-        ddec = ephem.dec - self.dec
-        logger.debug(
-            "%.4f, %.4f -> %.4f, %.4f = %.6f",
-            self.ra,
-            self.dec,
-            ephem.ra,
-            ephem.dec,
-            distance,
-        )
-        return distance, dra, ddec
-
-    def distance_opt(self, ephems: Iterable[Ephemeris]) -> Tuple[float, float, float]:
+    def distance(self, ephems: Iterable[Ephemeris]) -> Tuple[float, float, float]:
         """
         Calculate the Haversine distance and residuals in degrees between this observation
         and a predicted ephemeris.

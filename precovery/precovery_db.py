@@ -98,62 +98,6 @@ class PrecoveryDatabase:
         """
         Find observations which match orbit in the database. Observations are
         searched in descending order by mjd.
-        orbit: The orbit to match.
-        max_matches: End once this many matches have been found. If None, find
-        all matches.
-        start_mjd: Only consider observations from after this epoch
-        (inclusive). If None, find all.
-        end_mjd: Only consider observations from before this epoch (inclusive).
-        If None, find all.
-        """
-        # basically:
-        """
-        find all windows between start and end of given size
-        for each window:
-            propagate to window center
-            for each unique epoch,obscode in window:
-                propagate to epoch
-                find frames which match healpix of propagation
-                for each matching frame
-                    find matching observations
-                    for each matching observation
-                        yield match
-        """
-        if start_mjd is None or end_mjd is None:
-            first, last = self.frames.idx.mjd_bounds()
-            if start_mjd is None:
-                start_mjd = first
-            if end_mjd is None:
-                end_mjd = last
-
-        n = 0
-        logger.info(
-            "precovering orbit %s from %f.6f to %f.5f, window=%d",
-            orbit.orbit_id,
-            start_mjd,
-            end_mjd,
-            self.window_size,
-        )
-        windows = self.frames.idx.window_centers(start_mjd, end_mjd, self.window_size)
-        for mjd, obscode in windows:
-            matches = self._check_window(mjd, obscode, orbit, tolerance)
-            for result in matches:
-                yield result
-                n += 1
-                if max_matches is not None and n >= max_matches:
-                    return
-
-    def precover_opt(
-        self,
-        orbit: Orbit,
-        tolerance: float = 30 * ARCSEC,
-        max_matches: Optional[int] = None,
-        start_mjd: Optional[float] = None,
-        end_mjd: Optional[float] = None,
-    ):
-        """
-        Find observations which match orbit in the database. Observations are
-        searched in descending order by mjd.
 
         orbit: The orbit to match.
 
@@ -201,14 +145,14 @@ class PrecoveryDatabase:
             windows, key=lambda pair: pair[1]
         ):
             mjds = [window[0] for window in obs_windows]
-            matches = self._check_windows_opt(mjds, obscode, orbit, tolerance)
+            matches = self._check_windows(mjds, obscode, orbit, tolerance)
             for result in matches:
                 yield result
                 n += 1
                 if max_matches is not None and n >= max_matches:
                     return
 
-    def _check_windows_opt(
+    def _check_windows(
         self,
         window_midpoints: Iterable[float],
         obscode: str,
@@ -218,7 +162,7 @@ class PrecoveryDatabase:
         """
         Find all observations that match orbit within a list of windows
         """
-        window_ephems = orbit.compute_ephemeris_opt(obscode, window_midpoints)
+        window_ephems = orbit.compute_ephemeris(obscode, window_midpoints)
         window_healpixels = radec_to_healpixel(
             np.array([w.ra for w in window_ephems]),
             np.array([w.dec for w in window_ephems]),
@@ -242,7 +186,7 @@ class PrecoveryDatabase:
                 test_mjds.append(mjd)
                 test_healpixels.append(healpixels)
 
-            approx_ras, approx_decs = window_ephem.approximately_propagate_opt(
+            approx_ras, approx_decs = window_ephem.approximately_propagate(
                 obscode,
                 orbit,
                 timedeltas,
@@ -273,177 +217,15 @@ class PrecoveryDatabase:
                 keep_approx_healpixels.append(approx_healpix)
 
             if len(keep_mjds) > 0:
-                matches = self._check_frames_opt_2(
+                matches = self._check_frames(
                     orbit, keep_approx_healpixels, obscode, keep_mjds, tolerance
                 )
                 for m in matches:
                     yield m
 
-    def _check_window(
-        self, window_midpoint: float, obscode: str, orbit: Orbit, tolerance: float
-    ):
-        """
-        Find all observations that match orbit within a single window
-        """
-        logger.debug("checking window %.2f in obs=%s", window_midpoint, obscode)
-        window_ephem = orbit.compute_ephemeris(obscode, window_midpoint)
-        window_healpixel = radec_to_healpixel(
-            window_ephem.ra, window_ephem.dec, self.frames.healpix_nside
-        )
-        logger.debug(
-            "propagated window midpoint to %s (healpixel: %d)",
-            window_ephem,
-            window_healpixel,
-        )
-
-        start_mjd = window_midpoint - (self.window_size / 2)
-        end_mjd = window_midpoint + (self.window_size / 2)
-        for mjd, healpixels in self.frames.idx.propagation_targets(
-            start_mjd, end_mjd, obscode
-        ):
-            logger.debug("mjd=%.6f:\thealpixels with data: %r", mjd, healpixels)
-            timedelta = mjd - window_midpoint
-            approx_ra, approx_dec = window_ephem.approximately_propagate(
-                obscode,
-                orbit,
-                timedelta,
-            )
-            approx_healpix = int(
-                radec_to_healpixel(approx_ra, approx_dec, self.frames.healpix_nside)
-            )
-            logger.debug(
-                "mjd=%.6f:\tephemeris at ra=%.3f\tdec=%.3f\thealpix=%d",
-                mjd,
-                approx_ra,
-                approx_dec,
-                approx_healpix,
-            )
-
-            if approx_healpix not in healpixels:
-                # No exposures anywhere near the ephem, so move on.
-                continue
-            logger.debug("mjd=%.6f: healpixel collision, checking frames", mjd)
-            matches = self._check_frames(orbit, approx_healpix, obscode, mjd, tolerance)
-            for m in matches:
-                yield m
-
-    def _check_window_opt(
-        self, window_midpoint: float, obscode: str, orbit: Orbit, tolerance: float
-    ):
-        """
-        Find all observations that match orbit within a single window
-        """
-        logger.debug("checking window %.2f in obs=%s", window_midpoint, obscode)
-        window_ephem = orbit.compute_ephemeris(obscode, window_midpoint)
-        window_healpixel = radec_to_healpixel(
-            window_ephem.ra, window_ephem.dec, self.frames.healpix_nside
-        )
-        logger.debug(
-            "propagated window midpoint to %s (healpixel: %d)",
-            window_ephem,
-            window_healpixel,
-        )
-
-        start_mjd = window_midpoint - (self.window_size / 2)
-        end_mjd = window_midpoint + (self.window_size / 2)
-        timedeltas = []
-        test_mjds = []
-        test_healpixels = []
-        for mjd, healpixels in self.frames.idx.propagation_targets(
-            start_mjd, end_mjd, obscode
-        ):
-            logger.debug("mjd=%.6f:\thealpixels with data: %r", mjd, healpixels)
-            timedelta = mjd - window_midpoint
-            timedeltas.append(timedelta)
-            test_mjds.append(mjd)
-            test_healpixels.append(healpixels)
-
-        approx_ras, approx_decs = window_ephem.approximately_propagate_opt(
-            obscode,
-            orbit,
-            timedeltas,
-        )
-        approx_healpixels = radec_to_healpixel(
-            approx_ras, approx_decs, self.frames.healpix_nside
-        ).astype(int)
-        keep_mjds = []
-        keep_approx_healpixels = []
-        for mjd, healpixels, approx_ra, approx_dec, approx_healpix in zip(
-            test_mjds, test_healpixels, approx_ras, approx_decs, approx_healpixels
-        ):
-            logger.debug("mjd=%.6f:\thealpixels with data: %r", mjd, healpixels)
-            logger.debug(
-                "mjd=%.6f:\tephemeris at ra=%.3f\tdec=%.3f\thealpix=%d",
-                mjd,
-                approx_ra,
-                approx_dec,
-                approx_healpix,
-            )
-
-            if approx_healpix not in healpixels:
-                # No exposures anywhere near the ephem, so move on.
-                continue
-            logger.debug("mjd=%.6f: healpixel collision, checking frames", mjd)
-            keep_mjds.append(mjd)
-            keep_approx_healpixels.append(approx_healpix)
-
-        if len(keep_mjds) > 0:
-            matches = self._check_frames_opt_2(
-                orbit, keep_approx_healpixels, obscode, keep_mjds, tolerance
-            )
-            for m in matches:
-                yield m
-
     def _check_frames(
         self,
         orbit: Orbit,
-        healpix: int,
-        obscode: str,
-        mjd: float,
-        tolerance: float,
-    ) -> Iterator[PrecoveryCandidate]:
-        """
-        Deeply inspect all frames that match the given obscode, mjd, and healpix to
-        see if they contain observations which match the ephemeris.
-        """
-        # Compute the position of the ephem carefully.
-        exact_ephem = orbit.compute_ephemeris(obscode, mjd)
-        frames = self.frames.idx.get_frames(obscode, mjd, healpix)
-        logger.info(
-            "checking frames for healpix=%d obscode=%s mjd=%f", healpix, obscode, mjd
-        )
-        n_frame = 0
-        for f in frames:
-            logger.info("checking frame: %s", f)
-            n = 0
-            for obs in self.frames.iterate_observations(f):
-                n += 1
-                distance, dra, ddec = obs.distance(exact_ephem)
-                if distance < tolerance:
-                    candidate = PrecoveryCandidate(
-                        ra=obs.ra,
-                        dec=obs.dec,
-                        ra_sigma=obs.ra_sigma,
-                        dec_sigma=obs.dec_sigma,
-                        mag=obs.mag,
-                        mag_sigma=obs.mag_sigma,
-                        filter=f.filter,
-                        obscode=f.obscode,
-                        mjd=f.mjd,
-                        catalog_id=f.catalog_id,
-                        id=obs.id.decode(),
-                        dra=dra,
-                        ddec=ddec,
-                        distance=distance,
-                    )
-                    yield candidate
-            logger.info("checked %d observations in frame", n)
-            n_frame += 1
-        logger.info("checked %d frames", n_frame)
-
-    def _check_frames_opt(
-        self,
-        orbit: Orbit,
         healpixels: Iterable[int],
         obscode: str,
         mjds: Iterable[float],
@@ -454,58 +236,7 @@ class PrecoveryDatabase:
         see if they contain observations which match the ephemeris.
         """
         # Compute the position of the ephem carefully.
-        exact_ephems = orbit.compute_ephemeris_opt(obscode, mjds)
-        for exact_ephem, mjd, healpix in zip(exact_ephems, mjds, healpixels):
-            frames = self.frames.idx.get_frames(obscode, mjd, healpix)
-            logger.info(
-                "checking frames for healpix=%d obscode=%s mjd=%f",
-                healpix,
-                obscode,
-                mjd,
-            )
-            n_frame = 0
-            for f in frames:
-                logger.info("checking frame: %s", f)
-                n = 0
-                for obs in self.frames.iterate_observations(f):
-                    n += 1
-                    distance, dra, ddec = obs.distance(exact_ephem)
-                    if distance < tolerance:
-                        candidate = PrecoveryCandidate(
-                            ra=obs.ra,
-                            dec=obs.dec,
-                            ra_sigma=obs.ra_sigma,
-                            dec_sigma=obs.dec_sigma,
-                            mag=obs.mag,
-                            mag_sigma=obs.mag_sigma,
-                            filter=f.filter,
-                            obscode=f.obscode,
-                            mjd=f.mjd,
-                            catalog_id=f.catalog_id,
-                            id=obs.id.decode(),
-                            dra=dra,
-                            ddec=ddec,
-                            distance=distance,
-                        )
-                        yield candidate
-                logger.info("checked %d observations in frame", n)
-                n_frame += 1
-            logger.info("checked %d frames", n_frame)
-
-    def _check_frames_opt_2(
-        self,
-        orbit: Orbit,
-        healpixels: Iterable[int],
-        obscode: str,
-        mjds: Iterable[float],
-        tolerance: float,
-    ) -> Iterator[PrecoveryCandidate]:
-        """
-        Deeply inspect all frames that match the given obscode, mjd, and healpix to
-        see if they contain observations which match the ephemeris.
-        """
-        # Compute the position of the ephem carefully.
-        exact_ephems = orbit.compute_ephemeris_opt(obscode, mjds)
+        exact_ephems = orbit.compute_ephemeris(obscode, mjds)
         for exact_ephem, mjd, healpix in zip(exact_ephems, mjds, healpixels):
             frames = self.frames.idx.get_frames(obscode, mjd, healpix)
             logger.info(
