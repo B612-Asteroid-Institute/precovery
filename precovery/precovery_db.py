@@ -30,7 +30,7 @@ class PrecoveryCandidate:
     filter: str
     obscode: str
     mjd: float
-    catalog_id: str
+    exposure_id: str
     id: str
     dra: float
     ddec: float
@@ -277,7 +277,7 @@ class PrecoveryDatabase:
                         filter=f.filter,
                         obscode=f.obscode,
                         mjd=f.mjd,
-                        catalog_id=f.catalog_id,
+                        exposure_id=f.exposure_id,
                         id=o.id.decode(),
                         dra=dra,
                         ddec=ddec,

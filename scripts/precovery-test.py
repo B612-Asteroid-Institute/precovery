@@ -39,7 +39,7 @@ def matches_to_df(matches):
     df = df[
         [
             "id",
-            "catalog_id",
+            "exposure_id",
             "obscode",
             "mjd",
             "ra",
