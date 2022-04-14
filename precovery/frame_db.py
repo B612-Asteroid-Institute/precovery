@@ -6,6 +6,7 @@ import os
 import struct
 from typing import Iterable, Iterator, Optional, Set, Tuple
 
+import numpy as np
 import sqlalchemy as sq
 from rich.progress import BarColumn, Progress, TimeElapsedColumn, TimeRemainingColumn
 from sqlalchemy.sql import func as sqlfunc
@@ -18,6 +19,7 @@ from .spherical_geom import haversine_distance_deg
 DATA_LAYOUT = "<ddddddl"
 
 logger = logging.getLogger("frame_db")
+
 
 @dataclasses.dataclass
 class HealpixFrame:
@@ -75,7 +77,7 @@ class Observation:
             self.dec_sigma,
             self.mag,
             self.mag_sigma,
-            len(self.id)
+            len(self.id),
         )
         return prefix + self.id
 
@@ -91,25 +93,31 @@ class Observation:
             dec_sigma=so.dec_sigma,
             mag=so.mag,
             mag_sigma=so.mag_sigma,
-            id=so.id
+            id=so.id,
         )
 
-    def distance(self, ephem: Ephemeris) -> Tuple[float, float, float]:
+    def distance(self, ephems: Iterable[Ephemeris]) -> Tuple[float, float, float]:
         """
         Calculate the Haversine distance and residuals in degrees between this observation
         and a predicted ephemeris.
         """
-        distance = haversine_distance_deg(self.ra, ephem.ra, self.dec, ephem.dec)
-        dra = ephem.ra - self.ra
-        ddec = ephem.dec - self.dec
-        logger.debug(
-            "%.4f, %.4f -> %.4f, %.4f = %.6f",
+        distance = haversine_distance_deg(
             self.ra,
+            np.array([ephem.ra for ephem in ephems]),
             self.dec,
-            ephem.ra,
-            ephem.dec,
-            distance,
+            np.array([ephem.dec for ephem in ephems]),
         )
+        dra = np.array([ephem.ra - self.ra for ephem in ephems])
+        ddec = np.array([ephem.dec - self.dec for ephem in ephems])
+        for ephem, distance in zip(ephems, distance):
+            logger.debug(
+                "%.4f, %.4f -> %.4f, %.4f = %.6f",
+                self.ra,
+                self.dec,
+                ephem.ra,
+                ephem.dec,
+                distance,
+            )
         return distance, dra, ddec
 
 
@@ -120,7 +128,17 @@ class FrameIndex:
         self.initialize_tables()
 
     @classmethod
-    def open(cls, db_uri):
+    def open(cls, db_uri, mode: str = "r"):
+
+        if (mode != "r") and (mode != "w"):
+            err = (
+                "mode should be one of {'r', 'w'}"
+            )
+            raise ValueError(err)
+
+        if db_uri.startswith('sqlite:///') and (mode == "r"):
+            db_uri += "?mode=ro"
+
         engine = sq.create_engine(db_uri)
         return cls(engine)
 
@@ -237,7 +255,9 @@ class FrameIndex:
             mjds.add(r[4])
 
         if len(mjds) > 1:
-            logger.warn(f"Query returned non-unique MJDs for mjd: {mjd}, healpix: {int(healpixel)}, obscode: {obscode}.")
+            logger.warn(
+                f"Query returned non-unique MJDs for mjd: {mjd}, healpix: {int(healpixel)}, obscode: {obscode}."
+            )
 
         for r in rows:
             yield HealpixFrame(*r)
@@ -403,17 +423,16 @@ class FrameIndex:
                 sq.Sequence("frame_id_seq"),
                 primary_key=True,
             ),
-            sq.Column("obscode", sq.String),
+            sq.Column("obscode", sq.String, index=True),
             sq.Column("catalog_id", sq.String),
             sq.Column("filter", sq.String),
-            sq.Column("mjd", sq.Float),
-            sq.Column("healpixel", sq.Integer),
+            sq.Column("mjd", sq.Float, index=True),
+            sq.Column("healpixel", sq.Integer, index=True),
             sq.Column("data_uri", sq.String),
             sq.Column("data_offset", sq.Integer),
             sq.Column("data_length", sq.Integer),
         )
         self._metadata.create_all(self.db)
-
 
 class FrameDB:
     def __init__(
@@ -437,13 +456,13 @@ class FrameDB:
             f.close()
 
     def load_hdf5(
-            self,
-            hdf5_file: str,
-            skip: int = 0,
-            limit: Optional[int] = None,
-            key: str = "data",
-            chunksize: int = 100000
-        ):
+        self,
+        hdf5_file: str,
+        skip: int = 0,
+        limit: Optional[int] = None,
+        key: str = "data",
+        chunksize: int = 100000,
+    ):
         """
         Load data from an NSC HDF5 catalog file.
 
@@ -460,7 +479,7 @@ class FrameDB:
             nside=self.healpix_nside,
             skip=skip,
             key=key,
-            chunksize=chunksize
+            chunksize=chunksize,
         ):
             observations = [Observation.from_srcobs(o) for o in src_frame.observations]
             data_uri, offset, length = self.store_observations(observations)
@@ -484,7 +503,7 @@ class FrameDB:
         for f in files:
             abspath = os.path.abspath(f)
             name = os.path.basename(f)
-            self.data_files[name] = open(abspath, "a+b")
+            self.data_files[name] = open(abspath, "rb")
         self.n_data_files = len(self.data_files) - 1
         if self.n_data_files <= 0:
             self.new_data_file()
@@ -514,7 +533,9 @@ class FrameDB:
         bytes_read = 0
         while bytes_read < exp.data_length:
             raw = f.read(datagram_size)
-            ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id_size = data_layout.unpack(raw)
+            ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id_size = data_layout.unpack(
+                raw
+            )
             id = f.read(id_size)
             bytes_read += datagram_size + id_size
             yield Observation(ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id)
@@ -591,7 +612,12 @@ class FrameDB:
                     observations = list(self.iterate_observations(frame))
                     cur_key = (frame.obscode, frame.filter, frame.mjd, frame.healpixel)
                     last_catalog_id = frame.catalog_id
-                elif (frame.obscode, frame.filter, frame.mjd, frame.healpixel) == cur_key:
+                elif (
+                    frame.obscode,
+                    frame.filter,
+                    frame.mjd,
+                    frame.healpixel,
+                ) == cur_key:
                     # Extending existing frame
                     observations.extend(self.iterate_observations(frame))
 

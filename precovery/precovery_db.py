@@ -1,11 +1,15 @@
 import dataclasses
+import itertools
 import logging
 import os.path
-from typing import Dict, Iterator, Optional
+from typing import Dict, Iterable, Iterator, Optional, Tuple
+
+import numpy as np
 
 from .frame_db import FrameDB, FrameIndex
 from .healpix_geom import radec_to_healpixel
 from .orbit import Orbit
+from .spherical_geom import haversine_distance_deg
 
 DEGREE = 1.0
 ARCMIN = DEGREE / 60
@@ -40,7 +44,7 @@ class PrecoveryDatabase:
         self._exposures_by_obscode: dict = {}
 
     @classmethod
-    def from_dir(cls, directory: str, create: bool = False):
+    def from_dir(cls, directory: str, create: bool = False, mode: str = "r"):
         if not os.path.exists(directory):
             if create:
                 return cls.create(directory)
@@ -53,7 +57,7 @@ class PrecoveryDatabase:
         }
 
         frame_idx_db = "sqlite:///" + os.path.join(directory, "index.db")
-        frame_idx = FrameIndex.open(frame_idx_db)
+        frame_idx = FrameIndex.open(frame_idx_db, mode=mode)
 
         data_path = os.path.join(directory, "data")
         frame_db = FrameDB(
@@ -135,68 +139,96 @@ class PrecoveryDatabase:
             self.window_size,
         )
         windows = self.frames.idx.window_centers(start_mjd, end_mjd, self.window_size)
-        for mjd, obscode in windows:
-            matches = self._check_window(mjd, obscode, orbit, tolerance)
+
+        # group windows by obscodes so that many windows can be searched at once
+        for obscode, obs_windows in itertools.groupby(
+            windows, key=lambda pair: pair[1]
+        ):
+            mjds = [window[0] for window in obs_windows]
+            matches = self._check_windows(mjds, obscode, orbit, tolerance)
             for result in matches:
                 yield result
                 n += 1
                 if max_matches is not None and n >= max_matches:
                     return
 
-    def _check_window(
-        self, window_midpoint: float, obscode: str, orbit: Orbit, tolerance: float
+    def _check_windows(
+        self,
+        window_midpoints: Iterable[float],
+        obscode: str,
+        orbit: Orbit,
+        tolerance: float,
     ):
         """
-        Find all observations that match orbit within a single window
+        Find all observations that match orbit within a list of windows
         """
-        logger.debug("checking window %.2f in obs=%s", window_midpoint, obscode)
-        window_ephem = orbit.compute_ephemeris(obscode, window_midpoint)
-        window_healpixel = radec_to_healpixel(
-            window_ephem.ra, window_ephem.dec, self.frames.healpix_nside
-        )
-        logger.debug(
-            "propagated window midpoint to %s (healpixel: %d)",
-            window_ephem,
-            window_healpixel,
-        )
+        window_ephems = orbit.compute_ephemeris(obscode, window_midpoints)
+        window_healpixels = radec_to_healpixel(
+            np.array([w.ra for w in window_ephems]),
+            np.array([w.dec for w in window_ephems]),
+            self.frames.healpix_nside,
+        ).astype(int)
 
-        start_mjd = window_midpoint - (self.window_size / 2)
-        end_mjd = window_midpoint + (self.window_size / 2)
-        for mjd, healpixels in self.frames.idx.propagation_targets(
-            start_mjd, end_mjd, obscode
+        for window_midpoint, window_ephem, window_healpixel in zip(
+            window_midpoints, window_ephems, window_healpixels
         ):
-            logger.debug("mjd=%.6f:\thealpixels with data: %r", mjd, healpixels)
-            timedelta = mjd - window_midpoint
-            approx_ra, approx_dec = window_ephem.approximately_propagate(
+            start_mjd = window_midpoint - (self.window_size / 2)
+            end_mjd = window_midpoint + (self.window_size / 2)
+            timedeltas = []
+            test_mjds = []
+            test_healpixels = []
+            for mjd, healpixels in self.frames.idx.propagation_targets(
+                start_mjd, end_mjd, obscode
+            ):
+                logger.debug("mjd=%.6f:\thealpixels with data: %r", mjd, healpixels)
+                timedelta = mjd - window_midpoint
+                timedeltas.append(timedelta)
+                test_mjds.append(mjd)
+                test_healpixels.append(healpixels)
+
+            approx_ras, approx_decs = window_ephem.approximately_propagate(
                 obscode,
                 orbit,
-                timedelta,
+                timedeltas,
             )
-            approx_healpix = int(
-                radec_to_healpixel(approx_ra, approx_dec, self.frames.healpix_nside)
-            )
-            logger.debug(
-                "mjd=%.6f:\tephemeris at ra=%.3f\tdec=%.3f\thealpix=%d",
-                mjd,
-                approx_ra,
-                approx_dec,
-                approx_healpix,
-            )
+            approx_healpixels = radec_to_healpixel(
+                approx_ras, approx_decs, self.frames.healpix_nside
+            ).astype(int)
 
-            if approx_healpix not in healpixels:
-                # No exposures anywhere near the ephem, so move on.
-                continue
-            logger.debug("mjd=%.6f: healpixel collision, checking frames", mjd)
-            matches = self._check_frames(orbit, approx_healpix, obscode, mjd, tolerance)
-            for m in matches:
-                yield m
+            keep_mjds = []
+            keep_approx_healpixels = []
+            for mjd, healpixels, approx_ra, approx_dec, approx_healpix in zip(
+                test_mjds, test_healpixels, approx_ras, approx_decs, approx_healpixels
+            ):
+                logger.debug("mjd=%.6f:\thealpixels with data: %r", mjd, healpixels)
+                logger.debug(
+                    "mjd=%.6f:\tephemeris at ra=%.3f\tdec=%.3f\thealpix=%d",
+                    mjd,
+                    approx_ra,
+                    approx_dec,
+                    approx_healpix,
+                )
+
+                if approx_healpix not in healpixels:
+                    # No exposures anywhere near the ephem, so move on.
+                    continue
+                logger.debug("mjd=%.6f: healpixel collision, checking frames", mjd)
+                keep_mjds.append(mjd)
+                keep_approx_healpixels.append(approx_healpix)
+
+            if len(keep_mjds) > 0:
+                matches = self._check_frames(
+                    orbit, keep_approx_healpixels, obscode, keep_mjds, tolerance
+                )
+                for m in matches:
+                    yield m
 
     def _check_frames(
         self,
         orbit: Orbit,
-        healpix: int,
+        healpixels: Iterable[int],
         obscode: str,
-        mjd: float,
+        mjds: Iterable[float],
         tolerance: float,
     ) -> Iterator[PrecoveryCandidate]:
         """
@@ -204,36 +236,54 @@ class PrecoveryDatabase:
         see if they contain observations which match the ephemeris.
         """
         # Compute the position of the ephem carefully.
-        exact_ephem = orbit.compute_ephemeris(obscode, mjd)
-        frames = self.frames.idx.get_frames(obscode, mjd, healpix)
-        logger.info(
-            "checking frames for healpix=%d obscode=%s mjd=%f", healpix, obscode, mjd
-        )
-        n_frame = 0
-        for f in frames:
-            logger.info("checking frame: %s", f)
-            n = 0
-            for obs in self.frames.iterate_observations(f):
-                n += 1
-                distance, dra, ddec = obs.distance(exact_ephem)
-                if distance < tolerance:
+        exact_ephems = orbit.compute_ephemeris(obscode, mjds)
+        for exact_ephem, mjd, healpix in zip(exact_ephems, mjds, healpixels):
+            frames = self.frames.idx.get_frames(obscode, mjd, healpix)
+            logger.info(
+                "checking frames for healpix=%d obscode=%s mjd=%f",
+                healpix,
+                obscode,
+                mjd,
+            )
+            n_frame = 0
+            for f in frames:
+                logger.info("checking frame: %s", f)
+                obs = np.array(list(self.frames.iterate_observations(f)))
+                n = len(obs)
+                obs_ras = np.array([o.ra for o in obs])
+                obs_decs = np.array([o.dec for o in obs])
+                distances = haversine_distance_deg(
+                    exact_ephem.ra,
+                    obs_ras,
+                    exact_ephem.dec,
+                    obs_decs,
+                )
+                dras = exact_ephem.ra - obs_ras
+                ddecs = exact_ephem.dec - obs_decs
+                # filter to observations with distance below tolerance
+                idx = distances < tolerance
+                distances = distances[idx]
+                dras = dras[idx]
+                ddecs = ddecs[idx]
+                obs = obs[idx]
+                for o, distance, dra, ddec in zip(obs, distances, dras, ddecs):
                     candidate = PrecoveryCandidate(
-                        ra=obs.ra,
-                        dec=obs.dec,
-                        ra_sigma=obs.ra_sigma,
-                        dec_sigma=obs.dec_sigma,
-                        mag=obs.mag,
-                        mag_sigma=obs.mag_sigma,
+                        ra=o.ra,
+                        dec=o.dec,
+                        ra_sigma=o.ra_sigma,
+                        dec_sigma=o.dec_sigma,
+                        mag=o.mag,
+                        mag_sigma=o.mag_sigma,
                         filter=f.filter,
                         obscode=f.obscode,
                         mjd=f.mjd,
                         catalog_id=f.catalog_id,
-                        id=obs.id.decode(),
+                        id=o.id.decode(),
                         dra=dra,
                         ddec=ddec,
                         distance=distance,
                     )
                     yield candidate
-            logger.info("checked %d observations in frame", n)
-            n_frame += 1
-        logger.info("checked %d frames", n_frame)
+                logger.info("checked %d observations in frame", n)
+                n_frame += 1
+            logger.info("checked %d frames", n_frame)
