@@ -1,20 +1,31 @@
 import enum
-from typing import Iterable, Tuple
-
 import numpy as np
 import numpy.typing as npt
 import pyoorb
+import requests as req
+
+from astropy.time import Time
+from os import getenv
+from typing import (
+    Iterable,
+    Optional,
+    Tuple
+)
 
 from .spherical_geom import propagate_linearly, propagate_linearly
 
 pyoorb_initialized = False
 
+DEGREE = 1.0
+ARCMIN = DEGREE / 60
+ARCSEC = ARCMIN / 60
 
 def _ensure_pyoorb_initialized(*args, **kwargs):
     """Make sure that pyoorb is initialized."""
     global pyoorb_initialized
     if not pyoorb_initialized:
         pyoorb.pyoorb.oorb_init(*args, **kwargs)
+        pyoorb_initialized = True
 
 
 class OrbitElementType(enum.Enum):
@@ -168,7 +179,7 @@ class Orbit:
     def propagate(
         self, epoch: float, method: PropagationIntegrator = PropagationIntegrator.N_BODY
     ) -> "Orbit":
-        _ensure_pyoorb_initialized()
+        _ensure_pyoorb_initialized(error_verbosity = 1)
 
         epoch_array = np.array(
             [epoch, self._epoch_timescale.value], dtype=np.double, order="F"
@@ -201,7 +212,7 @@ class Orbit:
 
         obscode should be a Minor Planet Center observatory code.
         """
-        _ensure_pyoorb_initialized()
+        _ensure_pyoorb_initialized(error_verbosity=1)
         epochs_array = np.array(
             [[epoch, self._epoch_timescale.value] for epoch in epochs],
             dtype=np.double,
@@ -227,6 +238,125 @@ class Orbit:
         # print(eph.shape)
         assert err == 0
         return [Ephemeris(eph[0, i, :]) for i in range(epochs_array.shape[0])]
+
+    def precover_remote(
+        self,
+        tolerance: float = 30 * ARCSEC,
+        max_matches: Optional[int] = None,
+        start_mjd: Optional[float] = None,
+        end_mjd: Optional[float] = None,
+        window_size: Optional[float] = None,
+    ):
+        """
+        Find observations which match orbit in the database. Observations are
+        searched in descending order by mjd.
+
+        Expects three environment variables:
+        PRECOVERY_API_SINGLEORBIT_URL
+        PRECOVERY_API_SINGLEORBIT_USERNAME
+        PRECOVERY_API_SINGLEORBIT_PASSWORD
+
+        max_matches: End once this many matches have been found. If None, find
+        all matches.
+
+        start_mjd: Only consider observations from after this epoch
+        (inclusive). If None, find all.
+
+        end_mjd: Only consider observations from before this epoch (inclusive).
+        If None, find all.
+
+        window_size: UNIMPLEMENTED
+        """
+        # basically:
+        """
+        find all windows between start and end of given size
+        for each window:
+            propagate to window center
+            for each unique epoch,obscode in window:
+                propagate to epoch
+                find frames which match healpix of propagation
+                for each matching frame
+                    find matching observations
+                    for each matching observation
+                        yield match
+        """
+
+        # Check for environment set vars
+        precovery_singleorbit_url = getenv("PRECOVERY_API_SINGLEORBIT_URL")
+        api_username = getenv("PRECOVERY_API_SINGLEORBIT_USERNAME")
+        # Note Password suffix results in encryption and storage in systems keys for conda env
+        # (https://anaconda-project.readthedocs.io/en/latest/user-guide/tasks/work-with-variables.html#adding-an-encrypted-variable)
+        api_password = getenv("PRECOVERY_API_SINGLEORBIT_PASSWORD")
+
+        if not (precovery_singleorbit_url and api_username and api_password):
+            raise ValueError(
+                """one of required environment variables unset, expecting PRECOVERY_API_SINGLEORBIT_URL,
+            PRECOVERY_API_SINGLEORBIT_USERNAME, PRECOVERY_API_SINGLEORBIT_PASSWORD"""
+            )
+
+        if self._orbit_type == OrbitElementType.KEPLERIAN:
+            orbit_type = "kep"
+            state_vector = {
+                "a": self._state_vector[0][1],
+                "e": self._state_vector[0][2],
+                "i": self._state_vector[0][3],
+                "an": self._state_vector[0][4],
+                "ap": self._state_vector[0][5],
+                "ma": self._state_vector[0][6],
+            }
+        elif self._orbit_type == OrbitElementType.COMETARY:
+            orbit_type = "com"
+            state_vector = {
+                "q": self._state_vector[0][1],
+                "e": self._state_vector[0][2],
+                "i": self._state_vector[0][3],
+                "an": self._state_vector[0][4],
+                "ap": self._state_vector[0][5],
+                "tp": self._state_vector[0][6],
+            }
+        elif self._orbit_type == OrbitElementType.CARTESIAN:
+            orbit_type = "car"
+            state_vector = {
+                "x": self._state_vector[0][1],
+                "y": self._state_vector[0][2],
+                "z": self._state_vector[0][3],
+                "vx": self._state_vector[0][4],
+                "vy": self._state_vector[0][5],
+                "vz": self._state_vector[0][6],
+            }
+        else:
+            raise ValueError("orbit type improperly defined %r" % self._orbit_type)
+
+        # Compile request dictionary
+
+        if self._epoch_timescale == EpochTimescale.UTC:
+            scale = "utc"
+        elif self._epoch_timescale == EpochTimescale.UT1:
+            scale = "ut1"
+        elif self._epoch_timescale == EpochTimescale.TT:
+            scale = "tt"
+        elif self._epoch_timescale == EpochTimescale.TAI:
+            scale = "tai"
+        mjd_tdb = Time(self._epoch, scale=scale, format="mjd").tdb.mjd
+        post_json = {
+            "tolerance": tolerance,
+            "orbit_type": orbit_type,
+            "mjd_tdb": mjd_tdb,
+        }
+        post_json = post_json | state_vector
+        if max_matches:
+            post_json["max_matches"] = max_matches
+        if start_mjd:
+            post_json["start_mjd"] = start_mjd
+        if end_mjd:
+            post_json["end_mjd"] = end_mjd
+        if window_size:
+            post_json["window_size"] = window_size
+
+        precovery_req = req.post(
+            precovery_singleorbit_url, json=post_json, auth=(api_username, api_password)
+        )
+        return precovery_req.json()
 
 
 class Ephemeris:
