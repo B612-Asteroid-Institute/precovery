@@ -5,6 +5,13 @@ import os.path
 from typing import Dict, Iterable, Iterator, Optional, Tuple
 
 import numpy as np
+from typing import (
+    Dict,
+    Iterable,
+    Iterator,
+    Optional,
+    Union
+)
 
 from .frame_db import FrameDB, FrameIndex
 from .healpix_geom import radec_to_healpixel
@@ -18,23 +25,23 @@ ARCSEC = ARCMIN / 60
 logging.basicConfig()
 logger = logging.getLogger("precovery")
 
-
 @dataclasses.dataclass
 class PrecoveryCandidate:
-    ra: float
-    dec: float
-    ra_sigma: float
-    dec_sigma: float
+    mjd_utc: float
+    ra_deg: float
+    dec_deg: float
+    ra_sigma_arcsec: float
+    dec_sigma_arcsec: float
     mag: float
     mag_sigma: float
     filter: str
     obscode: str
-    mjd: float
     exposure_id: str
-    id: str
-    dra: float
-    ddec: float
-    distance: float
+    observation_id: str
+    healpix_id: int
+    delta_ra_arcsec: float
+    delta_dec_arcsec: float
+    distance_arcsec: float
 
 
 class PrecoveryDatabase:
@@ -268,20 +275,21 @@ class PrecoveryDatabase:
                 obs = obs[idx]
                 for o, distance, dra, ddec in zip(obs, distances, dras, ddecs):
                     candidate = PrecoveryCandidate(
-                        ra=o.ra,
-                        dec=o.dec,
-                        ra_sigma=o.ra_sigma,
-                        dec_sigma=o.dec_sigma,
+                        mjd_utc=f.mjd,
+                        ra_deg=o.ra,
+                        dec_deg=o.dec,
+                        ra_sigma_arcsec=o.ra_sigma/ARCSEC,
+                        dec_sigma_arcsec=o.dec_sigma/ARCSEC,
                         mag=o.mag,
                         mag_sigma=o.mag_sigma,
                         filter=f.filter,
                         obscode=f.obscode,
-                        mjd=f.mjd,
                         exposure_id=f.exposure_id,
-                        id=o.id.decode(),
-                        dra=dra,
-                        ddec=ddec,
-                        distance=distance,
+                        observation_id=o.id.decode(),
+                        healpix_id=f.id,
+                        delta_ra_arcsec=dra/ARCSEC,
+                        delta_dec_arcsec=ddec/ARCSEC,
+                        distance_arcsec=distance/ARCSEC
                     )
                     yield candidate
                 logger.info("checked %d observations in frame", n)
