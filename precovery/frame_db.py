@@ -4,11 +4,22 @@ import itertools
 import logging
 import os
 import struct
-from typing import Iterable, Iterator, Optional, Set, Tuple
+from typing import (
+    Iterable,
+    Iterator,
+    Optional,
+    Set,
+    Tuple
+)
 
 import numpy as np
 import sqlalchemy as sq
-from rich.progress import BarColumn, Progress, TimeElapsedColumn, TimeRemainingColumn
+from rich.progress import (
+    BarColumn,
+    Progress,
+    TimeElapsedColumn,
+    TimeRemainingColumn
+)
 from sqlalchemy.sql import func as sqlfunc
 
 from . import sourcecatalog

@@ -4,13 +4,16 @@ import itertools
 import logging
 import numpy as np
 from typing import (
-    Dict,
     Iterable,
     Iterator,
     Optional,
     Union
 )
 
+from .config import (
+    Config,
+    DefaultConfig
+)
 from .frame_db import FrameDB, FrameIndex
 from .healpix_geom import radec_to_healpixel
 from .orbit import Orbit
@@ -57,18 +60,21 @@ class PrecoveryDatabase:
             if create:
                 return cls.create(directory)
 
-        # todo: serialize config into file
-        config: Dict[str, int] = {
-            "healpix_nside": 32,
-            "data_file_max_size": int(1e9),
-        }
+        try:
+            config = Config.from_json(
+                os.path.join(directory, "config.json")
+            )
+        except FileNotFoundError:
+            config = DefaultConfig
+            if not create:
+                logger.warning("No configuration file found. Adopting configuration defaults.")
 
         frame_idx_db = "sqlite:///" + os.path.join(directory, "index.db")
         frame_idx = FrameIndex.open(frame_idx_db, mode=mode)
 
         data_path = os.path.join(directory, "data")
         frame_db = FrameDB(
-            frame_idx, data_path, config["data_file_max_size"], config["healpix_nside"]
+            frame_idx, data_path, config.data_file_max_size, config.nside
         )
         return cls(frame_db)
 
@@ -76,8 +82,8 @@ class PrecoveryDatabase:
     def create(
         cls,
         directory: str,
-        healpix_nside: int = 32,
-        data_file_max_size: int = int(1e9),
+        nside: int = DefaultConfig.nside,
+        data_file_max_size: int = DefaultConfig.data_file_max_size,
     ):
         """
         Create a new database on disk in the given directory.
@@ -87,10 +93,16 @@ class PrecoveryDatabase:
         frame_idx_db = "sqlite:///" + os.path.join(directory, "index.db")
         frame_idx = FrameIndex.open(frame_idx_db)
 
+        config = Config(
+            nside=nside,
+            data_file_max_size=data_file_max_size
+        )
+        config.to_json(os.path.join(directory, "config.json"))
+
         data_path = os.path.join(directory, "data")
         os.makedirs(data_path)
 
-        frame_db = FrameDB(frame_idx, data_path, data_file_max_size, healpix_nside)
+        frame_db = FrameDB(frame_idx, data_path, data_file_max_size, nside)
         return cls(frame_db)
 
     def precover(
