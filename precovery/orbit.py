@@ -364,10 +364,10 @@ class Ephemeris:
         self._raw_data = raw_data
 
         self.mjd = raw_data[0]
-
         self.ra = raw_data[1]
         self.dec = raw_data[2]
-        self.ra_velocity = raw_data[3]  # deg per day
+        # oorb returns vracos(dec), so lets remove the cos(dec) term
+        self.ra_velocity = raw_data[3] / np.cos(np.radians(self.dec))  # deg per day
         self.dec_velocity = raw_data[4]  # deg per day
 
     def __str__(self):

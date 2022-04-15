@@ -39,6 +39,10 @@ class PrecoveryCandidate:
     exposure_id: str
     observation_id: str
     healpix_id: int
+    pred_ra_deg: float
+    pred_dec_deg: float
+    pred_vra_degpday: float
+    pred_vdec_degpday: float
     delta_ra_arcsec: float
     delta_dec_arcsec: float
     distance_arcsec: float
@@ -287,6 +291,10 @@ class PrecoveryDatabase:
                         exposure_id=f.exposure_id,
                         observation_id=o.id.decode(),
                         healpix_id=f.id,
+                        pred_ra_deg=exact_ephem.ra,
+                        pred_dec_deg=exact_ephem.dec,
+                        pred_vra_degpday=exact_ephem.ra_velocity,
+                        pred_vdec_degpday=exact_ephem.dec_velocity,
                         delta_ra_arcsec=dra/ARCSEC,
                         delta_dec_arcsec=ddec/ARCSEC,
                         distance_arcsec=distance/ARCSEC
