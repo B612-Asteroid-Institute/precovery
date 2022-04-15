@@ -1,10 +1,15 @@
+import os
 import dataclasses
 import itertools
 import logging
-import os.path
-from typing import Dict, Iterable, Iterator, Optional, Tuple
-
 import numpy as np
+from typing import (
+    Dict,
+    Iterable,
+    Iterator,
+    Optional,
+    Union
+)
 
 from .frame_db import FrameDB, FrameIndex
 from .healpix_geom import radec_to_healpixel
@@ -18,29 +23,32 @@ ARCSEC = ARCMIN / 60
 logging.basicConfig()
 logger = logging.getLogger("precovery")
 
-
 @dataclasses.dataclass
 class PrecoveryCandidate:
-    ra: float
-    dec: float
-    ra_sigma: float
-    dec_sigma: float
+    mjd_utc: float
+    ra_deg: float
+    dec_deg: float
+    ra_sigma_arcsec: float
+    dec_sigma_arcsec: float
     mag: float
     mag_sigma: float
     filter: str
     obscode: str
-    mjd: float
-    catalog_id: str
-    id: str
-    dra: float
-    ddec: float
-    distance: float
+    exposure_id: str
+    observation_id: str
+    healpix_id: int
+    pred_ra_deg: float
+    pred_dec_deg: float
+    pred_vra_degpday: float
+    pred_vdec_degpday: float
+    delta_ra_arcsec: float
+    delta_dec_arcsec: float
+    distance_arcsec: float
 
 
 class PrecoveryDatabase:
-    def __init__(self, frames: FrameDB, window_size: int):
+    def __init__(self, frames: FrameDB):
         self.frames = frames
-        self.window_size = window_size
         self._exposures_by_obscode: dict = {}
 
     @classmethod
@@ -53,7 +61,6 @@ class PrecoveryDatabase:
         config: Dict[str, int] = {
             "healpix_nside": 32,
             "data_file_max_size": int(1e9),
-            "window_size": 7,
         }
 
         frame_idx_db = "sqlite:///" + os.path.join(directory, "index.db")
@@ -63,7 +70,7 @@ class PrecoveryDatabase:
         frame_db = FrameDB(
             frame_idx, data_path, config["data_file_max_size"], config["healpix_nside"]
         )
-        return cls(frame_db, config["window_size"])
+        return cls(frame_db)
 
     @classmethod
     def create(
@@ -71,7 +78,6 @@ class PrecoveryDatabase:
         directory: str,
         healpix_nside: int = 32,
         data_file_max_size: int = int(1e9),
-        window_size: int = 7,
     ):
         """
         Create a new database on disk in the given directory.
@@ -85,7 +91,7 @@ class PrecoveryDatabase:
         os.makedirs(data_path)
 
         frame_db = FrameDB(frame_idx, data_path, data_file_max_size, healpix_nside)
-        return cls(frame_db, window_size)
+        return cls(frame_db)
 
     def precover(
         self,
@@ -94,6 +100,7 @@ class PrecoveryDatabase:
         max_matches: Optional[int] = None,
         start_mjd: Optional[float] = None,
         end_mjd: Optional[float] = None,
+        window_size: int = 7,
     ):
         """
         Find observations which match orbit in the database. Observations are
@@ -136,16 +143,17 @@ class PrecoveryDatabase:
             orbit.orbit_id,
             start_mjd,
             end_mjd,
-            self.window_size,
+            window_size,
         )
-        windows = self.frames.idx.window_centers(start_mjd, end_mjd, self.window_size)
+
+        windows = self.frames.idx.window_centers(start_mjd, end_mjd, window_size)
 
         # group windows by obscodes so that many windows can be searched at once
         for obscode, obs_windows in itertools.groupby(
             windows, key=lambda pair: pair[1]
         ):
             mjds = [window[0] for window in obs_windows]
-            matches = self._check_windows(mjds, obscode, orbit, tolerance)
+            matches = self._check_windows(mjds, obscode, orbit, tolerance, window_size)
             for result in matches:
                 yield result
                 n += 1
@@ -158,6 +166,7 @@ class PrecoveryDatabase:
         obscode: str,
         orbit: Orbit,
         tolerance: float,
+        window_size: int,
     ):
         """
         Find all observations that match orbit within a list of windows
@@ -172,8 +181,8 @@ class PrecoveryDatabase:
         for window_midpoint, window_ephem, window_healpixel in zip(
             window_midpoints, window_ephems, window_healpixels
         ):
-            start_mjd = window_midpoint - (self.window_size / 2)
-            end_mjd = window_midpoint + (self.window_size / 2)
+            start_mjd = window_midpoint - (window_size / 2)
+            end_mjd = window_midpoint + (window_size / 2)
             timedeltas = []
             test_mjds = []
             test_healpixels = []
@@ -268,20 +277,25 @@ class PrecoveryDatabase:
                 obs = obs[idx]
                 for o, distance, dra, ddec in zip(obs, distances, dras, ddecs):
                     candidate = PrecoveryCandidate(
-                        ra=o.ra,
-                        dec=o.dec,
-                        ra_sigma=o.ra_sigma,
-                        dec_sigma=o.dec_sigma,
+                        mjd_utc=f.mjd,
+                        ra_deg=o.ra,
+                        dec_deg=o.dec,
+                        ra_sigma_arcsec=o.ra_sigma/ARCSEC,
+                        dec_sigma_arcsec=o.dec_sigma/ARCSEC,
                         mag=o.mag,
                         mag_sigma=o.mag_sigma,
                         filter=f.filter,
                         obscode=f.obscode,
-                        mjd=f.mjd,
-                        catalog_id=f.catalog_id,
-                        id=o.id.decode(),
-                        dra=dra,
-                        ddec=ddec,
-                        distance=distance,
+                        exposure_id=f.exposure_id,
+                        observation_id=o.id.decode(),
+                        healpix_id=f.id,
+                        pred_ra_deg=exact_ephem.ra,
+                        pred_dec_deg=exact_ephem.dec,
+                        pred_vra_degpday=exact_ephem.ra_velocity,
+                        pred_vdec_degpday=exact_ephem.dec_velocity,
+                        delta_ra_arcsec=dra/ARCSEC,
+                        delta_dec_arcsec=ddec/ARCSEC,
+                        distance_arcsec=distance/ARCSEC
                     )
                     yield candidate
                 logger.info("checked %d observations in frame", n)

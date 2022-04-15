@@ -12,7 +12,7 @@ logger = logging.getLogger("root")
 # logger.setLevel(logging.DEBUG)
 
 DATABASE_DIR = (
-    "/epyc/ssd/users/moeyensj/precovery/precovery_data/nsc/precovery_defrag_db"
+    "/mnt/data/projects/precovery/precovery_data/nsc/precovery_month_db"
 )
 ORBITS_FILE = "test_orbits.csv"
 OUTPUT_FILE = "test_orbits_matches.csv"
@@ -38,25 +38,30 @@ def matches_to_df(matches):
     # Organize columns
     df = df[
         [
-            "id",
-            "catalog_id",
-            "obscode",
-            "mjd",
-            "ra",
-            "dec",
-            "ra_sigma",
-            "dec_sigma",
+            "mjd_utc",
+            "ra_deg",
+            "dec_deg",
+            "ra_sigma_arcsec",
+            "dec_sigma_arcsec",
             "mag",
             "mag_sigma",
             "filter",
-            "dra",
-            "ddec",
-            "distance",
+            "obscode",
+            "exposure_id",
+            "observation_id",
+            "healpix_id",
+            "pred_ra_deg",
+            "pred_dec_deg",
+            "pred_vra_degpday",
+            "pred_vdec_degpday",
+            "delta_ra_arcsec",
+            "delta_dec_arcsec",
+            'distance_arcsec',
         ]
     ]
     # Sort rows
     df.sort_values(
-        by=["mjd", "obscode"], inplace=True, ignore_index=True, ascending=True
+        by=["mjd_utc", "obscode"], inplace=True, ignore_index=True, ascending=True
     )
     return df
 

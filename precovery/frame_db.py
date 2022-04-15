@@ -25,7 +25,7 @@ logger = logging.getLogger("frame_db")
 class HealpixFrame:
     id: Optional[int]
     obscode: str
-    catalog_id: str
+    exposure_id: str
     filter: str
     mjd: float
     healpixel: int
@@ -229,7 +229,7 @@ class FrameIndex:
         select_stmt = sq.select(
             self.frames.c.id,
             self.frames.c.obscode,
-            self.frames.c.catalog_id,
+            self.frames.c.exposure_id,
             self.frames.c.filter,
             self.frames.c.mjd,
             self.frames.c.healpixel,
@@ -251,7 +251,7 @@ class FrameIndex:
         # Loop through rows and track MJDs
         mjds = set()
         for r in rows:
-            # id, obscode, catalog_id, filter, mjd, healpixel, data uri, data offset, data length
+            # id, obscode, exposure_id, filter, mjd, healpixel, data uri, data offset, data length
             mjds.add(r[4])
 
         if len(mjds) > 1:
@@ -387,7 +387,7 @@ class FrameIndex:
         stmt = sq.select(
             self.frames.c.id,
             self.frames.c.obscode,
-            self.frames.c.catalog_id,
+            self.frames.c.exposure_id,
             self.frames.c.filter,
             self.frames.c.mjd,
             self.frames.c.healpixel,
@@ -402,7 +402,7 @@ class FrameIndex:
     def add_frame(self, frame: HealpixFrame):
         insert = self.frames.insert().values(
             obscode=frame.obscode,
-            catalog_id=frame.catalog_id,
+            exposure_id=frame.exposure_id,
             filter=frame.filter,
             mjd=frame.mjd,
             healpixel=int(frame.healpixel),
@@ -424,7 +424,7 @@ class FrameIndex:
                 primary_key=True,
             ),
             sq.Column("obscode", sq.String, index=True),
-            sq.Column("catalog_id", sq.String),
+            sq.Column("exposure_id", sq.String),
             sq.Column("filter", sq.String),
             sq.Column("mjd", sq.Float, index=True),
             sq.Column("healpixel", sq.Integer, index=True),
@@ -487,7 +487,7 @@ class FrameDB:
             frame = HealpixFrame(
                 id=None,
                 obscode=src_frame.obscode,
-                catalog_id=src_frame.exposure_id,
+                exposure_id=src_frame.exposure_id,
                 filter=src_frame.filter,
                 mjd=src_frame.mjd,
                 healpixel=src_frame.healpixel,
@@ -580,7 +580,7 @@ class FrameDB:
     def defragment(self, new_index: FrameIndex, new_db: "FrameDB"):
         cur_key = ("", "", 0.0, 0)
         observations = []
-        last_catalog_id = ""
+        last_exposure_id = ""
 
         n_bytes = self.idx.n_bytes()
         with Progress(
@@ -611,7 +611,7 @@ class FrameDB:
                     # First iteration
                     observations = list(self.iterate_observations(frame))
                     cur_key = (frame.obscode, frame.filter, frame.mjd, frame.healpixel)
-                    last_catalog_id = frame.catalog_id
+                    last_exposure_id = frame.exposure_id
                 elif (
                     frame.obscode,
                     frame.filter,
@@ -630,7 +630,7 @@ class FrameDB:
                         filter=cur_key[1],
                         mjd=cur_key[2],
                         healpixel=cur_key[3],
-                        catalog_id=last_catalog_id,
+                        exposure_id=last_exposure_id,
                         data_uri=data_uri,
                         data_offset=offset,
                         data_length=length,
@@ -642,7 +642,7 @@ class FrameDB:
                     progress.update(written_frames, advance=1)
                     progress.update(bytes_migrated, advance=length)
 
-                last_catalog_id = frame.catalog_id
+                last_exposure_id = frame.exposure_id
                 progress.update(bytes_scanned, advance=frame.data_length)
                 progress.update(read_frames, advance=1)
 
@@ -654,7 +654,7 @@ class FrameDB:
                 filter=cur_key[1],
                 mjd=cur_key[2],
                 healpixel=cur_key[3],
-                catalog_id=last_catalog_id,
+                exposure_id=last_exposure_id,
                 data_uri=data_uri,
                 data_offset=offset,
                 data_length=length,
