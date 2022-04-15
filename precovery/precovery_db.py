@@ -1,9 +1,7 @@
+import os
 import dataclasses
 import itertools
 import logging
-import os.path
-from typing import Dict, Iterable, Iterator, Optional, Tuple
-
 import numpy as np
 from typing import (
     Dict,
@@ -49,9 +47,8 @@ class PrecoveryCandidate:
 
 
 class PrecoveryDatabase:
-    def __init__(self, frames: FrameDB, window_size: int):
+    def __init__(self, frames: FrameDB):
         self.frames = frames
-        self.window_size = window_size
         self._exposures_by_obscode: dict = {}
 
     @classmethod
@@ -64,7 +61,6 @@ class PrecoveryDatabase:
         config: Dict[str, int] = {
             "healpix_nside": 32,
             "data_file_max_size": int(1e9),
-            "window_size": 7,
         }
 
         frame_idx_db = "sqlite:///" + os.path.join(directory, "index.db")
@@ -74,7 +70,7 @@ class PrecoveryDatabase:
         frame_db = FrameDB(
             frame_idx, data_path, config["data_file_max_size"], config["healpix_nside"]
         )
-        return cls(frame_db, config["window_size"])
+        return cls(frame_db)
 
     @classmethod
     def create(
@@ -82,7 +78,6 @@ class PrecoveryDatabase:
         directory: str,
         healpix_nside: int = 32,
         data_file_max_size: int = int(1e9),
-        window_size: int = 7,
     ):
         """
         Create a new database on disk in the given directory.
@@ -96,7 +91,7 @@ class PrecoveryDatabase:
         os.makedirs(data_path)
 
         frame_db = FrameDB(frame_idx, data_path, data_file_max_size, healpix_nside)
-        return cls(frame_db, window_size)
+        return cls(frame_db)
 
     def precover(
         self,
@@ -105,6 +100,7 @@ class PrecoveryDatabase:
         max_matches: Optional[int] = None,
         start_mjd: Optional[float] = None,
         end_mjd: Optional[float] = None,
+        window_size: int = 7,
     ):
         """
         Find observations which match orbit in the database. Observations are
@@ -147,16 +143,17 @@ class PrecoveryDatabase:
             orbit.orbit_id,
             start_mjd,
             end_mjd,
-            self.window_size,
+            window_size,
         )
-        windows = self.frames.idx.window_centers(start_mjd, end_mjd, self.window_size)
+
+        windows = self.frames.idx.window_centers(start_mjd, end_mjd, window_size)
 
         # group windows by obscodes so that many windows can be searched at once
         for obscode, obs_windows in itertools.groupby(
             windows, key=lambda pair: pair[1]
         ):
             mjds = [window[0] for window in obs_windows]
-            matches = self._check_windows(mjds, obscode, orbit, tolerance)
+            matches = self._check_windows(mjds, obscode, orbit, tolerance, window_size)
             for result in matches:
                 yield result
                 n += 1
@@ -169,6 +166,7 @@ class PrecoveryDatabase:
         obscode: str,
         orbit: Orbit,
         tolerance: float,
+        window_size: int,
     ):
         """
         Find all observations that match orbit within a list of windows
@@ -183,8 +181,8 @@ class PrecoveryDatabase:
         for window_midpoint, window_ephem, window_healpixel in zip(
             window_midpoints, window_ephems, window_healpixels
         ):
-            start_mjd = window_midpoint - (self.window_size / 2)
-            end_mjd = window_midpoint + (self.window_size / 2)
+            start_mjd = window_midpoint - (window_size / 2)
+            end_mjd = window_midpoint + (window_size / 2)
             timedeltas = []
             test_mjds = []
             test_healpixels = []
