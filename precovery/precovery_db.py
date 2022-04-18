@@ -14,7 +14,10 @@ from .config import (
     Config,
     DefaultConfig
 )
-from .frame_db import FrameDB, FrameIndex
+from .frame_db import (
+    FrameDB,
+    FrameIndex
+)
 from .healpix_geom import radec_to_healpixel
 from .orbit import Orbit
 from .spherical_geom import haversine_distance_deg
@@ -48,6 +51,17 @@ class PrecoveryCandidate:
     delta_dec_arcsec: float
     distance_arcsec: float
 
+@dataclasses.dataclass
+class FrameCandidate:
+    mjd_utc: float
+    filter: str
+    obscode: str
+    exposure_id: str
+    healpix_id: int
+    pred_ra_deg: float
+    pred_dec_deg: float
+    pred_vra_degpday: float
+    pred_vdec_degpday: float
 
 class PrecoveryDatabase:
     def __init__(self, frames: FrameDB):
@@ -113,6 +127,7 @@ class PrecoveryDatabase:
         start_mjd: Optional[float] = None,
         end_mjd: Optional[float] = None,
         window_size: int = 7,
+        include_frame_candidates: bool = False
     ):
         """
         Find observations which match orbit in the database. Observations are
@@ -165,7 +180,14 @@ class PrecoveryDatabase:
             windows, key=lambda pair: pair[1]
         ):
             mjds = [window[0] for window in obs_windows]
-            matches = self._check_windows(mjds, obscode, orbit, tolerance, window_size)
+            matches = self._check_windows(
+                mjds,
+                obscode,
+                orbit,
+                tolerance,
+                window_size,
+                include_frame_candidates
+            )
             for result in matches:
                 yield result
                 n += 1
@@ -179,6 +201,7 @@ class PrecoveryDatabase:
         orbit: Orbit,
         tolerance: float,
         window_size: int,
+        include_frame_candidates: bool
     ):
         """
         Find all observations that match orbit within a list of windows
@@ -239,7 +262,12 @@ class PrecoveryDatabase:
 
             if len(keep_mjds) > 0:
                 matches = self._check_frames(
-                    orbit, keep_approx_healpixels, obscode, keep_mjds, tolerance
+                    orbit,
+                    keep_approx_healpixels,
+                    obscode,
+                    keep_mjds,
+                    tolerance,
+                    include_frame_candidates
                 )
                 for m in matches:
                     yield m
@@ -251,7 +279,8 @@ class PrecoveryDatabase:
         obscode: str,
         mjds: Iterable[float],
         tolerance: float,
-    ) -> Iterator[PrecoveryCandidate]:
+        include_frame_candidates: bool
+    ) -> Iterator[Union[PrecoveryCandidate, FrameCandidate]]:
         """
         Deeply inspect all frames that match the given obscode, mjd, and healpix to
         see if they contain observations which match the ephemeris.
@@ -310,6 +339,23 @@ class PrecoveryDatabase:
                         distance_arcsec=distance/ARCSEC
                     )
                     yield candidate
+
                 logger.info("checked %d observations in frame", n)
+                if (len(obs) == 0) & (include_frame_candidates):
+                    frame_candidate = FrameCandidate(
+                        mjd_utc=f.mjd,
+                        filter=f.filter,
+                        obscode=f.obscode,
+                        exposure_id=f.exposure_id,
+                        healpix_id=f.id,
+                        pred_ra_deg=exact_ephem.ra,
+                        pred_dec_deg=exact_ephem.dec,
+                        pred_vra_degpday=exact_ephem.ra_velocity,
+                        pred_vdec_degpday=exact_ephem.dec_velocity,
+                    )
+                    yield frame_candidate
+
+                    logger.info(f"no observations found in this frame")
+
                 n_frame += 1
             logger.info("checked %d frames", n_frame)
