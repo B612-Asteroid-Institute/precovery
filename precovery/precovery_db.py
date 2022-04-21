@@ -26,6 +26,9 @@ DEGREE = 1.0
 ARCMIN = DEGREE / 60
 ARCSEC = ARCMIN / 60
 
+CANDIDATE_K = 15
+CANDIDATE_NSIDE = 2**CANDIDATE_K
+
 logging.basicConfig()
 logger = logging.getLogger("precovery")
 
@@ -296,6 +299,20 @@ class PrecoveryDatabase:
                 mjd,
             )
             n_frame = 0
+
+            # Calculate the HEALpixel ID for the predicted ephemeris
+            # of the orbit with a high nside value (k=15, nside=2**15)
+            # The indexed observations are indexed to a much lower nside but
+            # we may decide in the future to re-index the database using different
+            # values for that parameter. As long as we return a Healpix ID generated with
+            # nside greater than the indexed database then we can always down-sample the
+            # ID to a lower nside value
+            healpix_id = radec_to_healpixel(
+                exact_ephem.ra,
+                exact_ephem.dec,
+                nside=CANDIDATE_NSIDE
+            )
+
             for f in frames:
                 logger.info("checking frame: %s", f)
                 obs = np.array(list(self.frames.iterate_observations(f)))
@@ -329,7 +346,7 @@ class PrecoveryDatabase:
                         obscode=f.obscode,
                         exposure_id=f.exposure_id,
                         observation_id=o.id.decode(),
-                        healpix_id=f.id,
+                        healpix_id=healpix_id,
                         pred_ra_deg=exact_ephem.ra,
                         pred_dec_deg=exact_ephem.dec,
                         pred_vra_degpday=exact_ephem.ra_velocity,
@@ -347,7 +364,7 @@ class PrecoveryDatabase:
                         filter=f.filter,
                         obscode=f.obscode,
                         exposure_id=f.exposure_id,
-                        healpix_id=f.id,
+                        healpix_id=healpix_id,
                         pred_ra_deg=exact_ephem.ra,
                         pred_dec_deg=exact_ephem.dec,
                         pred_vra_degpday=exact_ephem.ra_velocity,
