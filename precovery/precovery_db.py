@@ -19,7 +19,10 @@ from .frame_db import (
     FrameIndex
 )
 from .healpix_geom import radec_to_healpixel
-from .orbit import Orbit
+from .orbit import (
+    Orbit,
+    PropagationIntegrator
+)
 from .spherical_geom import haversine_distance_deg
 
 DEGREE = 1.0
@@ -209,15 +212,21 @@ class PrecoveryDatabase:
         """
         Find all observations that match orbit within a list of windows
         """
-        window_ephems = orbit.compute_ephemeris(obscode, window_midpoints)
+        # Propagate the orbit with n-body to every window center
+        orbit_propagated = orbit.propagate(window_midpoints, PropagationIntegrator.N_BODY)
+
+        # Calculate the location of the orbit on the sky with n-body propagation
+        window_ephems = orbit.compute_ephemeris(obscode, window_midpoints, PropagationIntegrator.N_BODY)
         window_healpixels = radec_to_healpixel(
             np.array([w.ra for w in window_ephems]),
             np.array([w.dec for w in window_ephems]),
             self.frames.healpix_nside,
         ).astype(int)
 
-        for window_midpoint, window_ephem, window_healpixel in zip(
-            window_midpoints, window_ephems, window_healpixels
+        # Using the propagated orbits, check each window. Propagate the orbit from the center of
+        # window using 2-body to find any HealpixFrames where a detection could have occured
+        for window_midpoint, window_ephem, window_healpixel, orbit_window in zip(
+            window_midpoints, window_ephems, window_healpixels, orbit_propagated
         ):
             start_mjd = window_midpoint - (window_size / 2)
             end_mjd = window_midpoint + (window_size / 2)
@@ -235,7 +244,7 @@ class PrecoveryDatabase:
 
             approx_ras, approx_decs = window_ephem.approximately_propagate(
                 obscode,
-                orbit,
+                orbit_window,
                 timedeltas,
             )
             approx_healpixels = radec_to_healpixel(
@@ -265,7 +274,7 @@ class PrecoveryDatabase:
 
             if len(keep_mjds) > 0:
                 matches = self._check_frames(
-                    orbit,
+                    orbit_window,
                     keep_approx_healpixels,
                     obscode,
                     keep_mjds,

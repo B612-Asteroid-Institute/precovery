@@ -9,10 +9,11 @@ from os import getenv
 from typing import (
     Iterable,
     Optional,
-    Tuple
+    Tuple,
+    List
 )
 
-from .spherical_geom import propagate_linearly, propagate_linearly
+from .spherical_geom import propagate_linearly
 
 pyoorb_initialized = False
 
@@ -177,13 +178,11 @@ class Orbit:
         return cls(orbit_id, state_vector)
 
     def propagate(
-        self, epoch: float, method: PropagationIntegrator = PropagationIntegrator.N_BODY
-    ) -> "Orbit":
+        self,
+        epochs: Iterable[float],
+        method: PropagationIntegrator = PropagationIntegrator.N_BODY
+    ) -> List["Orbit"]:
         _ensure_pyoorb_initialized(error_verbosity = 1)
-
-        epoch_array = np.array(
-            [epoch, self._epoch_timescale.value], dtype=np.double, order="F"
-        )
 
         if method == PropagationIntegrator.N_BODY:
             dynmodel = "N"
@@ -192,20 +191,29 @@ class Orbit:
         else:
             raise ValueError("unexpected propagation method %r" % method)
 
-        result, err = pyoorb.pyoorb.oorb_propagation(
-            in_orbits=self._state_vector,
-            in_epoch=epoch_array,
-            in_dynmodel=dynmodel,
-        )
-        assert err == 0
-        return Orbit(int(result[0][0]), result)
+        orbits = []
+        for epoch in epochs:
+            epoch_array = np.array(
+                [epoch, self._epoch_timescale.value], dtype=np.double, order="F"
+            )
+
+            result, err = pyoorb.pyoorb.oorb_propagation(
+                in_orbits=self._state_vector,
+                in_epoch=epoch_array,
+                in_dynmodel=dynmodel,
+            )
+            assert err == 0
+
+            orbits.append(Orbit(int(result[0][0]), result))
+
+        return orbits
 
     def compute_ephemeris(
         self,
         obscode: str,
         epochs: Iterable[float],
         method: PropagationIntegrator = PropagationIntegrator.N_BODY,
-    ) -> "Ephemeris":
+    ) -> List["Ephemeris"]:
         """
         Compute ephemeris for the orbit, propagated to an epoch, and observed from
         a location represented by obscode.
