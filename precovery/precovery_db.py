@@ -191,8 +191,10 @@ class PrecoveryDatabase:
                 obscode,
                 orbit,
                 tolerance,
-                window_size,
-                include_frame_candidates
+                start_mjd=start_mjd,
+                end_mjd=end_mjd,
+                window_size=window_size,
+                include_frame_candidates=include_frame_candidates
             )
             for result in matches:
                 yield result
@@ -206,8 +208,10 @@ class PrecoveryDatabase:
         obscode: str,
         orbit: Orbit,
         tolerance: float,
-        window_size: int,
-        include_frame_candidates: bool
+        start_mjd: Optional[float] = None,
+        end_mjd: Optional[float] = None,
+        window_size: int = 7,
+        include_frame_candidates: bool = False,
     ):
         """
         Find all observations that match orbit within a list of windows
@@ -228,13 +232,26 @@ class PrecoveryDatabase:
         for window_midpoint, window_ephem, window_healpixel, orbit_window in zip(
             window_midpoints, window_ephems, window_healpixels, orbit_propagated
         ):
-            start_mjd = window_midpoint - (window_size / 2)
-            end_mjd = window_midpoint + (window_size / 2)
+            start_mjd_window = window_midpoint - (window_size / 2)
+            end_mjd_window = window_midpoint + (window_size / 2)
+
+            # Check if start_mjd_window is not earlier than start_mjd (if defined)
+            # If start_mjd_window is earlier, then set start_mjd_window to start_mjd
+            if (start_mjd is not None) and (start_mjd_window < start_mjd):
+                logger.info(f"Window start MJD [UTC] ({start_mjd_window}) is earlier than desired start MJD [UTC] ({start_mjd}).")
+                start_mjd_window = start_mjd
+
+            # Check if end_mjd_window is not later than end_mjd (if defined)
+            # If end_mjd_window is later, then set end_mjd_window to end_mjd
+            if (end_mjd is not None) and (end_mjd_window > end_mjd):
+                logger.info(f"Window end MJD [UTC] ({end_mjd_window}) is later than desired end MJD [UTC] ({end_mjd}).")
+                end_mjd_window = end_mjd
+
             timedeltas = []
             test_mjds = []
             test_healpixels = []
             for mjd, healpixels in self.frames.idx.propagation_targets(
-                start_mjd, end_mjd, obscode
+                start_mjd_window, end_mjd_window, obscode
             ):
                 logger.debug("mjd=%.6f:\thealpixels with data: %r", mjd, healpixels)
                 timedelta = mjd - window_midpoint
