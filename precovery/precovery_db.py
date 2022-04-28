@@ -48,7 +48,7 @@ class PrecoveryCandidate:
     obscode: str
     exposure_id: str
     observation_id: str
-    healpix_id: int
+    healpix_id: np.int64
     pred_ra_deg: float
     pred_dec_deg: float
     pred_vra_degpday: float
@@ -63,7 +63,7 @@ class FrameCandidate:
     filter: str
     obscode: str
     exposure_id: str
-    healpix_id: int
+    healpix_id: np.int64
     pred_ra_deg: float
     pred_dec_deg: float
     pred_vra_degpday: float
