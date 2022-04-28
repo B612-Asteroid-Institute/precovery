@@ -107,31 +107,6 @@ class Observation:
             id=so.id,
         )
 
-    def distance(self, ephems: Iterable[Ephemeris]) -> Tuple[float, float, float]:
-        """
-        Calculate the Haversine distance and residuals in degrees between this observation
-        and a predicted ephemeris.
-        """
-        distance = haversine_distance_deg(
-            self.ra,
-            np.array([ephem.ra for ephem in ephems]),
-            self.dec,
-            np.array([ephem.dec for ephem in ephems]),
-        )
-        dra = np.array([ephem.ra - self.ra for ephem in ephems])
-        ddec = np.array([ephem.dec - self.dec for ephem in ephems])
-        for ephem, distance in zip(ephems, distance):
-            logger.debug(
-                "%.4f, %.4f -> %.4f, %.4f = %.6f",
-                self.ra,
-                self.dec,
-                ephem.ra,
-                ephem.dec,
-                distance,
-            )
-        return distance, dra, ddec
-
-
 class FrameIndex:
     def __init__(self, db_engine):
         self.db = db_engine

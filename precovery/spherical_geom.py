@@ -129,7 +129,7 @@ def haversine_distance(ra1: float, ra2: float, dec1: float, dec2: float) -> floa
     return val
 
 
-@numba.jit
+@numba.jit(nopython=True, cache=True)
 def haversine_distance_deg(ra1: float, ra2: float, dec1: float, dec2: float) -> float:
     return np.rad2deg(
         haversine_distance(

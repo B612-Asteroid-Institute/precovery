@@ -14,14 +14,23 @@ from .config import (
     Config,
     DefaultConfig
 )
-from .frame_db import FrameDB, FrameIndex
+from .frame_db import (
+    FrameDB,
+    FrameIndex
+)
 from .healpix_geom import radec_to_healpixel
-from .orbit import Orbit
+from .orbit import (
+    Orbit,
+    PropagationIntegrator
+)
 from .spherical_geom import haversine_distance_deg
 
 DEGREE = 1.0
 ARCMIN = DEGREE / 60
 ARCSEC = ARCMIN / 60
+
+CANDIDATE_K = 15
+CANDIDATE_NSIDE = 2**CANDIDATE_K
 
 logging.basicConfig()
 logger = logging.getLogger("precovery")
@@ -39,7 +48,7 @@ class PrecoveryCandidate:
     obscode: str
     exposure_id: str
     observation_id: str
-    healpix_id: int
+    healpix_id: np.int64
     pred_ra_deg: float
     pred_dec_deg: float
     pred_vra_degpday: float
@@ -48,6 +57,17 @@ class PrecoveryCandidate:
     delta_dec_arcsec: float
     distance_arcsec: float
 
+@dataclasses.dataclass
+class FrameCandidate:
+    mjd_utc: float
+    filter: str
+    obscode: str
+    exposure_id: str
+    healpix_id: np.int64
+    pred_ra_deg: float
+    pred_dec_deg: float
+    pred_vra_degpday: float
+    pred_vdec_degpday: float
 
 class PrecoveryDatabase:
     def __init__(self, frames: FrameDB):
@@ -113,6 +133,7 @@ class PrecoveryDatabase:
         start_mjd: Optional[float] = None,
         end_mjd: Optional[float] = None,
         window_size: int = 7,
+        include_frame_candidates: bool = False
     ):
         """
         Find observations which match orbit in the database. Observations are
@@ -165,7 +186,16 @@ class PrecoveryDatabase:
             windows, key=lambda pair: pair[1]
         ):
             mjds = [window[0] for window in obs_windows]
-            matches = self._check_windows(mjds, obscode, orbit, tolerance, window_size)
+            matches = self._check_windows(
+                mjds,
+                obscode,
+                orbit,
+                tolerance,
+                start_mjd=start_mjd,
+                end_mjd=end_mjd,
+                window_size=window_size,
+                include_frame_candidates=include_frame_candidates
+            )
             for result in matches:
                 yield result
                 n += 1
@@ -178,28 +208,50 @@ class PrecoveryDatabase:
         obscode: str,
         orbit: Orbit,
         tolerance: float,
-        window_size: int,
+        start_mjd: Optional[float] = None,
+        end_mjd: Optional[float] = None,
+        window_size: int = 7,
+        include_frame_candidates: bool = False,
     ):
         """
         Find all observations that match orbit within a list of windows
         """
-        window_ephems = orbit.compute_ephemeris(obscode, window_midpoints)
+        # Propagate the orbit with n-body to every window center
+        orbit_propagated = orbit.propagate(window_midpoints, PropagationIntegrator.N_BODY)
+
+        # Calculate the location of the orbit on the sky with n-body propagation
+        window_ephems = orbit.compute_ephemeris(obscode, window_midpoints, PropagationIntegrator.N_BODY)
         window_healpixels = radec_to_healpixel(
             np.array([w.ra for w in window_ephems]),
             np.array([w.dec for w in window_ephems]),
             self.frames.healpix_nside,
         ).astype(int)
 
-        for window_midpoint, window_ephem, window_healpixel in zip(
-            window_midpoints, window_ephems, window_healpixels
+        # Using the propagated orbits, check each window. Propagate the orbit from the center of
+        # window using 2-body to find any HealpixFrames where a detection could have occured
+        for window_midpoint, window_ephem, window_healpixel, orbit_window in zip(
+            window_midpoints, window_ephems, window_healpixels, orbit_propagated
         ):
-            start_mjd = window_midpoint - (window_size / 2)
-            end_mjd = window_midpoint + (window_size / 2)
+            start_mjd_window = window_midpoint - (window_size / 2)
+            end_mjd_window = window_midpoint + (window_size / 2)
+
+            # Check if start_mjd_window is not earlier than start_mjd (if defined)
+            # If start_mjd_window is earlier, then set start_mjd_window to start_mjd
+            if (start_mjd is not None) and (start_mjd_window < start_mjd):
+                logger.info(f"Window start MJD [UTC] ({start_mjd_window}) is earlier than desired start MJD [UTC] ({start_mjd}).")
+                start_mjd_window = start_mjd
+
+            # Check if end_mjd_window is not later than end_mjd (if defined)
+            # If end_mjd_window is later, then set end_mjd_window to end_mjd
+            if (end_mjd is not None) and (end_mjd_window > end_mjd):
+                logger.info(f"Window end MJD [UTC] ({end_mjd_window}) is later than desired end MJD [UTC] ({end_mjd}).")
+                end_mjd_window = end_mjd
+
             timedeltas = []
             test_mjds = []
             test_healpixels = []
             for mjd, healpixels in self.frames.idx.propagation_targets(
-                start_mjd, end_mjd, obscode
+                start_mjd_window, end_mjd_window, obscode
             ):
                 logger.debug("mjd=%.6f:\thealpixels with data: %r", mjd, healpixels)
                 timedelta = mjd - window_midpoint
@@ -209,7 +261,7 @@ class PrecoveryDatabase:
 
             approx_ras, approx_decs = window_ephem.approximately_propagate(
                 obscode,
-                orbit,
+                orbit_window,
                 timedeltas,
             )
             approx_healpixels = radec_to_healpixel(
@@ -239,7 +291,12 @@ class PrecoveryDatabase:
 
             if len(keep_mjds) > 0:
                 matches = self._check_frames(
-                    orbit, keep_approx_healpixels, obscode, keep_mjds, tolerance
+                    orbit_window,
+                    keep_approx_healpixels,
+                    obscode,
+                    keep_mjds,
+                    tolerance,
+                    include_frame_candidates
                 )
                 for m in matches:
                     yield m
@@ -251,7 +308,8 @@ class PrecoveryDatabase:
         obscode: str,
         mjds: Iterable[float],
         tolerance: float,
-    ) -> Iterator[PrecoveryCandidate]:
+        include_frame_candidates: bool
+    ) -> Iterator[Union[PrecoveryCandidate, FrameCandidate]]:
         """
         Deeply inspect all frames that match the given obscode, mjd, and healpix to
         see if they contain observations which match the ephemeris.
@@ -267,6 +325,20 @@ class PrecoveryDatabase:
                 mjd,
             )
             n_frame = 0
+
+            # Calculate the HEALpixel ID for the predicted ephemeris
+            # of the orbit with a high nside value (k=15, nside=2**15)
+            # The indexed observations are indexed to a much lower nside but
+            # we may decide in the future to re-index the database using different
+            # values for that parameter. As long as we return a Healpix ID generated with
+            # nside greater than the indexed database then we can always down-sample the
+            # ID to a lower nside value
+            healpix_id = radec_to_healpixel(
+                exact_ephem.ra,
+                exact_ephem.dec,
+                nside=CANDIDATE_NSIDE
+            )
+
             for f in frames:
                 logger.info("checking frame: %s", f)
                 obs = np.array(list(self.frames.iterate_observations(f)))
@@ -300,7 +372,7 @@ class PrecoveryDatabase:
                         obscode=f.obscode,
                         exposure_id=f.exposure_id,
                         observation_id=o.id.decode(),
-                        healpix_id=f.id,
+                        healpix_id=healpix_id,
                         pred_ra_deg=exact_ephem.ra,
                         pred_dec_deg=exact_ephem.dec,
                         pred_vra_degpday=exact_ephem.ra_velocity,
@@ -310,6 +382,23 @@ class PrecoveryDatabase:
                         distance_arcsec=distance/ARCSEC
                     )
                     yield candidate
+
                 logger.info("checked %d observations in frame", n)
+                if (len(obs) == 0) & (include_frame_candidates):
+                    frame_candidate = FrameCandidate(
+                        mjd_utc=f.mjd,
+                        filter=f.filter,
+                        obscode=f.obscode,
+                        exposure_id=f.exposure_id,
+                        healpix_id=healpix_id,
+                        pred_ra_deg=exact_ephem.ra,
+                        pred_dec_deg=exact_ephem.dec,
+                        pred_vra_degpday=exact_ephem.ra_velocity,
+                        pred_vdec_degpday=exact_ephem.dec_velocity,
+                    )
+                    yield frame_candidate
+
+                    logger.info(f"no observations found in this frame")
+
                 n_frame += 1
             logger.info("checked %d frames", n_frame)
