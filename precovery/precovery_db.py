@@ -48,7 +48,7 @@ class PrecoveryCandidate:
     obscode: str
     exposure_id: str
     observation_id: str
-    healpix_id: np.int64
+    healpix_id: int
     pred_ra_deg: float
     pred_dec_deg: float
     pred_vra_degpday: float
@@ -63,7 +63,7 @@ class FrameCandidate:
     filter: str
     obscode: str
     exposure_id: str
-    healpix_id: np.int64
+    healpix_id: int
     pred_ra_deg: float
     pred_dec_deg: float
     pred_vra_degpday: float
@@ -333,11 +333,11 @@ class PrecoveryDatabase:
             # values for that parameter. As long as we return a Healpix ID generated with
             # nside greater than the indexed database then we can always down-sample the
             # ID to a lower nside value
-            healpix_id = radec_to_healpixel(
+            healpix_id = int(radec_to_healpixel(
                 exact_ephem.ra,
                 exact_ephem.dec,
                 nside=CANDIDATE_NSIDE
-            )
+            ))
 
             for f in frames:
                 logger.info("checking frame: %s", f)
