@@ -204,6 +204,12 @@ class Orbit:
             )
             assert err == 0
 
+            # Pyoorb wants radians as inputs for orbits but outputs propagated orbits as degrees
+            # See here: https://github.com/oorb/oorb/blob/master/python/pyoorb.f90#L347
+            # Note that time of perihelion passage also is converted to a degree.
+            if (self._orbit_type == OrbitElementType.KEPLERIAN) or (self._orbit_type == OrbitElementType.COMETARY): 
+                result[:, [3,4,5,6]] = np.radians(result[:, [3,4,5,6]])
+
             orbits.append(Orbit(int(result[0][0]), result))
 
         return orbits
