@@ -56,6 +56,7 @@ class PrecoveryCandidate:
     delta_ra_arcsec: float
     delta_dec_arcsec: float
     distance_arcsec: float
+    dataset_id: str
 
 @dataclasses.dataclass
 class FrameCandidate:
@@ -68,6 +69,7 @@ class FrameCandidate:
     pred_dec_deg: float
     pred_vra_degpday: float
     pred_vdec_degpday: float
+    dataset_id: str
 
 class PrecoveryDatabase:
     def __init__(self, frames: FrameDB):
@@ -379,7 +381,8 @@ class PrecoveryDatabase:
                         pred_vdec_degpday=exact_ephem.dec_velocity,
                         delta_ra_arcsec=dra/ARCSEC,
                         delta_dec_arcsec=ddec/ARCSEC,
-                        distance_arcsec=distance/ARCSEC
+                        distance_arcsec=distance/ARCSEC,
+                        dataset_id=f.dataset_id,
                     )
                     yield candidate
 
@@ -395,6 +398,7 @@ class PrecoveryDatabase:
                         pred_dec_deg=exact_ephem.dec,
                         pred_vra_degpday=exact_ephem.ra_velocity,
                         pred_vdec_degpday=exact_ephem.dec_velocity,
+                        dataset_id=f.dataset_id,
                     )
                     yield frame_candidate
 

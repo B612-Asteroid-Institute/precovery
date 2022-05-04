@@ -34,6 +34,7 @@ def _candidates_to_dict(candidates):
         'delta_ra_arcsec': [],
         'delta_dec_arcsec': [],
         'distance_arcsec': [],
+        'dataset_id' : [],
     }
     for c in candidates:
         for k in data.keys():
