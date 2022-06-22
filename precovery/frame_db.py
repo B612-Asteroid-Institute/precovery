@@ -23,8 +23,6 @@ from rich.progress import (
 from sqlalchemy.sql import func as sqlfunc
 
 from . import sourcecatalog
-from .orbit import Ephemeris
-from .spherical_geom import haversine_distance_deg
 
 # ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id
 DATA_LAYOUT = "<ddddddl"
@@ -35,6 +33,7 @@ logger = logging.getLogger("frame_db")
 @dataclasses.dataclass
 class HealpixFrame:
     id: Optional[int]
+    dataset_id: str
     obscode: str
     exposure_id: str
     filter: str
@@ -44,6 +43,13 @@ class HealpixFrame:
     data_offset: int
     data_length: int
 
+@dataclasses.dataclass
+class Dataset:
+    id: str
+    name: str
+    reference_doi: str
+    documentation_url: str
+    sia_url: str
 
 @dataclasses.dataclass
 class FrameBundleDescription:
@@ -214,6 +220,7 @@ class FrameIndex:
         """
         select_stmt = sq.select(
             self.frames.c.id,
+            self.frames.c.dataset_id,
             self.frames.c.obscode,
             self.frames.c.exposure_id,
             self.frames.c.filter,
@@ -237,8 +244,8 @@ class FrameIndex:
         # Loop through rows and track MJDs
         mjds = set()
         for r in rows:
-            # id, obscode, exposure_id, filter, mjd, healpixel, data uri, data offset, data length
-            mjds.add(r[4])
+            # id, dataset_id, obscode, exposure_id, filter, mjd, healpixel, data uri, data offset, data length
+            mjds.add(r[5])
 
         if len(mjds) > 1:
             logger.warn(
@@ -372,6 +379,7 @@ class FrameIndex:
         """
         stmt = sq.select(
             self.frames.c.id,
+            self.frames.c.dataset_id,
             self.frames.c.obscode,
             self.frames.c.exposure_id,
             self.frames.c.filter,
@@ -387,6 +395,7 @@ class FrameIndex:
 
     def add_frame(self, frame: HealpixFrame):
         insert = self.frames.insert().values(
+            dataset_id=frame.dataset_id,
             obscode=frame.obscode,
             exposure_id=frame.exposure_id,
             filter=frame.filter,
@@ -397,6 +406,25 @@ class FrameIndex:
             data_length=frame.data_length,
         )
         self.dbconn.execute(insert)
+
+    def add_dataset(self, dataset: Dataset):
+        insert = self.datasets.insert().values(
+            id=dataset.id,
+            name=dataset.name,
+            reference_doi=dataset.reference_doi,
+            documentation_url=dataset.documentation_url,
+            sia_url=dataset.sia_url
+        )
+        self.dbconn.execute(insert)
+
+    def get_dataset_ids(self):
+
+        unique_datasets_stmt = sq.select(
+            self.datasets.c.id,
+        ).distinct()
+        dataset_ids = list(self.dbconn.execute(unique_datasets_stmt))
+        dataset_ids = {dataset_id[0] for dataset_id in dataset_ids}
+        return dataset_ids
 
     def initialize_tables(self):
         self._metadata = sq.MetaData()
@@ -409,6 +437,7 @@ class FrameIndex:
                 sq.Sequence("frame_id_seq"),
                 primary_key=True,
             ),
+            sq.Column("dataset_id", sq.String),
             sq.Column("obscode", sq.String, index=True),
             sq.Column("exposure_id", sq.String),
             sq.Column("filter", sq.String),
@@ -417,6 +446,19 @@ class FrameIndex:
             sq.Column("data_uri", sq.String),
             sq.Column("data_offset", sq.Integer),
             sq.Column("data_length", sq.Integer),
+        )
+        self.datasets = sq.Table(
+            "datasets",
+            self._metadata,
+            sq.Column(
+                "id",
+                sq.String,
+                primary_key=True,
+            ),
+            sq.Column("name", sq.String, nullable=True),
+            sq.Column("reference_doi", sq.String, nullable=True),
+            sq.Column("documentation_url", sq.String, nullable=True),
+            sq.Column("sia_url", sq.String, nullable=True),
         )
         self._metadata.create_all(self.db)
 
@@ -444,21 +486,58 @@ class FrameDB:
     def load_hdf5(
         self,
         hdf5_file: str,
+        dataset_id: str,
         skip: int = 0,
         limit: Optional[int] = None,
         key: str = "data",
         chunksize: int = 100000,
+        name: Optional[str] = None,
+        reference_doi: Optional[str] = None,
+        documentation_url: Optional[str] = None,
+        sia_url: Optional[str] = None
     ):
         """
-        Load data from an NSC HDF5 catalog file.
+        Load data from a HDF5 catalog file.
 
-        hdf5_file: Path to a file on disk.
-        skip: Number of frames to skip in the file.
-        limit: Maximum number of frames to load from the file. None means no limit.
-        key: Name of observations table in the hdf5 file.
-        chunksize: Load observations in chunks of this size and then iterate over the chunks
+        Parameters
+        ----------
+        hdf5_file : str
+            Path to a file on disk.
+        dataset_id : str
+            Name of dataset (should be the same for each observation file that
+            comes from the same dataset).
+        skip : int, optional
+            Number of frames to skip in the file.
+        limit : int, optional
+            Maximum number of frames to load from the file. None means no limit.
+        key : str
+            Name of key where the observations table is located in the hdf5 file.
+        chunksize: 
+            Load observations in chunks of this size and then iterate over the chunks
             to load observations.
+        name : str, optional
+            User-friendly name of the dataset.
+        reference_doi : str, optional
+            DOI of the reference paper for the dataset.
+        documentation_url : str, optional
+            URL of any documentation describing the dataset.
+        sia_url : str, optional
+            Simple Image Access URL for accessing images for this particular dataset.
         """
+        if dataset_id not in self.idx.get_dataset_ids():
+            logger.info(f"Adding new entry into datasets table for dataset {dataset_id}.")
+            dataset = Dataset(
+                id=dataset_id,
+                name=name,
+                reference_doi=reference_doi,
+                documentation_url=documentation_url,
+                sia_url=sia_url
+            )
+            self.idx.add_dataset(dataset)
+
+        else:
+            logger.info(f"{dataset_id} dataset already has an entry in the datasets table.")
+
         for src_frame in sourcecatalog.iterate_frames(
             hdf5_file,
             limit,
@@ -472,6 +551,7 @@ class FrameDB:
 
             frame = HealpixFrame(
                 id=None,
+                dataset_id=dataset_id,
                 obscode=src_frame.obscode,
                 exposure_id=src_frame.exposure_id,
                 filter=src_frame.filter,
