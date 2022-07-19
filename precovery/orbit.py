@@ -202,7 +202,7 @@ class Orbit:
                 in_epoch=epoch_array,
                 in_dynmodel=dynmodel,
             )
-            assert err == 0
+            assert err == 0, "There was an issue with the pyoorb orbit propagation"
 
             # Pyoorb wants radians as inputs for orbits but outputs propagated orbits as degrees
             # See here: https://github.com/oorb/oorb/blob/master/python/pyoorb.f90#L347
@@ -250,7 +250,7 @@ class Orbit:
         )
         # print(epochs_array.shape)
         # print(eph.shape)
-        assert err == 0
+        assert err == 0, "There was an issue with the pyoorb ephemeris generation"
         return [Ephemeris(eph[0, i, :]) for i in range(epochs_array.shape[0])]
 
     def precover_remote(
