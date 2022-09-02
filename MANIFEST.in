@@ -4,8 +4,8 @@ include *.toml
 include *.cfg
 include *.py
 include *.in
-include *.dev
-include *.txt
+include requirements.txt
+include doc/*
 include scripts/*
 include tests/*
 include recipe/*
