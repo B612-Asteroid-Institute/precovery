@@ -1,0 +1,11 @@
+include precovery/*.py
+include *.md
+include *.toml
+include *.cfg
+include *.py
+include *.in
+include *.dev
+include *.txt
+include scripts/*
+include tests/*
+include recipe/*
