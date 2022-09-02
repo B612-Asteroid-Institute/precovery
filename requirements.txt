@@ -6,6 +6,7 @@ pytables
 pandas
 healpy
 requests
+openorb
 pytest
 pytest-cov
 setuptools>=45
