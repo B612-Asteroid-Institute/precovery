@@ -1,8 +1,13 @@
-numpy>=1.21
-numba==0.55.1
+numpy
+numba
 sqlalchemy
 rich
-tables
+pytables
 pandas
 healpy
 requests
+pytest
+pytest-cov
+setuptools>=45
+wheel
+setuptools_scm>=6.0
