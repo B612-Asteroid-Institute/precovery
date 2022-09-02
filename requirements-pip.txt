@@ -1,0 +1,13 @@
+numpy
+numba
+sqlalchemy
+rich
+tables
+pandas
+healpy
+requests
+pytest
+pytest-cov
+setuptools>=45
+wheel
+setuptools_scm>=6.0
