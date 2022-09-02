@@ -33,7 +33,7 @@ jobs:
           conda install -c defaults -c conda-forge --file requirements.txt --yes
       - name: Install Precovery
         run: |
-          python setup.py install
+          pip install . --no-deps
       - name: Test with pytest
         run: |
           pytest . --cov=.
