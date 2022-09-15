@@ -68,7 +68,7 @@ def test_propagate_linearly_vs_integration():
         order="F",
     )
     o = orbit.Orbit(0, state_vector)
-    initial_position = o.compute_ephemeris(obscode, t0)
+    initial_position = o.compute_ephemeris(obscode, [t0])[0]
 
     # Zero dt should result in zero motion
     ra, dec = np.rad2deg(
@@ -94,7 +94,7 @@ def test_propagate_linearly_vs_integration():
             t1 - t0,
         )
     )
-    expected_position = o.compute_ephemeris(obscode, t1)
+    expected_position = o.compute_ephemeris(obscode, [t1])[0]
     assert np.isclose(ra, expected_position.ra, atol=0.1)
     assert np.isclose(dec, expected_position.dec, atol=0.1)
 
@@ -109,7 +109,7 @@ def test_propagate_linearly_vs_integration():
             t1 - t0,
         )
     )
-    expected_position = o.compute_ephemeris(obscode, t1)
+    expected_position = o.compute_ephemeris(obscode, [t1])[0]
     assert np.isclose(ra, expected_position.ra, atol=0.2)
     assert np.isclose(dec, expected_position.dec, atol=0.2)
 
@@ -124,6 +124,6 @@ def test_propagate_linearly_vs_integration():
             t1 - t0,
         )
     )
-    expected_position = o.compute_ephemeris(obscode, t1)
+    expected_position = o.compute_ephemeris(obscode, [t1])[0]
     assert np.isclose(ra, expected_position.ra, atol=0.5)
     assert np.isclose(dec, expected_position.dec, atol=0.5)

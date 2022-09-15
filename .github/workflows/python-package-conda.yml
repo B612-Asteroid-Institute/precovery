@@ -1,0 +1,39 @@
+name: Python Package with conda
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ['3.7', '3.8', '3.9', '3.10']
+    defaults:
+      run:
+        shell: bash -l {0}
+
+    steps:
+      - name: Checkout git repo
+        uses: actions/checkout@v2
+      - name: Get git tags
+        run:  git fetch --prune --unshallow --tags
+      - name: Set up miniconda
+        uses: conda-incubator/setup-miniconda@v2
+        with:
+          activate-environment: "precovery"
+          auto-update-conda: true
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          conda install -c defaults -c conda-forge --file requirements.txt --yes
+      - name: Install Precovery
+        run: |
+          pip install . --no-deps
+      - name: Test with pytest
+        run: |
+          pytest . --cov=.

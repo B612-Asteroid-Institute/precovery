@@ -2,7 +2,7 @@ numpy
 numba
 sqlalchemy
 rich
-pytables
+tables
 pandas
 healpy
 requests

@@ -51,7 +51,7 @@ def test_orbit_propagation():
     )
     o = orbit.Orbit(0, state_vector)
 
-    propagated = o.propagate(51232.23)
+    propagated = o.propagate([51232.23])[0]
     assert propagated._epoch == 51232.23
 
     # Original should be unchanged
@@ -84,5 +84,5 @@ def test_orbit_ephemeris_computation():
     obscode = "534"
     epoch = 51544.5
 
-    ephem = o.compute_ephemeris(obscode, epoch)
-    assert ephem.mjd == epoch
+    ephem = o.compute_ephemeris(obscode, [epoch])
+    assert ephem[0].mjd == epoch
