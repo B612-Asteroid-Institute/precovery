@@ -12,10 +12,13 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-    container:
-      image: continuumio/miniconda3
-
+        python-version: ['3.7', '3.8', '3.9']
     steps:
+    - uses: conda-incubator/setup-miniconda@v2
+      with:
+        auto-activate-base: true
+        auto-update-conda: true
+        python-version: ${{ matrix.python-version }}
     - uses: actions/checkout@v2
     - name: Install dependencies
       run: |
