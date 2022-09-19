@@ -438,15 +438,19 @@ class FrameIndex:
                 primary_key=True,
             ),
             sq.Column("dataset_id", sq.String),
-            sq.Column("obscode", sq.String, index=True),
+            sq.Column("obscode", sq.String),
             sq.Column("exposure_id", sq.String),
             sq.Column("filter", sq.String),
-            sq.Column("mjd", sq.Float, index=True),
-            sq.Column("healpixel", sq.Integer, index=True),
+            sq.Column("mjd", sq.Float),
+            sq.Column("healpixel", sq.Integer),
             sq.Column("data_uri", sq.String),
             sq.Column("data_offset", sq.Integer),
             sq.Column("data_length", sq.Integer),
+            
+            # Create index on mjd, healpixel, obscode
+            sq.Index("fast_query", "mjd", "healpixel", "obscode", unique=True)
         )
+
         self.datasets = sq.Table(
             "datasets",
             self._metadata,
@@ -454,6 +458,7 @@ class FrameIndex:
                 "id",
                 sq.String,
                 primary_key=True,
+                index=True,
             ),
             sq.Column("name", sq.String, nullable=True),
             sq.Column("reference_doi", sq.String, nullable=True),
