@@ -4,22 +4,13 @@ import itertools
 import logging
 import os
 import struct
-from typing import (
-    Iterable,
-    Iterator,
-    Optional,
-    Set,
-    Tuple
-)
+from typing import Iterable, Iterator, Optional, Set, Tuple
 
 import numpy as np
 import sqlalchemy as sq
-from rich.progress import (
-    BarColumn,
-    Progress,
-    TimeElapsedColumn,
-    TimeRemainingColumn
-)
+from astropy.time import Time
+from regex import F
+from rich.progress import BarColumn, Progress, TimeElapsedColumn, TimeRemainingColumn
 from sqlalchemy.sql import func as sqlfunc
 
 from . import sourcecatalog
@@ -43,6 +34,7 @@ class HealpixFrame:
     data_offset: int
     data_length: int
 
+
 @dataclasses.dataclass
 class Dataset:
     id: str
@@ -50,6 +42,7 @@ class Dataset:
     reference_doi: str
     documentation_url: str
     sia_url: str
+
 
 @dataclasses.dataclass
 class FrameBundleDescription:
@@ -113,6 +106,7 @@ class Observation:
             id=so.id,
         )
 
+
 class FrameIndex:
     def __init__(self, db_engine):
         self.db = db_engine
@@ -123,12 +117,10 @@ class FrameIndex:
     def open(cls, db_uri, mode: str = "r"):
 
         if (mode != "r") and (mode != "w"):
-            err = (
-                "mode should be one of {'r', 'w'}"
-            )
+            err = "mode should be one of {'r', 'w'}"
             raise ValueError(err)
 
-        if db_uri.startswith('sqlite:///') and (mode == "r"):
+        if db_uri.startswith("sqlite:///") and (mode == "r"):
             db_uri += "?mode=ro"
 
         engine = sq.create_engine(db_uri)
@@ -413,7 +405,7 @@ class FrameIndex:
             name=dataset.name,
             reference_doi=dataset.reference_doi,
             documentation_url=dataset.documentation_url,
-            sia_url=dataset.sia_url
+            sia_url=dataset.sia_url,
         )
         self.dbconn.execute(insert)
 
@@ -462,6 +454,7 @@ class FrameIndex:
         )
         self._metadata.create_all(self.db)
 
+
 class FrameDB:
     def __init__(
         self,
@@ -474,8 +467,10 @@ class FrameDB:
         self.data_root = data_root
         self.data_file_max_size = data_file_max_size
         self.data_files: dict = {}  # basename -> open file
+        self.n_data_files: dict = (
+            {}
+        )  # Dictionary map of how many files for each dataset, and month
         self._open_data_files()
-        self.n_data_files = 0
         self.healpix_nside = healpix_nside
 
     def close(self):
@@ -494,7 +489,7 @@ class FrameDB:
         name: Optional[str] = None,
         reference_doi: Optional[str] = None,
         documentation_url: Optional[str] = None,
-        sia_url: Optional[str] = None
+        sia_url: Optional[str] = None,
     ):
         """
         Load data from a HDF5 catalog file.
@@ -512,7 +507,7 @@ class FrameDB:
             Maximum number of frames to load from the file. None means no limit.
         key : str
             Name of key where the observations table is located in the hdf5 file.
-        chunksize: 
+        chunksize:
             Load observations in chunks of this size and then iterate over the chunks
             to load observations.
         name : str, optional
@@ -525,18 +520,22 @@ class FrameDB:
             Simple Image Access URL for accessing images for this particular dataset.
         """
         if dataset_id not in self.idx.get_dataset_ids():
-            logger.info(f"Adding new entry into datasets table for dataset {dataset_id}.")
+            logger.info(
+                f"Adding new entry into datasets table for dataset {dataset_id}."
+            )
             dataset = Dataset(
                 id=dataset_id,
                 name=name,
                 reference_doi=reference_doi,
                 documentation_url=documentation_url,
-                sia_url=sia_url
+                sia_url=sia_url,
             )
             self.idx.add_dataset(dataset)
 
         else:
-            logger.info(f"{dataset_id} dataset already has an entry in the datasets table.")
+            logger.info(
+                f"{dataset_id} dataset already has an entry in the datasets table."
+            )
 
         for src_frame in sourcecatalog.iterate_frames(
             hdf5_file,
@@ -547,7 +546,12 @@ class FrameDB:
             chunksize=chunksize,
         ):
             observations = [Observation.from_srcobs(o) for o in src_frame.observations]
-            data_uri, offset, length = self.store_observations(observations)
+            year_month_str = "-".join(
+                Time(src_frame.mjd, format="mjd", scale="utc").isot.split("-")[:2]
+            )
+            data_uri, offset, length = self.store_observations(
+                observations, dataset_id, year_month_str
+            )
 
             frame = HealpixFrame(
                 id=None,
@@ -564,29 +568,38 @@ class FrameDB:
             self.idx.add_frame(frame)
 
     def _open_data_files(self):
-        matcher = os.path.join(self.data_root, "frames*.data")
-        files = glob.glob(matcher)
+        matcher = os.path.join(self.data_root, "**/frames*.data")
+        files = sorted(glob.glob(matcher, recursive=True))
         for f in files:
             abspath = os.path.abspath(f)
             name = os.path.basename(f)
-            self.data_files[name] = open(abspath, "rb")
-        self.n_data_files = len(self.data_files) - 1
-        if self.n_data_files <= 0:
-            self.new_data_file()
+            year_month_str = os.path.basename(os.path.dirname(abspath))
+            dataset_id = os.path.basename(os.path.dirname(os.path.dirname(abspath)))
+            data_uri = f"{dataset_id}/{year_month_str}/{name}"
+            if dataset_id not in self.n_data_files.keys():
+                self.n_data_files[dataset_id] = {}
+            if year_month_str not in self.n_data_files[dataset_id].keys():
+                self.n_data_files[dataset_id][year_month_str] = 0
+            self.data_files[data_uri] = open(abspath, "rb")
+            self.n_data_files[dataset_id][year_month_str] += 1
 
-    def _current_data_file_name(self):
-        return "frames_{:08d}.data".format(self.n_data_files)
-
-    def _current_data_file_full(self):
-        return os.path.abspath(
-            os.path.join(self.data_root, self._current_data_file_name())
+    def _current_data_file_name(self, dataset_id: str, year_month_str: str):
+        return "{}/{}/frames_{:08d}.data".format(
+            dataset_id, year_month_str, self.n_data_files[dataset_id][year_month_str]
         )
 
-    def _current_data_file_size(self):
-        return os.stat(self._current_data_file_name()).st_size
+    def _current_data_file_full(self, dataset_id: str, year_month_str: str):
+        return os.path.abspath(
+            os.path.join(
+                self.data_root, self._current_data_file_name(dataset_id, year_month_str)
+            )
+        )
 
-    def _current_data_file(self):
-        return self.data_files[self._current_data_file_name()]
+    def _current_data_file_size(self, dataset_id: str, year_month_str: str):
+        return os.stat(self._current_data_file_name(dataset_id, year_month_str)).st_size
+
+    def _current_data_file(self, dataset_id: str, year_month_str: str):
+        return self.data_files[self._current_data_file_name(dataset_id, year_month_str)]
 
     def iterate_observations(self, exp: HealpixFrame) -> Iterator[Observation]:
         """
@@ -606,7 +619,9 @@ class FrameDB:
             bytes_read += datagram_size + id_size
             yield Observation(ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id)
 
-    def store_observations(self, observations: Iterable[Observation]):
+    def store_observations(
+        self, observations: Iterable[Observation], dataset_id: str, year_month_str: str
+    ):
         """
         Write observations in exp_data to disk. The write goes to the latest (or
         "current") file in the database. Data is written as a sequence of
@@ -617,7 +632,12 @@ class FrameDB:
         which indicates the ID's length in bytes, followed by the UTF8-encoded
         bytes of the ID.
         """
-        f = self._current_data_file()
+        f = None
+        try:
+            f = self._current_data_file(dataset_id, year_month_str)
+        except KeyError as ke:
+            self.new_data_file(dataset_id, year_month_str)
+            f = self._current_data_file(dataset_id, year_month_str)
         f.seek(0, 2)  # seek to end
         start_pos = f.tell()
 
@@ -626,22 +646,28 @@ class FrameDB:
 
         end_pos = f.tell()
         length = end_pos - start_pos
-        data_uri = self._current_data_file_name()
+        data_uri = self._current_data_file_name(dataset_id, year_month_str)
 
         f.flush()
         if end_pos > self.data_file_max_size:
-            self.new_data_file()
+            self.new_data_file(dataset_id, year_month_str)
 
         return data_uri, start_pos, length
 
-    def new_data_file(self):
+    def new_data_file(self, dataset_id: str, year_month_str: str):
         """
         Create a new empty database data file on disk, and update the database's
         state to write to it.
         """
-        self.n_data_files += 1
-        f = open(self._current_data_file_full(), "a+b")
-        self.data_files[self._current_data_file_name()] = f
+        if dataset_id not in self.n_data_files.keys():
+            self.n_data_files[dataset_id] = {}
+        if year_month_str not in self.n_data_files[dataset_id].keys():
+            self.n_data_files[dataset_id][year_month_str] = 0
+        self.n_data_files[dataset_id][year_month_str] += 1
+        current_data_file = self._current_data_file_full(dataset_id, year_month_str)
+        os.makedirs(os.path.dirname(current_data_file), exist_ok=True)
+        f = open(current_data_file, "a+b")
+        self.data_files[self._current_data_file_name(dataset_id, year_month_str)] = f
 
     def defragment(self, new_index: FrameIndex, new_db: "FrameDB"):
         cur_key = ("", "", 0.0, 0)
@@ -673,6 +699,10 @@ class FrameDB:
                 total=n_bytes,
             )
             for frame in self.idx.all_frames():
+
+                year_month_str = "-".join(
+                    Time(frame.mjd, format="mjd", scale="utc").isot.split("-")[:2]
+                )
                 if cur_key[0] == "":
                     # First iteration
                     observations = list(self.iterate_observations(frame))
@@ -689,7 +719,9 @@ class FrameDB:
 
                 else:
                     # On to the next key. Flush what we have and reset.
-                    data_uri, offset, length = new_db.store_observations(observations)
+                    data_uri, offset, length = new_db.store_observations(
+                        observations, frame.dataset_id, year_month_str
+                    )
                     new_frame = HealpixFrame(
                         id=None,
                         obscode=cur_key[0],
@@ -713,7 +745,9 @@ class FrameDB:
                 progress.update(read_frames, advance=1)
 
             # Last frame was unflushed, so do that now.
-            data_uri, offset, length = new_db.store_observations(observations)
+            data_uri, offset, length = new_db.store_observations(
+                observations, frame.dataset_id, year_month_str
+            )
             frame = HealpixFrame(
                 id=None,
                 obscode=cur_key[0],
