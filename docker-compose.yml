@@ -1,0 +1,11 @@
+version: '3.7'
+
+services:
+  precovery:
+    container_name: precovery
+    build: .
+    volumes:
+      - ".ipython:/root/.ipython/"
+      - '.:/code/'
+      - './data:/data'
+
