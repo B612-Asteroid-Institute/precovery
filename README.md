@@ -11,6 +11,11 @@
 
 ## Installation 
 
+### Docker
+You can build and use precovery using the Dockerfile and docker-compose.yml
+`docker compose build`
+`docker compose run -it precovery bash`
+
 ### Conda
 
 To get the latest released version and install it into a conda environment:  
