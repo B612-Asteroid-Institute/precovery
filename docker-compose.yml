@@ -7,5 +7,4 @@ services:
     volumes:
       - ".ipython:/root/.ipython/"
       - '.:/code/'
-      - './data:/data'
 
