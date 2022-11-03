@@ -30,3 +30,55 @@ If you would rather download dependencies with pip:
 
 Note that, `openorb` is not available on the Python Package Index and so it would still need
 to be installed either via source install or via conda.
+
+## Usage
+
+After the precovery datasets are indexed and ready, you can run precovery jobs.
+
+```python
+
+from precovery import precover
+from precovery.orbit import Orbit, EpochTimeScale
+
+
+db_dir = "/path/to/db/folder/"
+
+orbit = Orbit.keplerian(
+    0,
+    2.269057465131142,
+    0.1704869454928905,
+    21.27981352885659,
+    281.533811391701,
+    7.854179343480579,
+    98.55494515731131,
+    57863.,
+    EpochTimescale.UTC,
+    20,
+    0.15
+)
+
+results = precover(orbit, db_dir, tolerance=10/3600)
+
+for result in results:
+    print(result)
+
+```
+
+## Dataset Format
+
+Currently the precovery services can index observation datasets that have been formatted with the following schema:
+
+| Column | Description |
+| ------ | ----------- |
+| mjd_utc | Modified Julian Date from UTC |
+| ra | right ascension |
+| ra_sigma | right ascension uncertainty. If null, we assume a standard sigma for orbit determination. |
+| dec | declination |
+| dec_sigma | declination uncertainty.  If null, we assume a standard sigma for orbit determination. |
+| mag | visible magnitude  |
+| mag_sigma | magnitude uncertainty |
+| filter | wavelength filter |
+| observatory_code | The observatory that the observation came from |
+| obs_id | Unique ID for the observation |
+| exposure_id | Unique exposure id from the observatory. |
+
