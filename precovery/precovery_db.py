@@ -110,7 +110,7 @@ class PrecoveryDatabase:
         """
         Create a new database on disk in the given directory.
         """
-        os.makedirs(directory)
+        os.makedirs(directory, exist_ok=True)
 
         frame_idx_db = "sqlite:///" + os.path.join(directory, "index.db")
         frame_idx = FrameIndex.open(frame_idx_db)
