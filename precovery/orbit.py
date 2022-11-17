@@ -5,6 +5,7 @@ import pyoorb
 import requests as req
 
 from astropy.time import Time
+from astroquery.jplhorizons import Horizons
 from os import getenv
 from typing import (
     Iterable,
@@ -46,6 +47,18 @@ class PropagationIntegrator(enum.Enum):
     N_BODY = 1
     TWO_BODY = 2
 
+def _targetname_to_int(targetname: str) -> int:
+    # Attempt to convert the designation to an integer if it is a numbered object.
+    # If the attempt fails, then just give it an orbit ID of 0.
+    components = targetname.split(" ")
+    for c in components:
+        if c.isnumeric():
+            orbit_id = int(c)
+            break
+    else:
+        orbit_id = 0
+
+    return orbit_id
 
 class Orbit:
     def __init__(self, orbit_id: int, state_vector: npt.NDArray[np.float64]):
@@ -177,6 +190,155 @@ class Orbit:
 
         return cls(orbit_id, state_vector)
 
+    @classmethod
+    def from_Horizons(
+            cls: "Orbit",
+            id: str,
+            t0: Time,
+            id_type: str = "smallbody",
+            coordinate_type: str = "cartesian",
+        ) -> "Orbit":
+        """
+        Query JPL Horizons for an orbit at a given time. 
+
+        Based on THOR's Orbits.from_Horizons() method.
+        
+        Parameters
+        ----------
+        id : str
+            The ID of the object to query. This can be a name, a number, or a
+            designation.
+        t0 : Time
+            The time at which the orbit should be defined. Note that Horizons will do its own propagation.
+        id_type : str, optional
+            The type of ID that is being passed. Can be one of 'designation' (small body designation), 'name' (small body name),
+            'asteroid_name', 'comet_name', 'smallbody' (asteroid and comet search), or 'None' (searches all objects).
+
+            See Horizons documentation for more details.
+        coordinate_type : str
+            The coordinate type to query. Must be one of "cartesian", "cometary", or "keplerian".
+
+        Raises
+        ------
+        TypeError
+            If t0 is not a Time object.
+        ValueError
+            If coordinate_type is not one of "cartesian", "cometary", or "keplerian".
+            If t0 is not a single time.
+
+        Returns
+        -------
+        cls : Orbit
+            The orbit at the given time.
+        """
+        if not isinstance(t0, Time):
+            raise TypeError("t0 must be an `~astropy.time.Time` object.")
+
+        if coordinate_type not in ("cartesian", "keplerian", "cometary"):
+            raise ValueError(
+                "coordinate_type must be one of {'cartesian', 'keplerian', or 'cometary'}"
+            )
+
+        if not np.isscalar(t0.mjd):
+            raise ValueError("t0 must be a single time.")
+        
+        # PYOORB assumes vectors are heliocentric ecliptic J2000, so lets set the relevant
+        # Horizons parameters to make sure that is what we get back
+        # location = "@sun"
+        # refplane = "ecliptic"
+        # aberrations = "geometric"
+        obj = Horizons(
+            id=id,
+            epochs=t0.tdb.mjd,
+            location="@sun",
+            id_type=id_type,
+        )
+
+        if coordinate_type == "cartesian":
+            
+            vectors = obj.vectors(
+                refplane="ecliptic",
+                aberrations="geometric",
+                cache=False
+            ).to_pandas()
+
+            targetname = vectors["targetname"].values[0]
+            if len(vectors) == 1:
+                print("Found Cartesian state vector for {} at {}.".format(targetname, t0.tdb.isot))
+
+            return cls.cartesian(
+                _targetname_to_int(targetname),
+                vectors["x"].values[0],
+                vectors["y"].values[0],
+                vectors["z"].values[0],
+                vectors["vx"].values[0],
+                vectors["vy"].values[0],
+                vectors["vz"].values[0],
+                t0.tt.mjd,
+                EpochTimescale.TT,
+                vectors["H"].values[0],
+                vectors["G"].values[0],
+            )
+
+        elif coordinate_type == "keplerian":
+
+            elements = obj.elements(
+                refsystem="J2000",
+                refplane="ecliptic",
+                tp_type="absolute",
+                cache=False
+            ).to_pandas()
+
+            targetname = elements["targetname"].values[0]
+            if len(elements) == 1:
+                print("Found Keplerian elements for {} at {}.".format(targetname, t0.tdb.isot))
+
+            return cls.keplerian(
+                _targetname_to_int(targetname),
+                elements["a"].values[0],
+                elements["e"].values[0],
+                elements["incl"].values[0],
+                elements["Omega"].values[0],
+                elements["w"].values[0],
+                elements["M"].values[0],
+                t0.tt.mjd,
+                EpochTimescale.TT,
+                elements["H"].values[0],
+                elements["G"].values[0],
+            )
+
+        elif coordinate_type == "cometary":
+
+            elements = obj.elements(
+                refsystem="J2000",
+                refplane="ecliptic",
+                tp_type="absolute",
+                cache=False
+            ).to_pandas()
+
+            targetname = elements["targetname"].values[0]
+            if len(elements) == 1:
+                print("Found Cometary elements for {} at {}.".format(targetname, t0.tdb.isot))
+
+            tp = Time(
+                elements["Tp_jd"].values,
+                scale="tdb",
+                format="jd"
+            )
+            return cls.cometary(
+                _targetname_to_int(targetname),
+                elements["q"].values[0],
+                elements["e"].values[0],
+                elements["incl"].values[0],
+                elements["Omega"].values[0],
+                elements["w"].values[0],
+                tp.tdb.mjd,
+                t0.tt.mjd,
+                EpochTimescale.TT,
+                elements["H"].values[0],
+                elements["G"].values[0],
+            )
+        
     def propagate(
         self,
         epochs: Iterable[float],
