@@ -6,6 +6,8 @@ pytables
 pandas
 healpy
 requests
+astropy
+astroquery
 pytest
 pytest-cov
 setuptools>=45
