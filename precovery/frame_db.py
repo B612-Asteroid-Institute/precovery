@@ -11,6 +11,7 @@ from typing import (
     Set,
     Tuple
 )
+import warnings
 
 import numpy as np
 import sqlalchemy as sq
@@ -132,6 +133,24 @@ class FrameIndex:
             db_uri += "?mode=ro"
 
         engine = sq.create_engine(db_uri)
+
+        # Check if fast_query index exists (older databases may not have it)
+        # if it doesn't throw a warning with the command to create it
+        con = engine.connect()
+        curs = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='frames';")
+        table_names = [row[0] for row in curs.fetchall()]
+        if "frames" in table_names:
+            curs = con.execute("SELECT name FROM sqlite_master WHERE type = 'index';")
+            index_names = [row[0] for row in curs.fetchall()]
+            if 'fast_query' not in index_names:
+                warning = (
+                    "No fast_query index exists on the frames table. This may cause significant performance issues." 
+                    "To create the index run the following SQL command:\n" 
+                    "   CREATE INDEX fast_query ON frames (mjd, healpixel, obscode);\n"
+                )
+                warnings.warn(warning, UserWarning)
+        con.close()
+
         return cls(engine)
 
     def close(self):
