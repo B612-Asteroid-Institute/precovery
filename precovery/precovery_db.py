@@ -33,9 +33,12 @@ class PrecoveryCandidate:
     dec_sigma_arcsec: float
     mag: float
     mag_sigma: float
+    mjd_start_utc: float
+    mjd_mid_utc: float
     filter: str
     obscode: str
     exposure_id: str
+    exposure_duration: float
     observation_id: str
     healpix_id: int
     pred_ra_deg: float
@@ -50,10 +53,12 @@ class PrecoveryCandidate:
 
 @dataclasses.dataclass
 class FrameCandidate:
-    mjd_utc: float
+    mjd_start_utc: float
+    mjd_mid_utc: float
     filter: str
     obscode: str
     exposure_id: str
+    exposure_duration: float
     healpix_id: int
     pred_ra_deg: float
     pred_dec_deg: float
@@ -390,16 +395,19 @@ class PrecoveryDatabase:
                 obs = obs[idx]
                 for o, distance, dra, ddec in zip(obs, distances, dras, ddecs):
                     candidate = PrecoveryCandidate(
-                        mjd_utc=f.mjd,
+                        mjd_utc=f.mjd_mid, # TODO replace with a unique observation time in a future PR
                         ra_deg=o.ra,
                         dec_deg=o.dec,
                         ra_sigma_arcsec=o.ra_sigma / ARCSEC,
                         dec_sigma_arcsec=o.dec_sigma / ARCSEC,
                         mag=o.mag,
                         mag_sigma=o.mag_sigma,
+                        mjd_start_utc=f.mjd_start,
+                        mjd_mid_utc=f.mjd_mid,
                         filter=f.filter,
                         obscode=f.obscode,
                         exposure_id=f.exposure_id,
+                        exposure_duration=f.exposure_duration,
                         observation_id=o.id.decode(),
                         healpix_id=healpix_id,
                         pred_ra_deg=exact_ephem.ra,
@@ -416,10 +424,12 @@ class PrecoveryDatabase:
                 logger.info("checked %d observations in frame", n)
                 if (len(obs) == 0) & (include_frame_candidates):
                     frame_candidate = FrameCandidate(
-                        mjd_utc=f.mjd,
+                        mjd_start_utc=f.mjd_start,
+                        mjd_mid_utc=f.mjd_mid,
                         filter=f.filter,
                         obscode=f.obscode,
                         exposure_id=f.exposure_id,
+                        exposure_duration=f.exposure_duration,
                         healpix_id=healpix_id,
                         pred_ra_deg=exact_ephem.ra,
                         pred_dec_deg=exact_ephem.dec,

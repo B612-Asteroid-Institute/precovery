@@ -18,15 +18,18 @@ class SourceObservation:
     mag: float
     mag_sigma: float
     filter: str
-    epoch: float
-
+    mjd_start: float
+    mjd_mid: float
+    exposure_duration: float
 
 @dataclasses.dataclass
 class SourceExposure:
     exposure_id: str
     obscode: str
     filter: str
-    mjd: float
+    mjd_start: float
+    mjd_mid: float
+    exposure_duration: float
     observations: List[SourceObservation]
 
 
@@ -35,7 +38,9 @@ class SourceFrame:
     exposure_id: str
     obscode: str
     filter: str
-    mjd: float
+    mjd_start: float
+    mjd_mid: float
+    exposure_duration: float
     healpixel: int
     observations: List[SourceObservation]
 
@@ -66,7 +71,9 @@ def source_exposure_to_frames(
                 exposure_id=src_exp.exposure_id,
                 obscode=src_exp.obscode,
                 filter=src_exp.filter,
-                mjd=src_exp.mjd,
+                mjd_start=src_exp.mjd_start,
+                mjd_mid=src_exp.mjd_mid,
+                exposure_duration=src_exp.exposure_duration,
                 healpixel=pixel,
                 observations=[],
             )
@@ -94,7 +101,9 @@ def iterate_exposures(
                 exposure_id=obs.exposure_id,
                 obscode=obs.obscode,
                 filter=obs.filter,
-                mjd=obs.epoch,
+                mjd_start=obs.mjd_start,
+                mjd_mid=obs.mjd_mid,
+                exposure_duration=obs.exposure_duration,
                 observations=[obs],
             )
         elif obs.exposure_id == current_exposure.exposure_id:
@@ -113,7 +122,9 @@ def iterate_exposures(
                 exposure_id=obs.exposure_id,
                 obscode=obs.obscode,
                 filter=obs.filter,
-                mjd=obs.epoch,
+                mjd_start=obs.mjd_start,
+                mjd_mid=obs.mjd_mid,
+                exposure_duration=obs.exposure_duration,
                 observations=[obs],
             )
     yield current_exposure
@@ -130,7 +141,6 @@ def iterate_observations(
             columns=[
                 "obs_id",
                 "exposure_id",
-                "mjd_utc",
                 "ra",
                 "dec",
                 "ra_sigma",
@@ -138,6 +148,9 @@ def iterate_observations(
                 "mag",
                 "mag_sigma",
                 "filter",
+                "mjd_start_utc",
+                "mjd_mid_utc",
+                "exposure_duration",
                 "observatory_code",
             ],
         ):
@@ -151,7 +164,9 @@ def iterate_observations(
             mags = chunk["mag"].values.astype(float)
             mag_sigmas = chunk["mag_sigma"].values.astype(float)
             filters = chunk["filter"].values
-            epochs = chunk["mjd_utc"].values
+            mjds_start = chunk["mjd_start_utc"].values.astype(float)
+            mjds_mid = chunk["mjd_mid_utc"].values.astype(float)
+            exposure_durations = chunk["exposure_duration"].values.astype(float)
 
             for (
                 exposure_id,
@@ -164,7 +179,9 @@ def iterate_observations(
                 mag,
                 mag_sigma,
                 filter,
-                epoch,
+                mjd_start, 
+                mjd_mid, 
+                exposure_duration
             ) in zip(
                 exposure_ids,
                 obscodes,
@@ -176,7 +193,9 @@ def iterate_observations(
                 mags,
                 mag_sigmas,
                 filters,
-                epochs,
+                mjds_start,
+                mjds_mid,
+                exposure_durations,
             ):
                 obs = SourceObservation(
                     exposure_id,
@@ -189,6 +208,8 @@ def iterate_observations(
                     mag,
                     mag_sigma,
                     filter,
-                    epoch,
+                    mjd_start,
+                    mjd_mid,
+                    exposure_duration,
                 )
                 yield (obs)
