@@ -4,7 +4,6 @@ include *.toml
 include *.cfg
 include *.py
 include *.in
-include requirements.txt
 include doc/*
 include scripts/*
 include tests/*

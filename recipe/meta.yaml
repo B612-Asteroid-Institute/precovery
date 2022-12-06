@@ -19,13 +19,17 @@ requirements:
     - numpy
     - numba
     - sqlalchemy
-    - rich
+    - regex
     - pytables
     - pandas
     - healpy
     - requests
     - openorb
   test:
+    - flake8
+    - black
+    - isort
+    - mypy
     - pytest
     - pytest-cov
 

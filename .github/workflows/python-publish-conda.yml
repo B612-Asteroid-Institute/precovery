@@ -1,13 +1,11 @@
 name: Publish Python Package to conda
 
 on:
-  push:
-    tags:
-      - 'v*'
+  release:
+    types: [published]
 
 jobs:
-  deploy:
-
+  conda:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:

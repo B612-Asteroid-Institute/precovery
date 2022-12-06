@@ -31,7 +31,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    print(args)
     db = PrecoveryDatabase.from_dir(args.db_dir, args.create)
     if args.max == -1:
         limit = None
