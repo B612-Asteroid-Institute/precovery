@@ -135,9 +135,10 @@ class FrameIndex:
             index_names = [row[0] for row in curs.fetchall()]
             if "fast_query" not in index_names:
                 warning = (
-                    "No fast_query index exists on the frames table. This may cause significant performance issues."
-                    "To create the index run the following SQL command:\n"
-                    "   CREATE INDEX fast_query ON frames (mjd, healpixel, obscode);\n"
+                    "No fast_query index exists on the frames table. This may cause"
+                    " significant performance issues.To create the index run the"
+                    " following SQL command:\n   CREATE INDEX fast_query ON frames"
+                    " (mjd, healpixel, obscode);\n"
                 )
                 warnings.warn(warning, UserWarning)
         con.close()

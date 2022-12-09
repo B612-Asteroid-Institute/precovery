@@ -91,13 +91,15 @@ class PrecoveryDatabase:
         if config.build_version != __version__:
             if not allow_version_mismatch:
                 raise Exception(
-                    f"Version mismatch: \nRunning version: {__version__}\nDatabase version:"
-                    f" {config.build_version}\nUse allow_version_mismatch=True to ignore this error."
+                    f"Version mismatch: \nRunning version: {__version__}\nDatabase"
+                    f" version: {config.build_version}\nUse allow_version_mismatch=True"
+                    " to ignore this error."
                 )
             else:
                 logger.warning(
-                    f"Version mismatch: \nRunning version: {__version__}\nDatabase version:"
-                    f" {config.build_version}\nallow_version_mismatch=True, so continuing."
+                    f"Version mismatch: \nRunning version: {__version__}\nDatabase"
+                    f" version: {config.build_version}\nallow_version_mismatch=True, so"
+                    " continuing."
                 )
 
         frame_idx_db = "sqlite:///" + os.path.join(directory, "index.db")
