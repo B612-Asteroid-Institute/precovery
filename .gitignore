@@ -114,7 +114,7 @@ venv.bak/
 thorcontrol/version.py
 virtualenv3.10
 volume/
-data/
+^data/
 out/
 
 precovery/version.py
