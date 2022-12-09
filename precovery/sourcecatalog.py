@@ -56,6 +56,7 @@ def iterate_frames(
 def source_exposure_to_frames(
     src_exp: SourceExposure, nside: int = 32
 ) -> List[SourceFrame]:
+    """ """
     by_pixel: Dict[int, SourceFrame] = {}
     for obs in src_exp.observations:
         pixel = healpix_geom.radec_to_healpixel(obs.ra, obs.dec, nside)
@@ -81,6 +82,9 @@ def iterate_exposures(
     key: str = "data",
     chunksize: int = 100000,
 ):
+    """
+    Yields unique exposures from observations in a file
+    """
     current_exposure: Optional[SourceExposure] = None
     n = 0
     for obs in iterate_observations(filename, key=key, chunksize=chunksize):
