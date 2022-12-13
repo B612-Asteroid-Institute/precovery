@@ -1,5 +1,6 @@
 import argparse
 import logging
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -11,15 +12,12 @@ from precovery.orbit import EpochTimescale, Orbit
 logger = logging.getLogger("root")
 # logger.setLevel(logging.DEBUG)
 
-DATABASE_DIR = (
-    "/mnt/data/projects/precovery/precovery_data/nsc/precovery_month_db"
-)
+DATABASE_DIR = "/mnt/data/projects/precovery/precovery_data/nsc/precovery_month_db"
 ORBITS_FILE = "test_orbits.csv"
 OUTPUT_FILE = "test_orbits_matches.csv"
 
 
 def matches_to_dict(matches):
-
     data = {}
     for i, m in enumerate(matches):
         for k, v in m.__dict__.items():
@@ -32,7 +30,6 @@ def matches_to_dict(matches):
 
 
 def matches_to_df(matches):
-
     data = matches_to_dict(matches)
     df = pd.DataFrame(data)
     # Organize columns
@@ -56,7 +53,7 @@ def matches_to_df(matches):
             "pred_vdec_degpday",
             "delta_ra_arcsec",
             "delta_dec_arcsec",
-            'distance_arcsec',
+            "distance_arcsec",
         ]
     ]
     # Sort rows
@@ -67,7 +64,6 @@ def matches_to_df(matches):
 
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser(
         description="Run precovery using test_orbits.csv in this directory"
     )
@@ -78,7 +74,10 @@ if __name__ == "__main__":
         "--tolerance",
         default=1 / 3600,
         type=float,
-        help="Astrometric tolerance to within which observations are considered precoveries.",
+        help=(
+            "Astrometric tolerance to within which observations are considered"
+            " precoveries."
+        ),
     )
     parser.add_argument(
         "--num_orbits",
@@ -89,11 +88,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     db = precovery_db.PrecoveryDatabase.from_dir(args.database_dir, create=True)
-    orbits = pd.read_csv(args.orbits_file)
+
+    orbits_file = Path(args.orbits_file).resolve()
+    orbits = pd.read_csv(orbits_file)
 
     matches_dfs = []
     for i in range(np.minimum(len(orbits), args.num_orbits)):
-
         # Select a single orbit
         orbit_i = orbits.iloc[i : i + 1]
 
@@ -113,7 +113,7 @@ if __name__ == "__main__":
             0.15,
         )
 
-        matches = [m for m in db.precover(orbit, tolerance=1/3600)]
+        matches = [m for m in db.precover(orbit, tolerance=1 / 3600)]
         matches_df = matches_to_df(matches)
         matches_df.insert(0, "orbit_id", orbit_id)
         matches_dfs.append(matches_df)

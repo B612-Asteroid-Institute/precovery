@@ -2,7 +2,6 @@ import dataclasses
 from typing import Dict, Iterator, List, Optional
 
 import pandas as pd
-from rich.progress import BarColumn, Progress, TimeElapsedColumn, TimeRemainingColumn
 
 from . import healpix_geom
 
@@ -47,7 +46,7 @@ def iterate_frames(
     nside: int = 32,
     skip: int = 0,
     key: str = "data",
-    chunksize: int = 100000
+    chunksize: int = 100000,
 ) -> Iterator[SourceFrame]:
     for exp in iterate_exposures(filename, limit, skip, key, chunksize):
         for frame in source_exposure_to_frames(exp, nside):
@@ -57,6 +56,7 @@ def iterate_frames(
 def source_exposure_to_frames(
     src_exp: SourceExposure, nside: int = 32
 ) -> List[SourceFrame]:
+    """ """
     by_pixel: Dict[int, SourceFrame] = {}
     for obs in src_exp.observations:
         pixel = healpix_geom.radec_to_healpixel(obs.ra, obs.dec, nside)
@@ -76,13 +76,15 @@ def source_exposure_to_frames(
 
 
 def iterate_exposures(
-        filename,
-        limit:
-        Optional[int] = None,
-        skip: int = 0,
-        key: str = "data",
-        chunksize: int = 100000
-    ):
+    filename,
+    limit: Optional[int] = None,
+    skip: int = 0,
+    key: str = "data",
+    chunksize: int = 100000,
+):
+    """
+    Yields unique exposures from observations in a file
+    """
     current_exposure: Optional[SourceExposure] = None
     n = 0
     for obs in iterate_observations(filename, key=key, chunksize=chunksize):
@@ -118,72 +120,75 @@ def iterate_exposures(
 
 
 def iterate_observations(
-        filename: str,
-        key: str = "data",
-        chunksize: int = 100000
-    ) -> Iterator[SourceObservation]:
+    filename: str, key: str = "data", chunksize: int = 100000
+) -> Iterator[SourceObservation]:
     with pd.HDFStore(filename, key=key, mode="r") as store:
+        for chunk in store.select(
+            key=key,
+            iterator=True,
+            chunksize=chunksize,
+            columns=[
+                "obs_id",
+                "exposure_id",
+                "mjd_utc",
+                "ra",
+                "dec",
+                "ra_sigma",
+                "dec_sigma",
+                "mag",
+                "mag_sigma",
+                "filter",
+                "observatory_code",
+            ],
+        ):
+            exposure_ids = chunk["exposure_id"].values
+            obscodes = chunk["observatory_code"].values
+            ids = chunk["obs_id"].values
+            ras = chunk["ra"].values.astype(float)
+            decs = chunk["dec"].values.astype(float)
+            ra_sigmas = chunk["ra_sigma"].values.astype(float)
+            dec_sigmas = chunk["dec_sigma"].values.astype(float)
+            mags = chunk["mag"].values.astype(float)
+            mag_sigmas = chunk["mag_sigma"].values.astype(float)
+            filters = chunk["filter"].values
+            epochs = chunk["mjd_utc"].values
 
-        n_rows = store.get_storer(key).nrows
-
-        with Progress(
-            "[progress.description]{task.description}",
-            BarColumn(),
-            "[progress.percentage]{task.completed} / {task.total}  {task.percentage:>3.0f}%",
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-        ) as progress:
-            read_observations = progress.add_task(
-                "loading observations...", total=n_rows
-            )
-            for chunk in store.select(
-                key=key,
-                iterator=True,
-                chunksize=chunksize,
-                columns=[
-                    "obs_id", "exposure_id", "mjd_utc",
-                    "ra", "dec", "ra_sigma", "dec_sigma",
-                    "mag", "mag_sigma", "filter",
-                    "observatory_code"
-                ]
+            for (
+                exposure_id,
+                obscode,
+                id,
+                ra,
+                dec,
+                ra_sigma,
+                dec_sigma,
+                mag,
+                mag_sigma,
+                filter,
+                epoch,
+            ) in zip(
+                exposure_ids,
+                obscodes,
+                ids,
+                ras,
+                decs,
+                ra_sigmas,
+                dec_sigmas,
+                mags,
+                mag_sigmas,
+                filters,
+                epochs,
             ):
-                exposure_ids = chunk["exposure_id"].values
-                obscodes = chunk["observatory_code"].values
-                ids = chunk["obs_id"].values
-                ras = chunk["ra"].values
-                decs = chunk["dec"].values
-                ra_sigmas = chunk["ra_sigma"].values
-                dec_sigmas = chunk["dec_sigma"].values
-                mags = chunk["mag"].values
-                mag_sigmas = chunk["mag_sigma"].values
-                filters = chunk["filter"].values
-                epochs = chunk["mjd_utc"].values
-
-                for exposure_id, obscode, id, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, filter, epoch in zip(
-                    exposure_ids,
-                    obscodes,
-                    ids,
-                    ras,
-                    decs,
-                    ra_sigmas,
-                    dec_sigmas,
-                    mags,
-                    mag_sigmas,
-                    filters,
-                    epochs
-                ):
-                    obs = SourceObservation(
-                        exposure_id,
-                        obscode,
-                        id.encode(),
-                        ra,
-                        dec,
-                        ra_sigma,
-                        dec_sigma,
-                        mag,
-                        mag_sigma,
-                        filter,
-                        epoch
-                    )
-                    yield (obs)
-                    progress.update(read_observations, advance=1)
+                obs = SourceObservation(
+                    exposure_id,
+                    obscode,
+                    id.encode(),
+                    ra,
+                    dec,
+                    ra_sigma,
+                    dec_sigma,
+                    mag,
+                    mag_sigma,
+                    filter,
+                    epoch,
+                )
+                yield (obs)

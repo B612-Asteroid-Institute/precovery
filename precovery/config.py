@@ -1,11 +1,15 @@
 import json
 
-class Config:
+from .version import __version__
 
-    def __init__(self,
-            nside: int = 32,
-            data_file_max_size: int = int(1e9)
-        ):
+
+class Config:
+    def __init__(
+        self,
+        nside: int = 32,
+        data_file_max_size: int = int(1e9),
+        build_version: str = __version__,
+    ):
         """
         Precovery Database Configuration
 
@@ -18,6 +22,7 @@ class Config:
             Maximum size in bytes of the binary files to which the indexed observations are
             saved.
         """
+        self.build_version = build_version
         self.nside = nside
         self.data_file_max_size = data_file_max_size
 
@@ -32,13 +37,8 @@ class Config:
         out_file : str
             Desired path and name of file to which to save config.
         """
-        with open(out_file, 'w', encoding='utf-8') as file:
-            json.dump(
-                self.__dict__,
-                file,
-                ensure_ascii=False,
-                indent=4
-            )
+        with open(out_file, "w", encoding="utf-8") as file:
+            json.dump(self.__dict__, file, ensure_ascii=False, indent=4)
         return
 
     @classmethod
@@ -54,5 +54,6 @@ class Config:
         with open(in_file, "r", encoding="utf-8") as f:
             data = json.load(f)
         return cls(**data)
+
 
 DefaultConfig = Config()
