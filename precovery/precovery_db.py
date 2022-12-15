@@ -403,12 +403,7 @@ class PrecoveryDatabase:
                 n_frame += 1
             logger.info("checked %d frames", n_frame)
 
-
-
-    def extract_observations_by_frames(
-        self,
-        frames: Iterable[HealpixFrame]
-    ):
+    def extract_observations_by_frames(self, frames: Iterable[HealpixFrame]):
         # consider warnings for available memory
         obs_out = pd.DataFrame(
             columns=[
@@ -436,9 +431,7 @@ class PrecoveryDatabase:
                 )
                 obs_ids = np.append(
                     obs_ids,
-                    np.array(
-                        [[obs.id.decode()]]
-                    ),
+                    np.array([[obs.id.decode()]]),
                     axis=0,
                 )
             if np.any(inc_arr):
@@ -467,75 +460,6 @@ class PrecoveryDatabase:
         # consider warnings for available memory
 
         frames = self.frames.idx.frames_by_date(mjd_start, mjd_end)
-        
+
         return self.extract_observations_by_frames(frames)
 
-
-
-def precover_brute_force(
-    self,
-    orbit: Orbit,
-    tolerance: float = 30 * ARCSEC,
-    start_mjd: Optional[float] = None,
-    end_mjd: Optional[float] = None,
-):
-    """
-    Find observations which match orbit in the database. Observations are
-    searched in descending order by mjd.
-
-    orbit: The orbit to match.
-
-    max_matches: End once this many matches have been found. If None, find
-    all matches.
-
-    start_mjd: Only consider observations from after this epoch
-    (inclusive). If None, find all.
-
-    end_mjd: Only consider observations from before this epoch (inclusive).
-    If None, find all.
-    """
-    # basically:
-    """
-        find all dates we need to propagate to
-        propagate orbit to each of these dates
-        get all intersecting healpix frames at these dates
-        grab neighboring healpixels
-        extract all observations from these healpixels
-        do the kd-tree stuff from original frame_db work
-            ???
-        """
-    if start_mjd is None or end_mjd is None:
-        first, last = self.frames.idx.mjd_bounds()
-        if start_mjd is None:
-            start_mjd = first
-        if end_mjd is None:
-            end_mjd = last
-
-    n = 0
-    logger.info(
-        "precovering orbit %s from %f.6f to %f.5f, window=%d",
-        orbit.orbit_id,
-        start_mjd,
-        end_mjd,
-    )
-
-    windows = self.frames.idx.window_centers(start_mjd, end_mjd)
-
-    # group windows by obscodes so that many windows can be searched at once
-    for obscode, obs_windows in itertools.groupby(windows, key=lambda pair: pair[1]):
-        mjds = [window[0] for window in obs_windows]
-        matches = self._check_windows(
-            mjds,
-            obscode,
-            orbit,
-            tolerance,
-            start_mjd=start_mjd,
-            end_mjd=end_mjd,
-            window_size=window_size,
-            include_frame_candidates=include_frame_candidates,
-        )
-        for result in matches:
-            yield result
-            n += 1
-            if max_matches is not None and n >= max_matches:
-                return

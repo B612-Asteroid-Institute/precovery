@@ -278,10 +278,7 @@ class FrameIndex:
         This is needed for brute force propagation to each time,
         prior to extraction of observations
         """
-        select_stmt = (
-            sq.select(self.frames.c.mjd)
-            .distinct()
-        )
+        select_stmt = sq.select(self.frames.c.mjd).distinct()
         mjds = self.dbconn.execute(select_stmt).fetchall()
         return [x[0] for x in mjds]
 
