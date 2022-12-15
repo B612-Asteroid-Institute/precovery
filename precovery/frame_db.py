@@ -4,22 +4,11 @@ import itertools
 import logging
 import os
 import struct
-from typing import (
-    Iterable,
-    Iterator,
-    Optional,
-    Set,
-    Tuple
-)
+from typing import Iterable, Iterator, Optional, Set, Tuple
 
 import numpy as np
 import sqlalchemy as sq
-from rich.progress import (
-    BarColumn,
-    Progress,
-    TimeElapsedColumn,
-    TimeRemainingColumn
-)
+from rich.progress import BarColumn, Progress, TimeElapsedColumn, TimeRemainingColumn
 from sqlalchemy.sql import func as sqlfunc
 
 from . import sourcecatalog
@@ -43,6 +32,7 @@ class HealpixFrame:
     data_offset: int
     data_length: int
 
+
 @dataclasses.dataclass
 class Dataset:
     id: str
@@ -50,6 +40,7 @@ class Dataset:
     reference_doi: str
     documentation_url: str
     sia_url: str
+
 
 @dataclasses.dataclass
 class FrameBundleDescription:
@@ -113,6 +104,7 @@ class Observation:
             id=so.id,
         )
 
+
 class FrameIndex:
     def __init__(self, db_engine):
         self.db = db_engine
@@ -123,12 +115,10 @@ class FrameIndex:
     def open(cls, db_uri, mode: str = "r"):
 
         if (mode != "r") and (mode != "w"):
-            err = (
-                "mode should be one of {'r', 'w'}"
-            )
+            err = "mode should be one of {'r', 'w'}"
             raise ValueError(err)
 
-        if db_uri.startswith('sqlite:///') and (mode == "r"):
+        if db_uri.startswith("sqlite:///") and (mode == "r"):
             db_uri += "?mode=ro"
 
         engine = sq.create_engine(db_uri)
@@ -281,6 +271,20 @@ class FrameIndex:
         row = self.dbconn.execute(stmt).fetchone()
         return row[0]
 
+    def unique_frame_times(self) -> Iterable[float]:
+        """
+        return unique values of mjd among all frames.
+
+        This is needed for brute force propagation to each time,
+        prior to extraction of observations
+        """
+        select_stmt = (
+            sq.select(self.frames.c.mjd)
+            .distinct()
+        )
+        mjds = self.dbconn.execute(select_stmt).fetchall()
+        return [x[0] for x in mjds]
+
     def frames_for_bundle(
         self, bundle: FrameBundleDescription
     ) -> Iterator[HealpixFrame]:
@@ -393,6 +397,35 @@ class FrameIndex:
         for row in result:
             yield HealpixFrame(*row)
 
+    def frames_by_date(
+        self, mjd_start: float, mjd_end: float
+    ) -> Iterator[HealpixFrame]:
+        """
+        Returns all frames in the index within a date range, sorted by obscode, mjd, and healpixel.
+        """
+        select_stmt = (
+            sq.select(
+                self.frames.c.id,
+                self.frames.c.dataset_id,
+                self.frames.c.obscode,
+                self.frames.c.exposure_id,
+                self.frames.c.filter,
+                self.frames.c.mjd,
+                self.frames.c.healpixel,
+                self.frames.c.data_uri,
+                self.frames.c.data_offset,
+                self.frames.c.data_length,
+            )
+            .where(
+                self.frames.c.mjd >= mjd_start,
+                self.frames.c.mjd <= mjd_end,
+            )
+            .order_by(self.frames.c.obscode, self.frames.c.mjd, self.frames.c.healpixel)
+        )
+        result = self.dbconn.execute(select_stmt)
+        for row in result:
+            yield HealpixFrame(*row)
+
     def add_frame(self, frame: HealpixFrame):
         insert = self.frames.insert().values(
             dataset_id=frame.dataset_id,
@@ -413,7 +446,7 @@ class FrameIndex:
             name=dataset.name,
             reference_doi=dataset.reference_doi,
             documentation_url=dataset.documentation_url,
-            sia_url=dataset.sia_url
+            sia_url=dataset.sia_url,
         )
         self.dbconn.execute(insert)
 
@@ -462,6 +495,7 @@ class FrameIndex:
         )
         self._metadata.create_all(self.db)
 
+
 class FrameDB:
     def __init__(
         self,
@@ -494,7 +528,7 @@ class FrameDB:
         name: Optional[str] = None,
         reference_doi: Optional[str] = None,
         documentation_url: Optional[str] = None,
-        sia_url: Optional[str] = None
+        sia_url: Optional[str] = None,
     ):
         """
         Load data from a HDF5 catalog file.
@@ -512,7 +546,7 @@ class FrameDB:
             Maximum number of frames to load from the file. None means no limit.
         key : str
             Name of key where the observations table is located in the hdf5 file.
-        chunksize: 
+        chunksize:
             Load observations in chunks of this size and then iterate over the chunks
             to load observations.
         name : str, optional
@@ -525,18 +559,22 @@ class FrameDB:
             Simple Image Access URL for accessing images for this particular dataset.
         """
         if dataset_id not in self.idx.get_dataset_ids():
-            logger.info(f"Adding new entry into datasets table for dataset {dataset_id}.")
+            logger.info(
+                f"Adding new entry into datasets table for dataset {dataset_id}."
+            )
             dataset = Dataset(
                 id=dataset_id,
                 name=name,
                 reference_doi=reference_doi,
                 documentation_url=documentation_url,
-                sia_url=sia_url
+                sia_url=sia_url,
             )
             self.idx.add_dataset(dataset)
 
         else:
-            logger.info(f"{dataset_id} dataset already has an entry in the datasets table.")
+            logger.info(
+                f"{dataset_id} dataset already has an entry in the datasets table."
+            )
 
         for src_frame in sourcecatalog.iterate_frames(
             hdf5_file,

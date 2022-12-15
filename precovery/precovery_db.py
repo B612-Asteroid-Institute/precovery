@@ -1,28 +1,16 @@
-import os
 import dataclasses
 import itertools
 import logging
-import numpy as np
-from typing import (
-    Iterable,
-    Iterator,
-    Optional,
-    Union
-)
+import os
+from typing import Iterable, Iterator, Optional, Union
 
-from .config import (
-    Config,
-    DefaultConfig
-)
-from .frame_db import (
-    FrameDB,
-    FrameIndex
-)
+import numpy as np
+import pandas as pd
+
+from .config import Config, DefaultConfig
+from .frame_db import FrameDB, FrameIndex, HealpixFrame
 from .healpix_geom import radec_to_healpixel
-from .orbit import (
-    Orbit,
-    PropagationIntegrator
-)
+from .orbit import Orbit, PropagationIntegrator
 from .spherical_geom import haversine_distance_deg
 
 DEGREE = 1.0
@@ -30,10 +18,11 @@ ARCMIN = DEGREE / 60
 ARCSEC = ARCMIN / 60
 
 CANDIDATE_K = 15
-CANDIDATE_NSIDE = 2**CANDIDATE_K
+CANDIDATE_NSIDE = 2 ** CANDIDATE_K
 
 logging.basicConfig()
 logger = logging.getLogger("precovery")
+
 
 @dataclasses.dataclass
 class PrecoveryCandidate:
@@ -58,6 +47,7 @@ class PrecoveryCandidate:
     distance_arcsec: float
     dataset_id: str
 
+
 @dataclasses.dataclass
 class FrameCandidate:
     mjd_utc: float
@@ -71,6 +61,7 @@ class FrameCandidate:
     pred_vdec_degpday: float
     dataset_id: str
 
+
 class PrecoveryDatabase:
     def __init__(self, frames: FrameDB):
         self.frames = frames
@@ -83,13 +74,13 @@ class PrecoveryDatabase:
                 return cls.create(directory)
 
         try:
-            config = Config.from_json(
-                os.path.join(directory, "config.json")
-            )
+            config = Config.from_json(os.path.join(directory, "config.json"))
         except FileNotFoundError:
             config = DefaultConfig
             if not create:
-                logger.warning("No configuration file found. Adopting configuration defaults.")
+                logger.warning(
+                    "No configuration file found. Adopting configuration defaults."
+                )
 
         frame_idx_db = "sqlite:///" + os.path.join(directory, "index.db")
         frame_idx = FrameIndex.open(frame_idx_db, mode=mode)
@@ -115,10 +106,7 @@ class PrecoveryDatabase:
         frame_idx_db = "sqlite:///" + os.path.join(directory, "index.db")
         frame_idx = FrameIndex.open(frame_idx_db)
 
-        config = Config(
-            nside=nside,
-            data_file_max_size=data_file_max_size
-        )
+        config = Config(nside=nside, data_file_max_size=data_file_max_size)
         config.to_json(os.path.join(directory, "config.json"))
 
         data_path = os.path.join(directory, "data")
@@ -135,7 +123,7 @@ class PrecoveryDatabase:
         start_mjd: Optional[float] = None,
         end_mjd: Optional[float] = None,
         window_size: int = 7,
-        include_frame_candidates: bool = False
+        include_frame_candidates: bool = False,
     ):
         """
         Find observations which match orbit in the database. Observations are
@@ -196,7 +184,7 @@ class PrecoveryDatabase:
                 start_mjd=start_mjd,
                 end_mjd=end_mjd,
                 window_size=window_size,
-                include_frame_candidates=include_frame_candidates
+                include_frame_candidates=include_frame_candidates,
             )
             for result in matches:
                 yield result
@@ -219,10 +207,14 @@ class PrecoveryDatabase:
         Find all observations that match orbit within a list of windows
         """
         # Propagate the orbit with n-body to every window center
-        orbit_propagated = orbit.propagate(window_midpoints, PropagationIntegrator.N_BODY)
+        orbit_propagated = orbit.propagate(
+            window_midpoints, PropagationIntegrator.N_BODY
+        )
 
         # Calculate the location of the orbit on the sky with n-body propagation
-        window_ephems = orbit.compute_ephemeris(obscode, window_midpoints, PropagationIntegrator.N_BODY)
+        window_ephems = orbit.compute_ephemeris(
+            obscode, window_midpoints, PropagationIntegrator.N_BODY
+        )
         window_healpixels = radec_to_healpixel(
             np.array([w.ra for w in window_ephems]),
             np.array([w.dec for w in window_ephems]),
@@ -240,13 +232,17 @@ class PrecoveryDatabase:
             # Check if start_mjd_window is not earlier than start_mjd (if defined)
             # If start_mjd_window is earlier, then set start_mjd_window to start_mjd
             if (start_mjd is not None) and (start_mjd_window < start_mjd):
-                logger.info(f"Window start MJD [UTC] ({start_mjd_window}) is earlier than desired start MJD [UTC] ({start_mjd}).")
+                logger.info(
+                    f"Window start MJD [UTC] ({start_mjd_window}) is earlier than desired start MJD [UTC] ({start_mjd})."
+                )
                 start_mjd_window = start_mjd
 
             # Check if end_mjd_window is not later than end_mjd (if defined)
             # If end_mjd_window is later, then set end_mjd_window to end_mjd
             if (end_mjd is not None) and (end_mjd_window > end_mjd):
-                logger.info(f"Window end MJD [UTC] ({end_mjd_window}) is later than desired end MJD [UTC] ({end_mjd}).")
+                logger.info(
+                    f"Window end MJD [UTC] ({end_mjd_window}) is later than desired end MJD [UTC] ({end_mjd})."
+                )
                 end_mjd_window = end_mjd
 
             timedeltas = []
@@ -298,7 +294,7 @@ class PrecoveryDatabase:
                     obscode,
                     keep_mjds,
                     tolerance,
-                    include_frame_candidates
+                    include_frame_candidates,
                 )
                 for m in matches:
                     yield m
@@ -310,7 +306,7 @@ class PrecoveryDatabase:
         obscode: str,
         mjds: Iterable[float],
         tolerance: float,
-        include_frame_candidates: bool
+        include_frame_candidates: bool,
     ) -> Iterator[Union[PrecoveryCandidate, FrameCandidate]]:
         """
         Deeply inspect all frames that match the given obscode, mjd, and healpix to
@@ -335,11 +331,11 @@ class PrecoveryDatabase:
             # values for that parameter. As long as we return a Healpix ID generated with
             # nside greater than the indexed database then we can always down-sample the
             # ID to a lower nside value
-            healpix_id = int(radec_to_healpixel(
-                exact_ephem.ra,
-                exact_ephem.dec,
-                nside=CANDIDATE_NSIDE
-            ))
+            healpix_id = int(
+                radec_to_healpixel(
+                    exact_ephem.ra, exact_ephem.dec, nside=CANDIDATE_NSIDE
+                )
+            )
 
             for f in frames:
                 logger.info("checking frame: %s", f)
@@ -366,8 +362,8 @@ class PrecoveryDatabase:
                         mjd_utc=f.mjd,
                         ra_deg=o.ra,
                         dec_deg=o.dec,
-                        ra_sigma_arcsec=o.ra_sigma/ARCSEC,
-                        dec_sigma_arcsec=o.dec_sigma/ARCSEC,
+                        ra_sigma_arcsec=o.ra_sigma / ARCSEC,
+                        dec_sigma_arcsec=o.dec_sigma / ARCSEC,
                         mag=o.mag,
                         mag_sigma=o.mag_sigma,
                         filter=f.filter,
@@ -379,9 +375,9 @@ class PrecoveryDatabase:
                         pred_dec_deg=exact_ephem.dec,
                         pred_vra_degpday=exact_ephem.ra_velocity,
                         pred_vdec_degpday=exact_ephem.dec_velocity,
-                        delta_ra_arcsec=dra/ARCSEC,
-                        delta_dec_arcsec=ddec/ARCSEC,
-                        distance_arcsec=distance/ARCSEC,
+                        delta_ra_arcsec=dra / ARCSEC,
+                        delta_dec_arcsec=ddec / ARCSEC,
+                        distance_arcsec=distance / ARCSEC,
                         dataset_id=f.dataset_id,
                     )
                     yield candidate
@@ -406,3 +402,140 @@ class PrecoveryDatabase:
 
                 n_frame += 1
             logger.info("checked %d frames", n_frame)
+
+
+
+    def extract_observations_by_frames(
+        self,
+        frames: Iterable[HealpixFrame]
+    ):
+        # consider warnings for available memory
+        obs_out = pd.DataFrame(
+            columns=[
+                "observatory_code",
+                "healpixel",
+                "obs_id",
+                "RA_deg",
+                "Dec_deg",
+                "RA_sigma_deg",
+                "Dec_sigma_deg",
+                "mjd_utc",
+            ]
+        )
+        frame_dfs = []
+        for frame in frames:
+            inc_arr = np.empty((0, 5), float)
+            obs_ids = np.empty((0, 1), object)
+            for obs in self.frames.iterate_observations(frame):
+                inc_arr = np.append(
+                    inc_arr,
+                    np.array(
+                        [[obs.ra, obs.dec, obs.ra_sigma, obs.dec_sigma, frame.mjd]]
+                    ),
+                    axis=0,
+                )
+                obs_ids = np.append(
+                    obs_ids,
+                    np.array(
+                        [[obs.id.decode()]]
+                    ),
+                    axis=0,
+                )
+            if np.any(inc_arr):
+                frame_obs = pd.DataFrame(
+                    inc_arr,
+                    columns=[
+                        "RA_deg",
+                        "Dec_deg",
+                        "RA_sigma_deg",
+                        "Dec_sigma_deg",
+                        "mjd_utc",
+                    ],
+                )
+                frame_obs.insert(0, "observatory_code", frame.obscode)
+                frame_obs.insert(1, "healpixel", frame.healpixel)
+                frame_obs.insert(2, "obs_id", obs_ids)
+                frame_dfs.append(frame_obs)
+        obs_out = pd.concat(frame_dfs)
+        return obs_out
+
+    def extract_observations_by_date(
+        self,
+        mjd_start: float,
+        mjd_end: float,
+    ):
+        # consider warnings for available memory
+
+        frames = self.frames.idx.frames_by_date(mjd_start, mjd_end)
+        
+        return self.extract_observations_by_frames(frames)
+
+
+
+def precover_brute_force(
+    self,
+    orbit: Orbit,
+    tolerance: float = 30 * ARCSEC,
+    start_mjd: Optional[float] = None,
+    end_mjd: Optional[float] = None,
+):
+    """
+    Find observations which match orbit in the database. Observations are
+    searched in descending order by mjd.
+
+    orbit: The orbit to match.
+
+    max_matches: End once this many matches have been found. If None, find
+    all matches.
+
+    start_mjd: Only consider observations from after this epoch
+    (inclusive). If None, find all.
+
+    end_mjd: Only consider observations from before this epoch (inclusive).
+    If None, find all.
+    """
+    # basically:
+    """
+        find all dates we need to propagate to
+        propagate orbit to each of these dates
+        get all intersecting healpix frames at these dates
+        grab neighboring healpixels
+        extract all observations from these healpixels
+        do the kd-tree stuff from original frame_db work
+            ???
+        """
+    if start_mjd is None or end_mjd is None:
+        first, last = self.frames.idx.mjd_bounds()
+        if start_mjd is None:
+            start_mjd = first
+        if end_mjd is None:
+            end_mjd = last
+
+    n = 0
+    logger.info(
+        "precovering orbit %s from %f.6f to %f.5f, window=%d",
+        orbit.orbit_id,
+        start_mjd,
+        end_mjd,
+    )
+
+    windows = self.frames.idx.window_centers(start_mjd, end_mjd)
+
+    # group windows by obscodes so that many windows can be searched at once
+    for obscode, obs_windows in itertools.groupby(windows, key=lambda pair: pair[1]):
+        mjds = [window[0] for window in obs_windows]
+        matches = self._check_windows(
+            mjds,
+            obscode,
+            orbit,
+            tolerance,
+            start_mjd=start_mjd,
+            end_mjd=end_mjd,
+            window_size=window_size,
+            include_frame_candidates=include_frame_candidates,
+        )
+        for result in matches:
+            yield result
+            n += 1
+            if max_matches is not None and n >= max_matches:
+                return

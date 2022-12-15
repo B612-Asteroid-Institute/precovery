@@ -1,5 +1,7 @@
 .eggs
 thorcontrol/version.py
 virtualenv3.10
+python3.9
 
 data/
+precovery/__pycache__/*
