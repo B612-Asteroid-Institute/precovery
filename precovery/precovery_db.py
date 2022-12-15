@@ -12,6 +12,7 @@ from .frame_db import FrameDB, FrameIndex, HealpixFrame
 from .healpix_geom import radec_to_healpixel
 from .orbit import Orbit, PropagationIntegrator
 from .spherical_geom import haversine_distance_deg
+from .version import __version__
 
 DEGREE = 1.0
 ARCMIN = DEGREE / 60
@@ -63,12 +64,19 @@ class FrameCandidate:
 
 
 class PrecoveryDatabase:
-    def __init__(self, frames: FrameDB):
+    def __init__(self, frames: FrameDB, config: Config = DefaultConfig):
         self.frames = frames
         self._exposures_by_obscode: dict = {}
+        self.config = config
 
     @classmethod
-    def from_dir(cls, directory: str, create: bool = False, mode: str = "r"):
+    def from_dir(
+        cls,
+        directory: str,
+        create: bool = False,
+        mode: str = "r",
+        allow_version_mismatch: bool = False,
+    ):
         if not os.path.exists(directory):
             if create:
                 return cls.create(directory)
@@ -76,10 +84,23 @@ class PrecoveryDatabase:
         try:
             config = Config.from_json(os.path.join(directory, "config.json"))
         except FileNotFoundError:
-            config = DefaultConfig
             if not create:
+                raise Exception("No config file found and create=False")
+            config = DefaultConfig
+            config.to_json(os.path.join(directory, "config.json"))
+
+        if config.build_version != __version__:
+            if not allow_version_mismatch:
+                raise Exception(
+                    f"Version mismatch: \nRunning version: {__version__}\nDatabase"
+                    f" version: {config.build_version}\nUse allow_version_mismatch=True"
+                    " to ignore this error."
+                )
+            else:
                 logger.warning(
-                    "No configuration file found. Adopting configuration defaults."
+                    f"Version mismatch: \nRunning version: {__version__}\nDatabase"
+                    f" version: {config.build_version}\nallow_version_mismatch=True, so"
+                    " continuing."
                 )
 
         frame_idx_db = "sqlite:///" + os.path.join(directory, "index.db")
@@ -87,9 +108,9 @@ class PrecoveryDatabase:
 
         data_path = os.path.join(directory, "data")
         frame_db = FrameDB(
-            frame_idx, data_path, config.data_file_max_size, config.nside
+            frame_idx, data_path, config.data_file_max_size, config.nside, mode=mode
         )
-        return cls(frame_db)
+        return cls(frame_db, config)
 
     @classmethod
     def create(
@@ -101,7 +122,7 @@ class PrecoveryDatabase:
         """
         Create a new database on disk in the given directory.
         """
-        os.makedirs(directory)
+        os.makedirs(directory, exist_ok=True)
 
         frame_idx_db = "sqlite:///" + os.path.join(directory, "index.db")
         frame_idx = FrameIndex.open(frame_idx_db)
@@ -110,10 +131,11 @@ class PrecoveryDatabase:
         config.to_json(os.path.join(directory, "config.json"))
 
         data_path = os.path.join(directory, "data")
-        os.makedirs(data_path)
+        os.makedirs(data_path, exist_ok=True)
 
         frame_db = FrameDB(frame_idx, data_path, data_file_max_size, nside)
-        return cls(frame_db)
+
+        return cls(frame_db, config)
 
     def precover(
         self,
@@ -233,7 +255,8 @@ class PrecoveryDatabase:
             # If start_mjd_window is earlier, then set start_mjd_window to start_mjd
             if (start_mjd is not None) and (start_mjd_window < start_mjd):
                 logger.info(
-                    f"Window start MJD [UTC] ({start_mjd_window}) is earlier than desired start MJD [UTC] ({start_mjd})."
+                    f"Window start MJD [UTC] ({start_mjd_window}) is earlier than"
+                    f" desired start MJD [UTC] ({start_mjd})."
                 )
                 start_mjd_window = start_mjd
 
@@ -241,7 +264,8 @@ class PrecoveryDatabase:
             # If end_mjd_window is later, then set end_mjd_window to end_mjd
             if (end_mjd is not None) and (end_mjd_window > end_mjd):
                 logger.info(
-                    f"Window end MJD [UTC] ({end_mjd_window}) is later than desired end MJD [UTC] ({end_mjd})."
+                    f"Window end MJD [UTC] ({end_mjd_window}) is later than desired end"
+                    f" MJD [UTC] ({end_mjd})."
                 )
                 end_mjd_window = end_mjd
 
@@ -398,7 +422,7 @@ class PrecoveryDatabase:
                     )
                     yield frame_candidate
 
-                    logger.info(f"no observations found in this frame")
+                    logger.info("no observations found in this frame")
 
                 n_frame += 1
             logger.info("checked %d frames", n_frame)

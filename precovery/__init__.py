@@ -1,1 +1,1 @@
-from .main import precover
+from .main import precover  # noqa: F401

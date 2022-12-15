@@ -4,11 +4,12 @@ import itertools
 import logging
 import os
 import struct
+import warnings
 from typing import Iterable, Iterator, Optional, Set, Tuple
 
-import numpy as np
 import sqlalchemy as sq
-from rich.progress import BarColumn, Progress, TimeElapsedColumn, TimeRemainingColumn
+from astropy.time import Time
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.sql import func as sqlfunc
 
 from . import sourcecatalog
@@ -113,7 +114,6 @@ class FrameIndex:
 
     @classmethod
     def open(cls, db_uri, mode: str = "r"):
-
         if (mode != "r") and (mode != "w"):
             err = "mode should be one of {'r', 'w'}"
             raise ValueError(err)
@@ -121,7 +121,28 @@ class FrameIndex:
         if db_uri.startswith("sqlite:///") and (mode == "r"):
             db_uri += "?mode=ro"
 
-        engine = sq.create_engine(db_uri)
+        engine = sq.create_engine(db_uri, connect_args={"timeout": 60})
+
+        # Check if fast_query index exists (older databases may not have it)
+        # if it doesn't throw a warning with the command to create it
+        con = engine.connect()
+        curs = con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='frames';"
+        )
+        table_names = [row[0] for row in curs.fetchall()]
+        if "frames" in table_names:
+            curs = con.execute("SELECT name FROM sqlite_master WHERE type = 'index';")
+            index_names = [row[0] for row in curs.fetchall()]
+            if "fast_query" not in index_names:
+                warning = (
+                    "No fast_query index exists on the frames table. This may cause"
+                    " significant performance issues.To create the index run the"
+                    " following SQL command:\n   CREATE INDEX fast_query ON frames"
+                    " (mjd, healpixel, obscode);\n"
+                )
+                warnings.warn(warning, UserWarning)
+        con.close()
+
         return cls(engine)
 
     def close(self):
@@ -239,7 +260,8 @@ class FrameIndex:
 
         if len(mjds) > 1:
             logger.warn(
-                f"Query returned non-unique MJDs for mjd: {mjd}, healpix: {int(healpixel)}, obscode: {obscode}."
+                f"Query returned non-unique MJDs for mjd: {mjd}, healpix:"
+                f" {int(healpixel)}, obscode: {obscode}."
             )
 
         for r in rows:
@@ -423,32 +445,45 @@ class FrameIndex:
         for row in result:
             yield HealpixFrame(*row)
 
-    def add_frame(self, frame: HealpixFrame):
-        insert = self.frames.insert().values(
-            dataset_id=frame.dataset_id,
-            obscode=frame.obscode,
-            exposure_id=frame.exposure_id,
-            filter=frame.filter,
-            mjd=frame.mjd,
-            healpixel=int(frame.healpixel),
-            data_uri=frame.data_uri,
-            data_offset=frame.data_offset,
-            data_length=frame.data_length,
-        )
-        self.dbconn.execute(insert)
+    def add_frames(self, frames: list[HealpixFrame]):
+        """
+        Add one or more frames to the index.
+        """
+        insert = sqlite_insert(self.frames)
+        values = [
+            {
+                "dataset_id": frame.dataset_id,
+                "obscode": frame.obscode,
+                "exposure_id": frame.exposure_id,
+                "filter": frame.filter,
+                "mjd": frame.mjd,
+                "healpixel": int(frame.healpixel),
+                "data_uri": frame.data_uri,
+                "data_offset": frame.data_offset,
+                "data_length": frame.data_length,
+            }
+            for frame in frames
+        ]
+        self.dbconn.execute(insert, values)
 
     def add_dataset(self, dataset: Dataset):
-        insert = self.datasets.insert().values(
-            id=dataset.id,
-            name=dataset.name,
-            reference_doi=dataset.reference_doi,
-            documentation_url=dataset.documentation_url,
-            sia_url=dataset.sia_url,
+        """
+        Safely UPSERTs a dataset
+        """
+        insert = (
+            sqlite_insert(self.datasets)
+            .values(
+                id=dataset.id,
+                name=dataset.name,
+                reference_doi=dataset.reference_doi,
+                documentation_url=dataset.documentation_url,
+                sia_url=dataset.sia_url,
+            )
+            .on_conflict_do_nothing(index_elements=["id"])
         )
         self.dbconn.execute(insert)
 
     def get_dataset_ids(self):
-
         unique_datasets_stmt = sq.select(
             self.datasets.c.id,
         ).distinct()
@@ -468,15 +503,18 @@ class FrameIndex:
                 primary_key=True,
             ),
             sq.Column("dataset_id", sq.String),
-            sq.Column("obscode", sq.String, index=True),
+            sq.Column("obscode", sq.String),
             sq.Column("exposure_id", sq.String),
             sq.Column("filter", sq.String),
-            sq.Column("mjd", sq.Float, index=True),
-            sq.Column("healpixel", sq.Integer, index=True),
+            sq.Column("mjd", sq.Float),
+            sq.Column("healpixel", sq.Integer),
             sq.Column("data_uri", sq.String),
             sq.Column("data_offset", sq.Integer),
             sq.Column("data_length", sq.Integer),
+            # Create index on mjd, healpixel, obscode
+            sq.Index("fast_query", "mjd", "healpixel", "obscode", unique=True),
         )
+
         self.datasets = sq.Table(
             "datasets",
             self._metadata,
@@ -484,6 +522,7 @@ class FrameIndex:
                 "id",
                 sq.String,
                 primary_key=True,
+                index=True,
             ),
             sq.Column("name", sq.String, nullable=True),
             sq.Column("reference_doi", sq.String, nullable=True),
@@ -500,13 +539,17 @@ class FrameDB:
         data_root: str,
         data_file_max_size: float = 1e9,
         healpix_nside: int = 32,
+        mode: str = "r",
     ):
         self.idx = idx
         self.data_root = data_root
         self.data_file_max_size = data_file_max_size
         self.data_files: dict = {}  # basename -> open file
+        self.n_data_files: dict = (
+            {}
+        )  # Dictionary map of how many files for each dataset, and month
+        self.mode = mode
         self._open_data_files()
-        self.n_data_files = 0
         self.healpix_nside = healpix_nside
 
     def close(self):
@@ -573,6 +616,7 @@ class FrameDB:
                 f"{dataset_id} dataset already has an entry in the datasets table."
             )
 
+        frames_to_add = []
         for src_frame in sourcecatalog.iterate_frames(
             hdf5_file,
             limit,
@@ -582,7 +626,14 @@ class FrameDB:
             chunksize=chunksize,
         ):
             observations = [Observation.from_srcobs(o) for o in src_frame.observations]
-            data_uri, offset, length = self.store_observations(observations)
+            year_month_str = "-".join(
+                Time(src_frame.mjd, format="mjd", scale="utc").isot.split("-")[:2]
+            )
+
+            # Write observations to disk
+            data_uri, offset, length = self.store_observations(
+                observations, dataset_id, year_month_str
+            )
 
             frame = HealpixFrame(
                 id=None,
@@ -596,32 +647,45 @@ class FrameDB:
                 data_offset=offset,
                 data_length=length,
             )
-            self.idx.add_frame(frame)
+            frames_to_add.append(frame)
+
+        self.idx.add_frames(frames_to_add)
 
     def _open_data_files(self):
-        matcher = os.path.join(self.data_root, "frames*.data")
-        files = glob.glob(matcher)
+        matcher = os.path.join(self.data_root, "**/frames*.data")
+        files = sorted(glob.glob(matcher, recursive=True))
         for f in files:
             abspath = os.path.abspath(f)
             name = os.path.basename(f)
-            self.data_files[name] = open(abspath, "rb")
-        self.n_data_files = len(self.data_files) - 1
-        if self.n_data_files <= 0:
-            self.new_data_file()
+            year_month_str = os.path.basename(os.path.dirname(abspath))
+            dataset_id = os.path.basename(os.path.dirname(os.path.dirname(abspath)))
+            data_uri = f"{dataset_id}/{year_month_str}/{name}"
+            if dataset_id not in self.n_data_files.keys():
+                self.n_data_files[dataset_id] = {}
+            if year_month_str not in self.n_data_files[dataset_id].keys():
+                self.n_data_files[dataset_id][year_month_str] = 0
+            self.data_files[data_uri] = open(
+                abspath, "rb" if self.mode == "r" else "a+b"
+            )
+            self.n_data_files[dataset_id][year_month_str] += 1
 
-    def _current_data_file_name(self):
-        return "frames_{:08d}.data".format(self.n_data_files)
-
-    def _current_data_file_full(self):
-        return os.path.abspath(
-            os.path.join(self.data_root, self._current_data_file_name())
+    def _current_data_file_name(self, dataset_id: str, year_month_str: str):
+        return "{}/{}/frames_{:08d}.data".format(
+            dataset_id, year_month_str, self.n_data_files[dataset_id][year_month_str]
         )
 
-    def _current_data_file_size(self):
-        return os.stat(self._current_data_file_name()).st_size
+    def _current_data_file_full(self, dataset_id: str, year_month_str: str):
+        return os.path.abspath(
+            os.path.join(
+                self.data_root, self._current_data_file_name(dataset_id, year_month_str)
+            )
+        )
 
-    def _current_data_file(self):
-        return self.data_files[self._current_data_file_name()]
+    def _current_data_file_size(self, dataset_id: str, year_month_str: str):
+        return os.stat(self._current_data_file_name(dataset_id, year_month_str)).st_size
+
+    def _current_data_file(self, dataset_id: str, year_month_str: str):
+        return self.data_files[self._current_data_file_name(dataset_id, year_month_str)]
 
     def iterate_observations(self, exp: HealpixFrame) -> Iterator[Observation]:
         """
@@ -641,7 +705,9 @@ class FrameDB:
             bytes_read += datagram_size + id_size
             yield Observation(ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id)
 
-    def store_observations(self, observations: Iterable[Observation]):
+    def store_observations(
+        self, observations: Iterable[Observation], dataset_id: str, year_month_str: str
+    ):
         """
         Write observations in exp_data to disk. The write goes to the latest (or
         "current") file in the database. Data is written as a sequence of
@@ -652,7 +718,14 @@ class FrameDB:
         which indicates the ID's length in bytes, followed by the UTF8-encoded
         bytes of the ID.
         """
-        f = self._current_data_file()
+        f = None
+        try:
+            f = self._current_data_file(dataset_id, year_month_str)
+        except KeyError as ke:  # NOQA: F841
+            self.new_data_file(dataset_id, year_month_str)
+            f = self._current_data_file(dataset_id, year_month_str)
+
+        logger.info(f"Writing {len(observations)} observations to {f.name}")
         f.seek(0, 2)  # seek to end
         start_pos = f.tell()
 
@@ -661,105 +734,89 @@ class FrameDB:
 
         end_pos = f.tell()
         length = end_pos - start_pos
-        data_uri = self._current_data_file_name()
+        data_uri = self._current_data_file_name(dataset_id, year_month_str)
 
         f.flush()
         if end_pos > self.data_file_max_size:
-            self.new_data_file()
+            self.new_data_file(dataset_id, year_month_str)
 
         return data_uri, start_pos, length
 
-    def new_data_file(self):
+    def new_data_file(self, dataset_id: str, year_month_str: str):
         """
         Create a new empty database data file on disk, and update the database's
         state to write to it.
         """
-        self.n_data_files += 1
-        f = open(self._current_data_file_full(), "a+b")
-        self.data_files[self._current_data_file_name()] = f
+        if dataset_id not in self.n_data_files.keys():
+            self.n_data_files[dataset_id] = {}
+        if year_month_str not in self.n_data_files[dataset_id].keys():
+            self.n_data_files[dataset_id][year_month_str] = 0
+        self.n_data_files[dataset_id][year_month_str] += 1
+        current_data_file = self._current_data_file_full(dataset_id, year_month_str)
+        os.makedirs(os.path.dirname(current_data_file), exist_ok=True)
+        f = open(current_data_file, "a+b")
+        print("Opened new data file: {}".format(current_data_file))
+        self.data_files[self._current_data_file_name(dataset_id, year_month_str)] = f
 
     def defragment(self, new_index: FrameIndex, new_db: "FrameDB"):
         cur_key = ("", "", 0.0, 0)
         observations = []
         last_exposure_id = ""
 
-        n_bytes = self.idx.n_bytes()
-        with Progress(
-            "[progress.description]{task.description}",
-            BarColumn(),
-            "[progress.percentage]{task.completed} / {task.total}  {task.percentage:>3.0f}%",
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-        ) as progress:
-            read_frames = progress.add_task(
-                "loading frames...",
-                total=self.idx.n_frames(),
+        for frame in self.idx.all_frames():
+            year_month_str = "-".join(
+                Time(frame.mjd, format="mjd", scale="utc").isot.split("-")[:2]
             )
-            written_frames = progress.add_task(
-                "writing frames...",
-                total=self.idx.n_unique_frames(),
-            )
-            bytes_scanned = progress.add_task(
-                "reading bytes...",
-                total=n_bytes,
-            )
-            bytes_migrated = progress.add_task(
-                "migrating bytes...",
-                total=n_bytes,
-            )
-            for frame in self.idx.all_frames():
-                if cur_key[0] == "":
-                    # First iteration
-                    observations = list(self.iterate_observations(frame))
-                    cur_key = (frame.obscode, frame.filter, frame.mjd, frame.healpixel)
-                    last_exposure_id = frame.exposure_id
-                elif (
-                    frame.obscode,
-                    frame.filter,
-                    frame.mjd,
-                    frame.healpixel,
-                ) == cur_key:
-                    # Extending existing frame
-                    observations.extend(self.iterate_observations(frame))
-
-                else:
-                    # On to the next key. Flush what we have and reset.
-                    data_uri, offset, length = new_db.store_observations(observations)
-                    new_frame = HealpixFrame(
-                        id=None,
-                        obscode=cur_key[0],
-                        filter=cur_key[1],
-                        mjd=cur_key[2],
-                        healpixel=cur_key[3],
-                        exposure_id=last_exposure_id,
-                        data_uri=data_uri,
-                        data_offset=offset,
-                        data_length=length,
-                    )
-                    new_db.idx.add_frame(new_frame)
-
-                    observations = list(self.iterate_observations(frame))
-                    cur_key = (frame.obscode, frame.filter, frame.mjd, frame.healpixel)
-                    progress.update(written_frames, advance=1)
-                    progress.update(bytes_migrated, advance=length)
-
+            if cur_key[0] == "":
+                # First iteration
+                observations = list(self.iterate_observations(frame))
+                cur_key = (frame.obscode, frame.filter, frame.mjd, frame.healpixel)
                 last_exposure_id = frame.exposure_id
-                progress.update(bytes_scanned, advance=frame.data_length)
-                progress.update(read_frames, advance=1)
+            elif (
+                frame.obscode,
+                frame.filter,
+                frame.mjd,
+                frame.healpixel,
+            ) == cur_key:
+                # Extending existing frame
+                observations.extend(self.iterate_observations(frame))
 
-            # Last frame was unflushed, so do that now.
-            data_uri, offset, length = new_db.store_observations(observations)
-            frame = HealpixFrame(
-                id=None,
-                obscode=cur_key[0],
-                filter=cur_key[1],
-                mjd=cur_key[2],
-                healpixel=cur_key[3],
-                exposure_id=last_exposure_id,
-                data_uri=data_uri,
-                data_offset=offset,
-                data_length=length,
-            )
-            new_db.idx.add_frame(frame)
-            progress.update(written_frames, advance=1)
-            progress.update(bytes_migrated, advance=length)
+            else:
+                # On to the next key. Flush what we have and reset.
+                data_uri, offset, length = new_db.store_observations(
+                    observations, frame.dataset_id, year_month_str
+                )
+                new_frame = HealpixFrame(
+                    id=None,
+                    obscode=cur_key[0],
+                    filter=cur_key[1],
+                    mjd=cur_key[2],
+                    healpixel=cur_key[3],
+                    exposure_id=last_exposure_id,
+                    data_uri=data_uri,
+                    data_offset=offset,
+                    data_length=length,
+                )
+                new_db.idx.add_frames([new_frame])
+
+                observations = list(self.iterate_observations(frame))
+                cur_key = (frame.obscode, frame.filter, frame.mjd, frame.healpixel)
+
+            last_exposure_id = frame.exposure_id
+
+        # Last frame was unflushed, so do that now.
+        data_uri, offset, length = new_db.store_observations(
+            observations, frame.dataset_id, year_month_str
+        )
+        frame = HealpixFrame(
+            id=None,
+            obscode=cur_key[0],
+            filter=cur_key[1],
+            mjd=cur_key[2],
+            healpixel=cur_key[3],
+            exposure_id=last_exposure_id,
+            data_uri=data_uri,
+            data_offset=offset,
+            data_length=length,
+        )
+        new_db.idx.add_frames([frame])

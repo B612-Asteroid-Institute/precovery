@@ -1,21 +1,13 @@
 import argparse
-import glob
 import logging
-import os
-
-import numpy as np
-import pandas as pd
-from astropy.time import Time
-
-from precovery import precovery_db
-from precovery.orbit import EpochTimescale, Orbit
-
-logger = logging.getLogger("root")
 import time
 
-# logger.setLevel(logging.DEBUG)
 import sqlalchemy as sq
 from sqlalchemy import and_, or_
+
+from precovery import precovery_db
+
+logger = logging.getLogger("root")
 
 DATABASE_DIR = (
     "/epyc/ssd/users/moeyensj/precovery/precovery_data/nsc/precovery_defrag_db"

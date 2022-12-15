@@ -1,25 +1,30 @@
 import enum
+from os import getenv
+from typing import Iterable, List, Optional, Tuple
+
 import numpy as np
 import numpy.typing as npt
-import pyoorb
 import requests as req
-
 from astropy.time import Time
-from os import getenv
-from typing import (
-    Iterable,
-    Optional,
-    Tuple,
-    List
-)
 
 from .spherical_geom import propagate_linearly
+
+try:
+    import pyoorb
+except ImportError:
+    raise ImportError(
+        "pyoorb must be installed separately.\n"
+        "Install via conda with 'conda install -c conda-forge pyoorb'\n"
+        "or via source (see example at \n"
+        "https://github.com/B612-Asteroid-Institute/precovery/blob/main/Dockerfile)"
+    )
 
 pyoorb_initialized = False
 
 DEGREE = 1.0
 ARCMIN = DEGREE / 60
 ARCSEC = ARCMIN / 60
+
 
 def _ensure_pyoorb_initialized(*args, **kwargs):
     """Make sure that pyoorb is initialized."""
@@ -180,9 +185,9 @@ class Orbit:
     def propagate(
         self,
         epochs: Iterable[float],
-        method: PropagationIntegrator = PropagationIntegrator.N_BODY
+        method: PropagationIntegrator = PropagationIntegrator.N_BODY,
     ) -> List["Orbit"]:
-        _ensure_pyoorb_initialized(error_verbosity = 1)
+        _ensure_pyoorb_initialized(error_verbosity=1)
 
         if method == PropagationIntegrator.N_BODY:
             dynmodel = "N"
@@ -207,8 +212,10 @@ class Orbit:
             # Pyoorb wants radians as inputs for orbits but outputs propagated orbits as degrees
             # See here: https://github.com/oorb/oorb/blob/master/python/pyoorb.f90#L347
             # Note that time of perihelion passage also is converted to a degree.
-            if (self._orbit_type == OrbitElementType.KEPLERIAN) or (self._orbit_type == OrbitElementType.COMETARY): 
-                result[:, [3,4,5,6]] = np.radians(result[:, [3,4,5,6]])
+            if (self._orbit_type == OrbitElementType.KEPLERIAN) or (
+                self._orbit_type == OrbitElementType.COMETARY
+            ):
+                result[:, [3, 4, 5, 6]] = np.radians(result[:, [3, 4, 5, 6]])
 
             orbits.append(Orbit(int(result[0][0]), result))
 
@@ -402,10 +409,10 @@ class Ephemeris:
         Accuracy will decrease as timedelta increases.
         """
         timedeltas = np.array(timedeltas)
-        do_linear_timedelta = timedeltas[np.where(timedeltas <= 1.0)]
+        # TODO: set timedeltas <= 1
+        # do_linear_timedelta = timedeltas[np.where(timedeltas <= 1.0)]
         approx_ras = np.zeros(timedeltas.shape[0])
         approx_decs = np.zeros(timedeltas.shape[0])
-        # TODO: set timedeltas <= 1
         if self.ra_velocity < 1 and self.dec_velocity < 1:
             linear = np.where(np.abs(timedeltas) <= -1.0)
             approx_ras_rad, approx_decs_rad = propagate_linearly(
