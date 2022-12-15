@@ -45,10 +45,14 @@ def get_observations_and_ephemerides_for_orbits(
     obscode: str = "W84",
 ):
     """
-    Compute ephemeris for the orbit, propagated to an epoch, and observed from
-    a location represented by obscode.
+    Returns:
+    - ephemerides for the orbit list, propagated to all epochs for frames in 
+    the range (mjd_start, mjd_end)
+    - observations in the indexed PrecoveryDatabase consistent with intersecting
+    and neighboring frames for orbits propagated to each of the represented epochs
 
-    obscode should be a Minor Planet Center observatory code.
+    ***Currently breaks on non-NSC datasets
+        TODO propagation targets should be unique frames wrt obscode, mjd
     """
 
     # Find all the mjd we need to propagate to
@@ -123,7 +127,15 @@ def attribution_worker(
     observations,
     eps=1 / 3600,
     include_probabilistic=True,
-):
+):  
+
+    """
+    gather attributions for a df of ephemerides, observations
+
+    First filters ephemerides to match the chunked observations
+
+    """
+
 
     # Create observer's dictionary from observations
     observers = {}
