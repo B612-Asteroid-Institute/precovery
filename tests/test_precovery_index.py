@@ -66,6 +66,8 @@ def test_precovery():
                     "dec_deg": "dec",
                     "ra_sigma_arcsec": "ra_sigma",
                     "dec_sigma_arcsec": "dec_sigma",
+                    "observation_id" : "obs_id",
+                    "obscode" : "observatory_code",
                 },
                 inplace=True,
             )
@@ -89,6 +91,29 @@ def test_precovery():
                     object_observations[col].values, results[col].values
                 )
 
+            # Test that the observation_id, exposure_id, observatory_code, and filter
+            # are identical to the test observations
+            for col in [
+                "obs_id",
+                "exposure_id",
+                "observatory_code",
+                "filter",
+            ]:
+                assert (results[col].values == object_observations[col].values).all()
+
+            # Test that the predicted location of each objet in each exposure is 
+            # identical to the actual location of the object in that exposure (we did
+            # not add any errors to the test observations)
+            np.testing.assert_array_equal(
+                results[["pred_ra_deg", "pred_dec_deg"]].values,
+                object_observations[["ra", "dec"]].values,
+            )
+
+            # Test that the calculated distance is all zeros (again, we did not add
+            # any errors to the test observations)
+            np.testing.assert_array_equal(results["distance_arcsec"].values, np.zeros(len(results), dtype=np.float64))
+
+            
         # TODO: validate length of frames table against what we would expect
     
     finally:
