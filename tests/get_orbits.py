@@ -1,7 +1,6 @@
 import argparse
 from astropy.time import Time
 from astroquery.jplsbdb import SBDB
-import numpy as np
 import os
 import pandas as pd
 
@@ -53,7 +52,7 @@ TARGETS = [
     "15789",
 
     # ISOs
-    "A/2017 U1"
+    # "A/2017 U1" # Remove ISO since pyoorb can't invert a negative semi-major axis
 ]
 
 def get_sample_orbits(targets: list[str]) -> pd.DataFrame:
