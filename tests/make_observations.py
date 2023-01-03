@@ -6,6 +6,7 @@ import pandas as pd
 
 from precovery.orbit import Orbit
 from precovery.orbit import EpochTimescale
+from precovery.orbit import PropagationIntegrator
 
 SAMPLE_ORBITS_FILE = os.path.join(os.path.dirname(__file__), "data", "sample_orbits.csv")
 TEST_OBSERVATION_FILE = os.path.join(os.path.dirname(__file__), "data", "observations.h5")
@@ -126,7 +127,8 @@ def make_observations(
     ephemeris_dfs = []
     for i, orbit in enumerate(orbits):
         initial_epoch = Time(orbit._epoch, scale="tt", format="mjd")
-        observation_times = initial_epoch.utc.mjd + dts + exposure_duration / 86400.
+        # Observation times are defined at the center of the exposure (for now)
+        observation_times = initial_epoch.utc.mjd + dts + exposure_duration / 86400 / 2.
         exposure_ids = [f"{obs_i}_{k:06d}" for k, obs_i in enumerate(observatory_codes)]
 
         ephemeris_list = []
@@ -166,7 +168,7 @@ def make_observations(
         ephemeris_df.insert(8, "exposure_id", exposure_ids)
         ephemeris_df["observatory_code"] = observatory_codes
         ephemeris_df["mjd_start_utc"] = initial_epoch.utc.mjd + dts
-        ephemeris_df["mjd_mid_utc"] = initial_epoch.utc.mjd + dts + exposure_duration / 86400.
+        ephemeris_df["mjd_mid_utc"] = initial_epoch.utc.mjd + dts + exposure_duration / 86400 / 2.
         ephemeris_df["exposure_duration"] = exposure_duration
         ephemeris_dfs.append(ephemeris_df)
 
