@@ -55,8 +55,8 @@ def test_precovery(test_db_dir):
     observations_df = pd.read_hdf(TEST_OBSERVATION_FILE)
 
     # For each sample orbit, validate we get all the observations we planted
-    for orbit in orbits_keplerian[1:2]:
-        results = precover(orbit, test_db_dir)
+    for orbit in orbits_keplerian:
+        results = precover(orbit, test_db_dir, tolerance=1/3600, window_size=1)
 
         object_observations = observations_df[
             observations_df["object_id"] == orbit_name_mapping[orbit.orbit_id]
@@ -108,25 +108,27 @@ def test_precovery(test_db_dir):
             assert (results[col].values == object_observations[col].values).all()
 
         # Test that the predicted location of each objet in each exposure is 
-        # identical to the actual location of the object in that exposure (we did
+        # close to the actual location of the object in that exposure (we did
         # not add any errors to the test observations)
-        np.testing.assert_array_equal(
+        # Note that the predicted location is sensitive to accumulating float point arithmetic
+        # errors since orbits in precovery are propagated, then stored, then propagated again, and so on.
+        # The number of propagations will have an effect on the consistency of the predicted location when compared to the 
+        # single propagation required to create the test observations.
+        np.testing.assert_allclose(
             results[["pred_ra_deg", "pred_dec_deg"]].values,
             object_observations[["ra", "dec"]].values,
+            atol=1e-12,
+            rtol=1e-12,
         )
 
-        # Test that the calculated distance is all zeros (again, we did not add
-        # any errors to the test observations)
-        # distances are calculated in degrees so reconvert to degrees and assert they are 
-        # within 1e-12 degrees
+        # Test that the calculated distance is within 1e-10 degrees or 36 microarcseconds of zero
         np.testing.assert_allclose(
             results["distance_arcsec"].values / 3600., 
             np.zeros(
                 len(results), 
                 dtype=np.float64
             ),
-            atol=1e-12,
-            rtol=1e-12,
+            atol=1e-10,
+            rtol=0,
         )
     
-    # TODO: validate length of frames table against what we would expect
