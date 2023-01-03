@@ -133,7 +133,10 @@ def make_observations(
 
         ephemeris_list = []
         for obs_i, time_i in zip(observatory_codes, observation_times):
-            ephemeris_list.append(orbit.compute_ephemeris(obs_i, [time_i])[0])
+            ephemeris_list.append(orbit.compute_ephemeris(obs_i, [time_i], 
+                method=PropagationIntegrator.N_BODY, 
+                time_scale=EpochTimescale.UTC
+            )[0])
             
         ephemeris_dict = {
             "mjd_utc" : [],
