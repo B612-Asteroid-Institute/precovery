@@ -5,56 +5,50 @@ import pandas as pd
 from astropy.time import Time
 from astroquery.jplsbdb import SBDB
 
-SAMPLE_ORBITS_FILE = os.path.join(os.path.dirname(__file__), "data", "sample_orbits.csv")
+SAMPLE_ORBITS_FILE = os.path.join(
+    os.path.dirname(__file__), "data", "sample_orbits.csv"
+)
 
 TARGETS = [
     # Atira
     "2020 AV2",
     "163693",
-
     # Aten
     "2010 TK7",
     "3753",
-
     # Apollo
     "54509",
     "2063",
-
     # Amor
     "1221",
     "433",
     "3908",
-
     # IMB
     "434",
     "1876",
     "2001",
-
     # MBA
     "2",
     "6",
     "6522",
     "202930",
-
     # Jupiter Trojans
     "911",
     "1143",
     "1172",
     "3317",
-
     # Centaur
     "5145",
     "5335",
     "49036",
-
     # Trans-Neptunian Objects
     "15760",
     "15788",
     "15789",
-
     # ISOs
     # "A/2017 U1" # Remove ISO since pyoorb can't invert a negative semi-major axis
 ]
+
 
 def get_sample_orbits(targets: list[str]) -> pd.DataFrame:
     """
@@ -87,11 +81,12 @@ def get_sample_orbits(targets: list[str]) -> pd.DataFrame:
             G = 0.15
         else:
             G = result["phys_par"]["G"]
-        phys_df = pd.DataFrame({
+        phys_df = pd.DataFrame(
+            {
                 "H": result["phys_par"]["H"],
                 "G": G,
-            }, 
-            index=[i]
+            },
+            index=[i],
         )
 
         # Combine into a single DataFrame and insert orbit ID
@@ -104,6 +99,7 @@ def get_sample_orbits(targets: list[str]) -> pd.DataFrame:
     orbits_df = pd.concat(orbit_dfs)
     return orbits_df
 
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
@@ -111,7 +107,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--out_file",
-        type=str, 
+        type=str,
         default=SAMPLE_ORBITS_FILE,
         help="Path to output file saved as a CSV.",
     )
