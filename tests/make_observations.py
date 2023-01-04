@@ -51,7 +51,7 @@ def dataframe_to_orbit(
                 orbits_df["G"].values[i],
             )
 
-        elif orbit_i == "cometary":
+        elif orbit_type == "cometary":
             
             # Extract time of perihelion passage
             tp = Time(
