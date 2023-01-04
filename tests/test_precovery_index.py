@@ -1,5 +1,6 @@
 import os
 import shutil
+import sqlite3 as sql
 
 import numpy as np
 import pandas as pd
@@ -27,8 +28,6 @@ def test_precovery(test_db_dir):
         dataset_name="Test Dataset",
         data_dir=os.path.join(os.path.dirname(__file__), "data"),
     )
-    # TODO: Cross-check the total number of observations in each frame file
-    # against the total number in the input hdf5 file
 
     # Initialize orbits from sample orbits file
     orbits_df = pd.read_csv(SAMPLE_ORBITS_FILE)
@@ -53,6 +52,14 @@ def test_precovery(test_db_dir):
 
     # Load observations from h5 file
     observations_df = pd.read_hdf(TEST_OBSERVATION_FILE)
+
+    # Test that the number of frames is equal to the number of observations
+    # Note that this will only be true for a small enough number of objects that are not near
+    # each other on the sky, which is fine for our test data set
+    con = sql.connect(os.path.join(test_db_dir, "index.db"))
+    frames = pd.read_sql("""SELECT * FROM frames""", con)
+    assert len(frames) == len(observations_df)
+    con.close()
 
     # For each sample orbit, validate we get all the observations we planted
     for orbit in orbits_keplerian:
@@ -121,7 +128,7 @@ def test_precovery(test_db_dir):
             rtol=1e-12,
         )
 
-        # Test that the calculated distance is within 1e-10 degrees or 36 microarcseconds of zero
+        # Test that the calculated distance is within 1e-10 degrees or 360 nanoarcseconds of zero
         np.testing.assert_allclose(
             results["distance_arcsec"].values / 3600., 
             np.zeros(

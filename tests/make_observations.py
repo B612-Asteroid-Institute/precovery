@@ -1,12 +1,10 @@
 import argparse
-from astropy.time import Time
-import numpy as np
 import os
-import pandas as pd
 
-from precovery.orbit import Orbit
-from precovery.orbit import EpochTimescale
-from precovery.orbit import PropagationIntegrator
+import numpy as np
+import pandas as pd
+from astropy.time import Time
+from precovery.orbit import EpochTimescale, Orbit, PropagationIntegrator
 
 SAMPLE_ORBITS_FILE = os.path.join(os.path.dirname(__file__), "data", "sample_orbits.csv")
 TEST_OBSERVATION_FILE = os.path.join(os.path.dirname(__file__), "data", "observations.h5")

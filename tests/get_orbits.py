@@ -1,8 +1,9 @@
 import argparse
+import os
+
+import pandas as pd
 from astropy.time import Time
 from astroquery.jplsbdb import SBDB
-import os
-import pandas as pd
 
 SAMPLE_ORBITS_FILE = os.path.join(os.path.dirname(__file__), "data", "sample_orbits.csv")
 
