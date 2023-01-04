@@ -186,6 +186,7 @@ class Orbit:
         self,
         epochs: Iterable[float],
         method: PropagationIntegrator = PropagationIntegrator.N_BODY,
+        time_scale: EpochTimescale = EpochTimescale.UTC
     ) -> List["Orbit"]:
         _ensure_pyoorb_initialized(error_verbosity=1)
 
@@ -199,7 +200,7 @@ class Orbit:
         orbits = []
         for epoch in epochs:
             epoch_array = np.array(
-                [epoch, self._epoch_timescale.value], dtype=np.double, order="F"
+                [epoch, time_scale.value], dtype=np.double, order="F"
             )
 
             result, err = pyoorb.pyoorb.oorb_propagation(
@@ -226,6 +227,7 @@ class Orbit:
         obscode: str,
         epochs: Iterable[float],
         method: PropagationIntegrator = PropagationIntegrator.N_BODY,
+        time_scale: EpochTimescale = EpochTimescale.UTC
     ) -> List["Ephemeris"]:
         """
         Compute ephemeris for the orbit, propagated to an epoch, and observed from
@@ -235,7 +237,7 @@ class Orbit:
         """
         _ensure_pyoorb_initialized(error_verbosity=1)
         epochs_array = np.array(
-            [[epoch, self._epoch_timescale.value] for epoch in epochs],
+            [[epoch, time_scale.value] for epoch in epochs],
             dtype=np.double,
             order="F",
         )
@@ -431,6 +433,7 @@ class Ephemeris:
                     obscode,
                     self.mjd + timedeltas[two_body],
                     method=PropagationIntegrator.TWO_BODY,
+                    time_scale=self._epoch_timescale,
                 )
                 approx_ras[two_body] = np.array(
                     [approx_ephem.ra for approx_ephem in approx_ephems]
@@ -443,6 +446,7 @@ class Ephemeris:
                 obscode,
                 self.mjd + timedeltas,
                 method=PropagationIntegrator.TWO_BODY,
+                time_scale=self._epoch_timescale,
             )
             approx_ras = np.array([approx_ephem.ra for approx_ephem in approx_ephems])
             approx_decs = np.array([approx_ephem.dec for approx_ephem in approx_ephems])
