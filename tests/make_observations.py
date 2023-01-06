@@ -89,26 +89,26 @@ def make_observations(
     orbits_df: pd.DataFrame, orbit_type: str = "keplerian"
 ) -> pd.DataFrame:
     """
-        Make a synthetic observations file to use for testing. Orbits are read from the input dataframe
-        into the Orbit class. Setting orbit_type will determine which representation of the orbit
-        should be used to generate the observations.
+    Make a synthetic observations file to use for testing. Orbits are read from the input dataframe
+    into the Orbit class. Setting orbit_type will determine which representation of the orbit
+    should be used to generate the observations.
 
-        Observations are created with the following cadence: 4 observations per day for 2 weeks.
-        Each observations is seperated by 30 minutes. The epoch of each orbit is used as the start time
-        of the 2-week observation period. The exposure duration is 30, 60, 90, and 120 seconds for each
-        nightly observaion quadruplet.
+    Observations are created with the following cadence: 4 observations per day for 2 weeks.
+    Each observations is seperated by 30 minutes. The epoch of each orbit is used as the start time
+    of the 2-week observation period. The exposure duration is 30, 60, 90, and 120 seconds for each
+    nightly observaion quadruplet.
 
-        Parameters
-        ----------
-    `   orbits_df : `~pd.DataFrame`
-            DataFrame containing orbital elements for each orbit.
-        orbit_type : str, optional
-            Type of orbit to initialize. Must be either "keplerian" or "cometary".
+    Parameters
+    ----------
+    orbits_df : `~pd.DataFrame`
+        DataFrame containing orbital elements for each orbit.
+    orbit_type : str, optional
+        Type of orbit to initialize. Must be either "keplerian" or "cometary".
 
-        Returns
-        -------
-        observations : `~pandas.DataFrame`
-            DataFrame containing observations.
+    Returns
+    -------
+    observations : `~pandas.DataFrame`
+        DataFrame containing observations.
     """
     # Extract orbit names and read orbits into Orbit class
     orbit_ids = orbits_df["orbit_name"].values
@@ -134,13 +134,17 @@ def make_observations(
         for i in range(num_obs)
     ]
 
+    # Set random seed
+    rng = np.random.default_rng(seed=2023)
+
     ephemeris_dfs = []
     for i, orbit in enumerate(orbits):
         initial_epoch = Time(orbit._epoch, scale="tt", format="mjd")
-        # Observation times are defined at the center of the exposure (for now)
-        observation_times = (
-            initial_epoch.utc.mjd + dts + exposure_duration / 86400 / 2.0
-        )
+
+        # Calculate a random offset from the start of the exposure
+        # to give each observation a unique obervation time
+        offset_from_start = rng.uniform(dts, dts + exposure_duration / 86400)
+        observation_times = initial_epoch.utc.mjd + offset_from_start
         exposure_ids = [f"{obs_i}_{k:06d}" for k, obs_i in enumerate(observatory_codes)]
 
         ephemeris_list = []
