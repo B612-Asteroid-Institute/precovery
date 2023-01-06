@@ -105,6 +105,9 @@ def test_precovery(test_db_dir):
             "dec_sigma",
             "mag",
             "mag_sigma",
+            "mjd_start_utc",
+            "mjd_mid_utc",
+            "exposure_duration"
             # "filter", # can't do string comparisons this way
         ]:
             np.testing.assert_array_equal(
