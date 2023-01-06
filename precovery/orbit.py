@@ -186,7 +186,7 @@ class Orbit:
         self,
         epochs: Iterable[float],
         method: PropagationIntegrator = PropagationIntegrator.N_BODY,
-        time_scale: EpochTimescale = EpochTimescale.UTC
+        time_scale: EpochTimescale = EpochTimescale.UTC,
     ) -> List["Orbit"]:
         _ensure_pyoorb_initialized(error_verbosity=1)
 
@@ -227,7 +227,7 @@ class Orbit:
         obscode: str,
         epochs: Iterable[float],
         method: PropagationIntegrator = PropagationIntegrator.N_BODY,
-        time_scale: EpochTimescale = EpochTimescale.UTC
+        time_scale: EpochTimescale = EpochTimescale.UTC,
     ) -> List["Ephemeris"]:
         """
         Compute ephemeris for the orbit, propagated to an epoch, and observed from
@@ -433,7 +433,7 @@ class Ephemeris:
                     obscode,
                     self.mjd + timedeltas[two_body],
                     method=PropagationIntegrator.TWO_BODY,
-                    time_scale=self._epoch_timescale,
+                    time_scale=orbit._epoch_timescale,
                 )
                 approx_ras[two_body] = np.array(
                     [approx_ephem.ra for approx_ephem in approx_ephems]
@@ -446,7 +446,7 @@ class Ephemeris:
                 obscode,
                 self.mjd + timedeltas,
                 method=PropagationIntegrator.TWO_BODY,
-                time_scale=self._epoch_timescale,
+                time_scale=orbit._epoch_timescale,
             )
             approx_ras = np.array([approx_ephem.ra for approx_ephem in approx_ephems])
             approx_decs = np.array([approx_ephem.dec for approx_ephem in approx_ephems])

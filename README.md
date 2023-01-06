@@ -31,3 +31,25 @@ To install the bleeding edge source code, clone this repository and then:
 
 Note that, `openorb` is not available on the Python Package Index and so you wil need
 to install it via source or conda. See the `Dockerfile` for example of how to build on Ubuntu linux.
+
+## Observation Schema
+### Input HDF5 
+
+`precovery` expects a specific set of columns to be able to index observations into a search 
+efficient format. Input files should be sorted by ascending time.
+
+|Name|Unit|Type|Description|
+|---|---|---|---|
+| obs_id      | None | str |Unique observation ID for the observation |
+| exposure_id | None | str |Exposure or Image ID from which observation was measured |
+| ra  | degree | float | Right Ascension (J2000) |
+| dec  | degree | float | Declination (J2000) |
+| ra_sigma  | degree | float | 1-sigma uncertainty in Right Ascension |
+| dec_sigma  | degree | float | 1-sigma uncertainty in Declination |
+| mag  | None | float | Photometric magnitude measured for observation |
+| mag_sigma  | None | float | 1-sigma uncertainty in photmetric magnitude |
+| filter | None | str | Filter/bandpass in which the observation was made |
+| mjd_start_utc | days | float | Start MJD of the exposure in UTC |
+| mjd_mid_utc | days | float | Midpoint MJD of the exposure in UTC (the observation is assumed to reported at this time)|
+| exposure_duration | seconds | float | The length of the exposure |
+| observatory_code | None | str | MPC observatory code for the observatory/observing program |
