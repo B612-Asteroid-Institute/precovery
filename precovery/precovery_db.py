@@ -9,7 +9,7 @@ import numpy as np
 from .config import Config, DefaultConfig
 from .frame_db import FrameDB, FrameIndex
 from .healpix_geom import radec_to_healpixel
-from .orbit import Orbit, PropagationIntegrator, EpochTimescale
+from .orbit import EpochTimescale, Orbit, PropagationIntegrator
 from .spherical_geom import haversine_distance_deg
 from .version import __version__
 
@@ -236,7 +236,7 @@ class PrecoveryDatabase:
         # Since the window midpoints are calculated from the observations
         # in the database then they are in the UTC timescale so let's use that
         orbit_propagated = orbit.propagate(
-            window_midpoints, 
+            window_midpoints,
             PropagationIntegrator.N_BODY,
             time_scale=EpochTimescale.UTC,
         )
@@ -244,8 +244,8 @@ class PrecoveryDatabase:
         # Calculate the location of the orbit on the sky with n-body propagation
         # Again, we do this in the UTC timescale to match the observations in the database
         window_ephems = orbit.compute_ephemeris(
-            obscode, 
-            window_midpoints, 
+            obscode,
+            window_midpoints,
             PropagationIntegrator.N_BODY,
             time_scale=EpochTimescale.UTC,
         )
@@ -395,7 +395,7 @@ class PrecoveryDatabase:
                 obs = obs[idx]
                 for o, distance, dra, ddec in zip(obs, distances, dras, ddecs):
                     candidate = PrecoveryCandidate(
-                        mjd_utc=f.mjd_mid, # TODO replace with a unique observation time in a future PR
+                        mjd_utc=f.mjd_mid,  # TODO replace with a unique observation time in a future PR
                         ra_deg=o.ra,
                         dec_deg=o.dec,
                         ra_sigma_arcsec=o.ra_sigma / ARCSEC,

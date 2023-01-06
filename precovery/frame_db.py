@@ -259,7 +259,7 @@ class FrameIndex:
         # Loop through rows and track midpoint MJDs
         mjds_mid = set()
         for r in rows:
-            # id, dataset_id, obscode, exposure_id, filter, mjd_start, mjd_mid, 
+            # id, dataset_id, obscode, exposure_id, filter, mjd_start, mjd_mid,
             # exposure_duration, healpixel, data uri, data offset, data length
             mjds_mid.add(r[6])
 
@@ -290,7 +290,9 @@ class FrameIndex:
         triples might have multiple data URIs and offsets.
         """
         subq = (
-            sq.select(self.frames.c.obscode, self.frames.c.mjd_mid, self.frames.c.healpixel)
+            sq.select(
+                self.frames.c.obscode, self.frames.c.mjd_mid, self.frames.c.healpixel
+            )
             .distinct()
             .subquery()
         )
@@ -407,7 +409,9 @@ class FrameIndex:
             self.frames.c.data_uri,
             self.frames.c.data_offset,
             self.frames.c.data_length,
-        ).order_by(self.frames.c.obscode, self.frames.c.mjd_mid, self.frames.c.healpixel)
+        ).order_by(
+            self.frames.c.obscode, self.frames.c.mjd_mid, self.frames.c.healpixel
+        )
         result = self.dbconn.execute(stmt)
         for row in result:
             yield HealpixFrame(*row)
@@ -744,7 +748,14 @@ class FrameDB:
             if cur_key[0] == "":
                 # First iteration
                 observations = list(self.iterate_observations(frame))
-                cur_key = (frame.obscode, frame.filter, frame.mjd_start, frame.mjd_mid, frame.exposure_duration, frame.healpixel)
+                cur_key = (
+                    frame.obscode,
+                    frame.filter,
+                    frame.mjd_start,
+                    frame.mjd_mid,
+                    frame.exposure_duration,
+                    frame.healpixel,
+                )
                 last_exposure_id = frame.exposure_id
             elif (
                 frame.obscode,
@@ -778,7 +789,14 @@ class FrameDB:
                 new_db.idx.add_frames([new_frame])
 
                 observations = list(self.iterate_observations(frame))
-                cur_key = (frame.obscode, frame.filter, frame.mjd_start, frame.mjd_mid, frame.exposure_duration, frame.healpixel)
+                cur_key = (
+                    frame.obscode,
+                    frame.filter,
+                    frame.mjd_start,
+                    frame.mjd_mid,
+                    frame.exposure_duration,
+                    frame.healpixel,
+                )
 
             last_exposure_id = frame.exposure_id
 

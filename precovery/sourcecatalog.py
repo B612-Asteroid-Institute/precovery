@@ -22,6 +22,7 @@ class SourceObservation:
     mjd_mid: float
     exposure_duration: float
 
+
 @dataclasses.dataclass
 class SourceExposure:
     exposure_id: str
@@ -179,9 +180,9 @@ def iterate_observations(
                 mag,
                 mag_sigma,
                 filter,
-                mjd_start, 
-                mjd_mid, 
-                exposure_duration
+                mjd_start,
+                mjd_mid,
+                exposure_duration,
             ) in zip(
                 exposure_ids,
                 obscodes,

@@ -5,18 +5,25 @@ import sqlite3 as sql
 import numpy as np
 import pandas as pd
 import pytest
+
 from precovery.ingest import index
 from precovery.main import precover
 from precovery.orbit import EpochTimescale, Orbit
 
-SAMPLE_ORBITS_FILE = os.path.join(os.path.dirname(__file__), "data", "sample_orbits.csv")
-TEST_OBSERVATION_FILE =  os.path.join(os.path.dirname(__file__), "data", "observations.h5")
+SAMPLE_ORBITS_FILE = os.path.join(
+    os.path.dirname(__file__), "data", "sample_orbits.csv"
+)
+TEST_OBSERVATION_FILE = os.path.join(
+    os.path.dirname(__file__), "data", "observations.h5"
+)
+
 
 @pytest.fixture
 def test_db_dir():
     out_dir = os.path.join(os.path.dirname(__file__), "database")
     yield out_dir
     shutil.rmtree(out_dir)
+
 
 def test_precovery(test_db_dir):
     """
@@ -63,14 +70,14 @@ def test_precovery(test_db_dir):
 
     # For each sample orbit, validate we get all the observations we planted
     for orbit in orbits_keplerian:
-        results = precover(orbit, test_db_dir, tolerance=1/3600, window_size=1)
+        results = precover(orbit, test_db_dir, tolerance=1 / 3600, window_size=1)
 
         object_observations = observations_df[
             observations_df["object_id"] == orbit_name_mapping[orbit.orbit_id]
         ]
-        assert len(results) == len(object_observations) 
-        assert len(results) == len(object_observations) 
-        assert len(results) == len(object_observations) 
+        assert len(results) == len(object_observations)
+        assert len(results) == len(object_observations)
+        assert len(results) == len(object_observations)
         assert len(results) > 0
 
         results.rename(
@@ -79,8 +86,8 @@ def test_precovery(test_db_dir):
                 "dec_deg": "dec",
                 "ra_sigma_arcsec": "ra_sigma",
                 "dec_sigma_arcsec": "dec_sigma",
-                "observation_id" : "obs_id",
-                "obscode" : "observatory_code",
+                "observation_id": "obs_id",
+                "obscode": "observatory_code",
             },
             inplace=True,
         )
@@ -114,13 +121,13 @@ def test_precovery(test_db_dir):
         ]:
             assert (results[col].values == object_observations[col].values).all()
 
-        # Test that the predicted location of each objet in each exposure is 
+        # Test that the predicted location of each objet in each exposure is
         # close to the actual location of the object in that exposure (we did
         # not add any errors to the test observations)
         # Note that the predicted location is sensitive to accumulating float point arithmetic
         # errors since orbits in precovery are propagated, then stored, then propagated again, and so on.
-        # The number of propagations will have an effect on the consistency of the predicted location when compared to the 
-        # single propagation required to create the test observations.
+        # The number of propagations will have an effect on the consistency of the predicted
+        # location when compared to the single propagation required to create the test observations.
         np.testing.assert_allclose(
             results[["pred_ra_deg", "pred_dec_deg"]].values,
             object_observations[["ra", "dec"]].values,
@@ -130,12 +137,8 @@ def test_precovery(test_db_dir):
 
         # Test that the calculated distance is within 1e-10 degrees or 360 nanoarcseconds of zero
         np.testing.assert_allclose(
-            results["distance_arcsec"].values / 3600., 
-            np.zeros(
-                len(results), 
-                dtype=np.float64
-            ),
+            results["distance_arcsec"].values / 3600.0,
+            np.zeros(len(results), dtype=np.float64),
             atol=1e-10,
             rtol=0,
         )
-    

@@ -4,15 +4,21 @@ import os
 import numpy as np
 import pandas as pd
 from astropy.time import Time
+
 from precovery.orbit import EpochTimescale, Orbit, PropagationIntegrator
 
-SAMPLE_ORBITS_FILE = os.path.join(os.path.dirname(__file__), "data", "sample_orbits.csv")
-TEST_OBSERVATION_FILE = os.path.join(os.path.dirname(__file__), "data", "observations.h5")
+SAMPLE_ORBITS_FILE = os.path.join(
+    os.path.dirname(__file__), "data", "sample_orbits.csv"
+)
+TEST_OBSERVATION_FILE = os.path.join(
+    os.path.dirname(__file__), "data", "observations.h5"
+)
+
 
 def dataframe_to_orbit(
-        orbits_df: pd.DataFrame,
-        orbit_type: str = "keplerian",
-    ) -> list[Orbit]:
+    orbits_df: pd.DataFrame,
+    orbit_type: str = "keplerian",
+) -> list[Orbit]:
     """
     Initialize list of Orbit objects from a pandas DataFrame.
 
@@ -36,7 +42,7 @@ def dataframe_to_orbit(
         if orbit_type == "keplerian":
 
             orbit_i = Orbit.keplerian(
-                i, 
+                i,
                 orbits_df["a"].values[i],
                 orbits_df["e"].values[i],
                 orbits_df["i"].values[i],
@@ -50,7 +56,7 @@ def dataframe_to_orbit(
             )
 
         elif orbit_type == "cometary":
-            
+
             # Extract time of perihelion passage
             tp = Time(
                 orbits_df["tp"].values[i],
@@ -58,7 +64,7 @@ def dataframe_to_orbit(
                 scale="tdb",
             )
             orbit_i = Orbit.cometary(
-                i, 
+                i,
                 orbits_df["q"].values[i],
                 orbits_df["e"].values[i],
                 orbits_df["i"].values[i],
@@ -71,38 +77,38 @@ def dataframe_to_orbit(
                 orbits_df["G"].values[i],
             )
 
-        else: 
+        else:
             raise ValueError("orbit_type must be either 'keplerian' or 'cometary'")
 
         orbits.append(orbit_i)
 
     return orbits
 
+
 def make_observations(
-        orbits_df: pd.DataFrame, 
-        orbit_type: str = "keplerian"
-    ) -> pd.DataFrame:
+    orbits_df: pd.DataFrame, orbit_type: str = "keplerian"
+) -> pd.DataFrame:
     """
-    Make a synthetic observations file to use for testing. Orbits are read from the input dataframe 
-    into the Orbit class. Setting orbit_type will determine which representation of the orbit
-    should be used to generate the observations.
+        Make a synthetic observations file to use for testing. Orbits are read from the input dataframe
+        into the Orbit class. Setting orbit_type will determine which representation of the orbit
+        should be used to generate the observations.
 
-    Observations are created with the following cadence: 4 observations per day for 2 weeks. 
-    Each observations is seperated by 30 minutes. The epoch of each orbit is used as the start time
-    of the 2-week observation period. The exposure duration is 30, 60, 90, and 120 seconds for each 
-    nightly observaion quadruplet. 
+        Observations are created with the following cadence: 4 observations per day for 2 weeks.
+        Each observations is seperated by 30 minutes. The epoch of each orbit is used as the start time
+        of the 2-week observation period. The exposure duration is 30, 60, 90, and 120 seconds for each
+        nightly observaion quadruplet.
 
-    Parameters
-    ----------
-`   orbits_df : `~pd.DataFrame`
-        DataFrame containing orbital elements for each orbit.
-    orbit_type : str, optional
-        Type of orbit to initialize. Must be either "keplerian" or "cometary".
+        Parameters
+        ----------
+    `   orbits_df : `~pd.DataFrame`
+            DataFrame containing orbital elements for each orbit.
+        orbit_type : str, optional
+            Type of orbit to initialize. Must be either "keplerian" or "cometary".
 
-    Returns
-    -------
-    observations : `~pandas.DataFrame`
-        DataFrame containing observations.
+        Returns
+        -------
+        observations : `~pandas.DataFrame`
+            DataFrame containing observations.
     """
     # Extract orbit names and read orbits into Orbit class
     orbit_ids = orbits_df["orbit_name"].values
@@ -110,37 +116,49 @@ def make_observations(
 
     # Four observations daily for two weeks
     dts = np.linspace(0, 14, 15)
-    dts = np.concatenate([dts, dts + 1/24/2, dts + 1/24, dts + 1/24 + 1/24/2])
+    dts = np.concatenate(
+        [dts, dts + 1 / 24 / 2, dts + 1 / 24, dts + 1 / 24 + 1 / 24 / 2]
+    )
     dts.sort()
 
-    # Create exposure triplets 
-    unique_exposure_durations = np.array([30., 60., 90., 120.])
+    # Create exposure triplets
+    unique_exposure_durations = np.array([30.0, 60.0, 90.0, 120.0])
     num_obs = int(len(dts) / len(unique_exposure_durations))
     exposure_duration = np.hstack([unique_exposure_durations for i in range(num_obs)])
 
     # Create list of observatory codes
     OBSERVATORY_CODES = ["500", "I11", "I41", "F51"]
-    observatory_codes = [OBSERVATORY_CODES[j] for j in range(len(unique_exposure_durations)) for i in range(num_obs)]
+    observatory_codes = [
+        OBSERVATORY_CODES[j]
+        for j in range(len(unique_exposure_durations))
+        for i in range(num_obs)
+    ]
 
     ephemeris_dfs = []
     for i, orbit in enumerate(orbits):
         initial_epoch = Time(orbit._epoch, scale="tt", format="mjd")
         # Observation times are defined at the center of the exposure (for now)
-        observation_times = initial_epoch.utc.mjd + dts + exposure_duration / 86400 / 2.
+        observation_times = (
+            initial_epoch.utc.mjd + dts + exposure_duration / 86400 / 2.0
+        )
         exposure_ids = [f"{obs_i}_{k:06d}" for k, obs_i in enumerate(observatory_codes)]
 
         ephemeris_list = []
         for obs_i, time_i in zip(observatory_codes, observation_times):
-            ephemeris_list.append(orbit.compute_ephemeris(obs_i, [time_i], 
-                method=PropagationIntegrator.N_BODY, 
-                time_scale=EpochTimescale.UTC
-            )[0])
-            
+            ephemeris_list.append(
+                orbit.compute_ephemeris(
+                    obs_i,
+                    [time_i],
+                    method=PropagationIntegrator.N_BODY,
+                    time_scale=EpochTimescale.UTC,
+                )[0]
+            )
+
         ephemeris_dict = {
-            "mjd_utc" : [],
-            "ra" : [],
-            "dec" : [],
-            "mag" : [],
+            "mjd_utc": [],
+            "ra": [],
+            "dec": [],
+            "mag": [],
         }
         for eph_i in ephemeris_list:
             # PYOORB basic ephemeris
@@ -162,14 +180,16 @@ def make_observations(
 
         ephemeris_df = pd.DataFrame(ephemeris_dict)
         ephemeris_df.insert(0, "object_id", orbit_ids[i])
-        ephemeris_df.insert(4, "ra_sigma", 0.)
-        ephemeris_df.insert(4, "dec_sigma", 0.)
-        ephemeris_df.insert(6, "mag_sigma", 0.)
+        ephemeris_df.insert(4, "ra_sigma", 0.0)
+        ephemeris_df.insert(4, "dec_sigma", 0.0)
+        ephemeris_df.insert(6, "mag_sigma", 0.0)
         ephemeris_df.insert(7, "filter", "V")
         ephemeris_df.insert(8, "exposure_id", exposure_ids)
         ephemeris_df["observatory_code"] = observatory_codes
         ephemeris_df["mjd_start_utc"] = initial_epoch.utc.mjd + dts
-        ephemeris_df["mjd_mid_utc"] = initial_epoch.utc.mjd + dts + exposure_duration / 86400 / 2.
+        ephemeris_df["mjd_mid_utc"] = (
+            initial_epoch.utc.mjd + dts + exposure_duration / 86400 / 2.0
+        )
         ephemeris_df["exposure_duration"] = exposure_duration
         ephemeris_dfs.append(ephemeris_df)
 
@@ -179,6 +199,7 @@ def make_observations(
 
     return observations
 
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
@@ -186,13 +207,13 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--in_file",
-        type=str, 
+        type=str,
         default=SAMPLE_ORBITS_FILE,
         help="Path to input orbits file saved as a CSV",
     )
     parser.add_argument(
         "--out_file",
-        type=str, 
+        type=str,
         default=TEST_OBSERVATION_FILE,
         help="Path to output observations file saved as a HDF5.",
     )
