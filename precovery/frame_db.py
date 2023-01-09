@@ -532,13 +532,12 @@ class FrameDB:
         for f in self.data_files.values():
             f.close()
 
-    def load_hdf5(
+    def load_csv(
         self,
-        hdf5_file: str,
+        csv_file: str,
         dataset_id: str,
         skip: int = 0,
         limit: Optional[int] = None,
-        key: str = "data",
         chunksize: int = 100000,
         name: Optional[str] = None,
         reference_doi: Optional[str] = None,
@@ -546,11 +545,11 @@ class FrameDB:
         sia_url: Optional[str] = None,
     ):
         """
-        Load data from a HDF5 catalog file.
+        Load data from a CSV observation file.
 
         Parameters
         ----------
-        hdf5_file : str
+        csv_file : str
             Path to a file on disk.
         dataset_id : str
             Name of dataset (should be the same for each observation file that
@@ -559,8 +558,6 @@ class FrameDB:
             Number of frames to skip in the file.
         limit : int, optional
             Maximum number of frames to load from the file. None means no limit.
-        key : str
-            Name of key where the observations table is located in the hdf5 file.
         chunksize:
             Load observations in chunks of this size and then iterate over the chunks
             to load observations.
@@ -593,11 +590,10 @@ class FrameDB:
 
         frames_to_add = []
         for src_frame in sourcecatalog.iterate_frames(
-            hdf5_file,
+            csv_file,
             limit,
             nside=self.healpix_nside,
             skip=skip,
-            key=key,
             chunksize=chunksize,
         ):
             observations = [Observation.from_srcobs(o) for o in src_frame.observations]

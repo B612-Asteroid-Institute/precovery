@@ -25,4 +25,4 @@ RUN mkdir /code/
 ADD . /code/
 WORKDIR /code/
 
-RUN SETUPTOOLS_SCM_PRETEND_VERSION=1 pip install .[tests]
+RUN SETUPTOOLS_SCM_PRETEND_VERSION=1 pip install -e .[tests]

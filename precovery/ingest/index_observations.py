@@ -43,10 +43,9 @@ def index_individual_file(
 
     # Initialize the database client within the worker.
     db = PrecoveryDatabase.from_dir(db_dir, mode="w")
-    db.frames.load_hdf5(
+    db.frames.load_csv(
         filename,
         dataset_id,
-        chunksize=10000,
         name=dataset_name,
         reference_doi=reference_doi,
         documentation_url=documentation_url,
@@ -70,7 +69,8 @@ def index(
     logger = multiprocessing.get_logger()
     logger.setLevel(logging.INFO)
 
-    files = sorted(glob.glob(os.path.join(data_dir, "**", "*.h5"), recursive=True))
+    files = glob.glob(os.path.join(data_dir, "**", "*.csv"), recursive=True)
+    files = sorted(set(files))
     logger.info(f"Found {len(files)} observation files in {data_dir}:")
     for f in files:
         logger.info(f"\t{os.path.basename(f)}")
@@ -115,7 +115,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Index observations for precovery.")
     parser.add_argument(
         "data_dir",
-        help="Directory containing hdf files to be indexed.",
+        help="Directory containing csv files to be indexed.",
         type=str,
     )
     parser.add_argument(
