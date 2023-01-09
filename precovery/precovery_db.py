@@ -395,7 +395,7 @@ class PrecoveryDatabase:
                 obs = obs[idx]
                 for o, distance, dra, ddec in zip(obs, distances, dras, ddecs):
                     candidate = PrecoveryCandidate(
-                        mjd_utc=f.mjd_mid,  # TODO replace with a unique observation time in a future PR
+                        mjd_utc=o.mjd,
                         ra_deg=o.ra,
                         dec_deg=o.dec,
                         ra_sigma_arcsec=o.ra_sigma / ARCSEC,

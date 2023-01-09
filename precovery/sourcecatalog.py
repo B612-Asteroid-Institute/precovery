@@ -10,6 +10,7 @@ class SourceObservation:
     exposure_id: str
     obscode: str
     id: bytes
+    mjd: float
     ra: float
     dec: float
     ra_sigma: float
@@ -134,6 +135,7 @@ def iterate_observations(filename: str) -> Iterator[SourceObservation]:
                 exposure_id=row["exposure_id"],
                 obscode=row["observatory_code"],
                 id=row["obs_id"].encode(),
+                mjd=float(row["mjd_utc"]),
                 ra=float(row["ra"]),
                 dec=float(row["dec"]),
                 ra_sigma=float(row["ra_sigma"]),

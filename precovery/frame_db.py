@@ -14,8 +14,8 @@ from sqlalchemy.sql import func as sqlfunc
 
 from . import sourcecatalog
 
-# ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id
-DATA_LAYOUT = "<ddddddl"
+# mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id
+DATA_LAYOUT = "<dddddddl"
 
 logger = logging.getLogger("frame_db")
 
@@ -69,6 +69,7 @@ class FrameWindow:
 
 @dataclasses.dataclass
 class Observation:
+    mjd: float
     ra: float
     dec: float
     ra_sigma: float
@@ -82,6 +83,7 @@ class Observation:
 
     def to_bytes(self) -> bytes:
         prefix = self.data_layout.pack(
+            self.mjd,
             self.ra,
             self.dec,
             self.ra_sigma,
@@ -98,6 +100,7 @@ class Observation:
         Cast a SourceObservation to an Observation.
         """
         return cls(
+            mjd=so.mjd,
             ra=so.ra,
             dec=so.dec,
             ra_sigma=so.ra_sigma,
@@ -486,7 +489,7 @@ class FrameIndex:
             sq.Column("data_uri", sq.String),
             sq.Column("data_offset", sq.Integer),
             sq.Column("data_length", sq.Integer),
-            # Create index on mjd, healpixel, obscode
+            # Create index on midpoint mjd, healpixel, obscode
             sq.Index("fast_query", "mjd_mid", "healpixel", "obscode", unique=True),
         )
 
@@ -666,12 +669,19 @@ class FrameDB:
         bytes_read = 0
         while bytes_read < exp.data_length:
             raw = f.read(datagram_size)
-            ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id_size = data_layout.unpack(
-                raw
-            )
+            (
+                mjd,
+                ra,
+                dec,
+                ra_sigma,
+                dec_sigma,
+                mag,
+                mag_sigma,
+                id_size,
+            ) = data_layout.unpack(raw)
             id = f.read(id_size)
             bytes_read += datagram_size + id_size
-            yield Observation(ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id)
+            yield Observation(mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id)
 
     def store_observations(
         self, observations: Iterable[Observation], dataset_id: str, year_month_str: str
