@@ -538,7 +538,6 @@ class FrameDB:
         dataset_id: str,
         skip: int = 0,
         limit: Optional[int] = None,
-        chunksize: int = 100000,
         name: Optional[str] = None,
         reference_doi: Optional[str] = None,
         documentation_url: Optional[str] = None,
@@ -558,9 +557,6 @@ class FrameDB:
             Number of frames to skip in the file.
         limit : int, optional
             Maximum number of frames to load from the file. None means no limit.
-        chunksize:
-            Load observations in chunks of this size and then iterate over the chunks
-            to load observations.
         name : str, optional
             User-friendly name of the dataset.
         reference_doi : str, optional
@@ -594,7 +590,6 @@ class FrameDB:
             limit,
             nside=self.healpix_nside,
             skip=skip,
-            chunksize=chunksize,
         ):
             observations = [Observation.from_srcobs(o) for o in src_frame.observations]
             year_month_str = "-".join(
