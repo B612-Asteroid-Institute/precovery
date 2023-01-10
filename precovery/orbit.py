@@ -1,13 +1,11 @@
 import enum
 from os import getenv
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional
 
 import numpy as np
 import numpy.typing as npt
 import requests as req
 from astropy.time import Time
-
-from .spherical_geom import propagate_linearly
 
 try:
     import pyoorb
@@ -395,60 +393,3 @@ class Ephemeris:
 
     def __str__(self):
         return f"<Ephemeris ra={self.ra:.4f} dec={self.dec:.4f} mjd={self.mjd:.6f}>"
-
-    def approximately_propagate(
-        self, obscode: str, orbit: Orbit, timedeltas: Iterable[float]
-    ) -> Tuple[float, float]:
-        """
-        Roughly propagate the ephemeris to several new epochs, each 'timedelta' days away along.
-
-        If timedelta is small and self.ra_velocity and self.dec_velocity are
-        small (indicating relatively slow motion across the sky), this uses a
-        linear motion approximation.
-
-        Otherwise, it uses a 2-body integration of the orbit.
-
-        Accuracy will decrease as timedelta increases.
-        """
-        timedeltas = np.array(timedeltas)
-        # TODO: set timedeltas <= 1
-        # do_linear_timedelta = timedeltas[np.where(timedeltas <= 1.0)]
-        approx_ras = np.zeros(timedeltas.shape[0])
-        approx_decs = np.zeros(timedeltas.shape[0])
-        if self.ra_velocity < 1 and self.dec_velocity < 1:
-            linear = np.where(np.abs(timedeltas) <= -1.0)
-            approx_ras_rad, approx_decs_rad = propagate_linearly(
-                np.deg2rad(self.ra),
-                np.deg2rad(self.ra_velocity),
-                np.deg2rad(self.dec),
-                np.deg2rad(self.dec_velocity),
-                timedeltas[linear],
-            )
-            approx_ras[linear] = np.rad2deg(approx_ras_rad)
-            approx_decs[linear] = np.rad2deg(approx_decs_rad)
-
-            two_body = np.where(np.abs(timedeltas) > -1.0)
-            if len(timedeltas[two_body]) > 0:
-                approx_ephems = orbit.compute_ephemeris(
-                    obscode,
-                    self.mjd + timedeltas[two_body],
-                    method=PropagationIntegrator.TWO_BODY,
-                    time_scale=orbit._epoch_timescale,
-                )
-                approx_ras[two_body] = np.array(
-                    [approx_ephem.ra for approx_ephem in approx_ephems]
-                )
-                approx_decs[two_body] = np.array(
-                    [approx_ephem.dec for approx_ephem in approx_ephems]
-                )
-        else:
-            approx_ephems = orbit.compute_ephemeris(
-                obscode,
-                self.mjd + timedeltas,
-                method=PropagationIntegrator.TWO_BODY,
-                time_scale=orbit._epoch_timescale,
-            )
-            approx_ras = np.array([approx_ephem.ra for approx_ephem in approx_ephems])
-            approx_decs = np.array([approx_ephem.dec for approx_ephem in approx_ephems])
-
-        return approx_ras, approx_decs
