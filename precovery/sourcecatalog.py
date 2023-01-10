@@ -141,8 +141,8 @@ def iterate_observations(filename: str) -> Iterator[SourceObservation]:
                 mag=float(row["mag"]),
                 mag_sigma=float(row["mag_sigma"]),
                 filter=row["filter"],
-                mjd_start=float(row["mjd_start"]),
-                mjd_mid=float(row["mjd_mid"]),
+                mjd_start=float(row["mjd_start_utc"]),
+                mjd_mid=float(row["mjd_mid_utc"]),
                 exposure_duration=float(row["exposure_duration"]),
             )
             yield (obs)
