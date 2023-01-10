@@ -33,7 +33,7 @@ def run(input_dir, output_dir):
             # calendar months. We will need to place observation in both months and then
             # handle possible duplicates on the query side.
             chunk["cal_month"] = (
-                pd.to_datetime(chunk["mjd_utc"] + 2400000.5, origin="julian", unit="D")
+                pd.to_datetime(chunk["mjd"] + 2400000.5, origin="julian", unit="D")
                 .dt.to_period("M")
                 .astype(str)
             )

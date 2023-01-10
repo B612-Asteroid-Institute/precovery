@@ -26,15 +26,15 @@ logger = logging.getLogger("precovery")
 
 @dataclasses.dataclass
 class PrecoveryCandidate:
-    mjd_utc: float
+    mjd: float
     ra_deg: float
     dec_deg: float
     ra_sigma_arcsec: float
     dec_sigma_arcsec: float
     mag: float
     mag_sigma: float
-    mjd_start_utc: float
-    mjd_mid_utc: float
+    exposure_mjd_start: float
+    exposure_mjd_mid: float
     filter: str
     obscode: str
     exposure_id: str
@@ -53,8 +53,8 @@ class PrecoveryCandidate:
 
 @dataclasses.dataclass
 class FrameCandidate:
-    mjd_start_utc: float
-    mjd_mid_utc: float
+    exposure_mjd_start: float
+    exposure_mjd_mid: float
     filter: str
     obscode: str
     exposure_id: str
@@ -450,15 +450,15 @@ class PrecoveryDatabase:
                     ddecs,
                 ):
                     candidate = PrecoveryCandidate(
-                        mjd_utc=o.mjd,
+                        mjd=o.mjd,
                         ra_deg=o.ra,
                         dec_deg=o.dec,
                         ra_sigma_arcsec=o.ra_sigma / ARCSEC,
                         dec_sigma_arcsec=o.dec_sigma / ARCSEC,
                         mag=o.mag,
                         mag_sigma=o.mag_sigma,
-                        mjd_start_utc=f.mjd_start,
-                        mjd_mid_utc=f.mjd_mid,
+                        exposure_mjd_start=f.exposure_mjd_start,
+                        exposure_mjd_mid=f.exposure_mjd_mid,
                         filter=f.filter,
                         obscode=f.obscode,
                         exposure_id=f.exposure_id,
@@ -479,8 +479,8 @@ class PrecoveryDatabase:
                 logger.info("checked %d observations in frame", n_obs)
                 if (n_obs == 0) and (include_frame_candidates):
                     frame_candidate = FrameCandidate(
-                        mjd_start_utc=f.mjd_start,
-                        mjd_mid_utc=f.mjd_mid,
+                        exposure_mjd_start=f.exposure_mjd_start,
+                        exposure_mjd_mid=f.exposure_mjd_mid,
                         filter=f.filter,
                         obscode=f.obscode,
                         exposure_id=f.exposure_id,

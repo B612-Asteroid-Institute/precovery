@@ -159,7 +159,7 @@ def make_observations(
             )
 
         ephemeris_dict = {
-            "mjd_utc": [],
+            "mjd": [],
             "ra": [],
             "dec": [],
             "mag": [],
@@ -177,7 +177,7 @@ def make_observations(
             # geocentric distance (au)
             # predicted apparent V-band magnitude
             # true anomaly (deg)
-            ephemeris_dict["mjd_utc"].append(eph_i._raw_data[0])
+            ephemeris_dict["mjd"].append(eph_i._raw_data[0])
             ephemeris_dict["ra"].append(eph_i._raw_data[1])
             ephemeris_dict["dec"].append(eph_i._raw_data[2])
             ephemeris_dict["mag"].append(eph_i._raw_data[9])
@@ -190,15 +190,15 @@ def make_observations(
         ephemeris_df.insert(7, "filter", "V")
         ephemeris_df.insert(8, "exposure_id", exposure_ids)
         ephemeris_df["observatory_code"] = observatory_codes
-        ephemeris_df["mjd_start_utc"] = initial_epoch.utc.mjd + dts
-        ephemeris_df["mjd_mid_utc"] = (
+        ephemeris_df["exposure_mjd_start"] = initial_epoch.utc.mjd + dts
+        ephemeris_df["exposure_mjd_mid"] = (
             initial_epoch.utc.mjd + dts + exposure_duration / 86400 / 2.0
         )
         ephemeris_df["exposure_duration"] = exposure_duration
         ephemeris_dfs.append(ephemeris_df)
 
     observations = pd.concat(ephemeris_dfs, ignore_index=True)
-    observations.sort_values(by=["mjd_mid_utc", "observatory_code"], inplace=True)
+    observations.sort_values(by=["exposure_mjd_mid", "observatory_code"], inplace=True)
     observations.insert(1, "obs_id", [f"obs_{i:08d}" for i in range(len(observations))])
 
     return observations

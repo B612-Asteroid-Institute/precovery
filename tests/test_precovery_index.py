@@ -97,17 +97,17 @@ def test_precovery(test_db_dir):
         results["dec_sigma"] /= 3600.0
 
         # We are assuming that both the test observation file and the results
-        # are sorted by mjd_utc
+        # are sorted by mjd
         for col in [
-            "mjd_utc",
+            "mjd",
             "ra",
             "ra_sigma",
             "dec",
             "dec_sigma",
             "mag",
             "mag_sigma",
-            "mjd_start_utc",
-            "mjd_mid_utc",
+            "exposure_mjd_start",
+            "exposure_mjd_mid",
             "exposure_duration"
             # "filter", # can't do string comparisons this way
         ]:
