@@ -2,8 +2,6 @@ import csv
 import dataclasses
 from typing import Dict, Iterator, List, Optional
 
-import pandas as pd
-
 from . import healpix_geom
 
 
