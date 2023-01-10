@@ -132,7 +132,7 @@ def iterate_observations(filename: str) -> Iterator[SourceObservation]:
         for row in csv_reader:
             obs = SourceObservation(
                 exposure_id=row["exposure_id"],
-                obs_code=row["observatory_code"],
+                obscode=row["observatory_code"],
                 id=row["obs_id"].encode(),
                 ra=float(row["ra"]),
                 dec=float(row["dec"]),
