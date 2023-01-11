@@ -11,7 +11,7 @@ SAMPLE_ORBITS_FILE = os.path.join(
     os.path.dirname(__file__), "data", "sample_orbits.csv"
 )
 TEST_OBSERVATION_FILE = os.path.join(
-    os.path.dirname(__file__), "data", "observations.h5"
+    os.path.dirname(__file__), "data/index", "observations.csv"
 )
 
 
@@ -215,7 +215,7 @@ if __name__ == "__main__":
         "--out_file",
         type=str,
         default=TEST_OBSERVATION_FILE,
-        help="Path to output observations file saved as a HDF5.",
+        help="Path to output observations file saved as a CSV.",
     )
     parser.add_argument(
         "--orbit_type",
@@ -227,4 +227,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     orbits_df = pd.read_csv(args.in_file)
     observations = make_observations(orbits_df, orbit_type=args.orbit_type)
-    observations.to_hdf(args.out_file, key="data", mode="w", format="table")
+    observations.to_csv(args.out_file, index=False, float_format="%.16f")

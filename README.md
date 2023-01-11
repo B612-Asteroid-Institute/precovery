@@ -33,7 +33,7 @@ Note that, `openorb` is not available on the Python Package Index and so you wil
 to install it via source or conda. See the `Dockerfile` for example of how to build on Ubuntu linux.
 
 ## Observation Schema
-### Input HDF5 
+### Input CSV
 
 `precovery` expects a specific set of columns to be able to index observations into a search 
 efficient format. Input files should be sorted by ascending time.
