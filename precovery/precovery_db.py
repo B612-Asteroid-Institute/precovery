@@ -26,15 +26,15 @@ logger = logging.getLogger("precovery")
 
 @dataclasses.dataclass
 class PrecoveryCandidate:
-    mjd_utc: float
+    mjd: float
     ra_deg: float
     dec_deg: float
     ra_sigma_arcsec: float
     dec_sigma_arcsec: float
     mag: float
     mag_sigma: float
-    mjd_start_utc: float
-    mjd_mid_utc: float
+    exposure_mjd_start: float
+    exposure_mjd_mid: float
     filter: str
     obscode: str
     exposure_id: str
@@ -53,8 +53,8 @@ class PrecoveryCandidate:
 
 @dataclasses.dataclass
 class FrameCandidate:
-    mjd_start_utc: float
-    mjd_mid_utc: float
+    exposure_mjd_start: float
+    exposure_mjd_mid: float
     filter: str
     obscode: str
     exposure_id: str
@@ -281,23 +281,26 @@ class PrecoveryDatabase:
                 )
                 end_mjd_window = end_mjd
 
-            timedeltas = []
             test_mjds = []
             test_healpixels = []
             for mjd, healpixels in self.frames.idx.propagation_targets(
                 start_mjd_window, end_mjd_window, obscode
             ):
                 logger.debug("mjd=%.6f:\thealpixels with data: %r", mjd, healpixels)
-                timedelta = mjd - window_midpoint
-                timedeltas.append(timedelta)
                 test_mjds.append(mjd)
                 test_healpixels.append(healpixels)
 
-            approx_ras, approx_decs = window_ephem.approximately_propagate(
+            # Propagate the orbit with 2-body dynamics to the propagation
+            # targets
+            approx_ephems = orbit_window.compute_ephemeris(
                 obscode,
-                orbit_window,
-                timedeltas,
+                test_mjds,
+                PropagationIntegrator.TWO_BODY,
+                time_scale=EpochTimescale.UTC,
             )
+            approx_ras = np.array([w.ra for w in approx_ephems])
+            approx_decs = np.array([w.dec for w in approx_ephems])
+
             approx_healpixels = radec_to_healpixel(
                 approx_ras, approx_decs, self.frames.healpix_nside
             ).astype(int)
@@ -349,7 +352,13 @@ class PrecoveryDatabase:
         see if they contain observations which match the ephemeris.
         """
         # Compute the position of the ephem carefully.
-        exact_ephems = orbit.compute_ephemeris(obscode, mjds)
+        exact_ephems = orbit.compute_ephemeris(
+            obscode,
+            mjds,
+            PropagationIntegrator.N_BODY,
+            time_scale=EpochTimescale.UTC,
+        )
+
         for exact_ephem, mjd, healpix in zip(exact_ephems, mjds, healpixels):
             frames = self.frames.idx.get_frames(obscode, mjd, healpix)
             logger.info(
@@ -376,44 +385,90 @@ class PrecoveryDatabase:
             for f in frames:
                 logger.info("checking frame: %s", f)
                 obs = np.array(list(self.frames.iterate_observations(f)))
-                n = len(obs)
+                n_obs = len(obs)
+
+                # Read observation mjds, ra, decs into arrays
+                obs_mjds = np.array([o.mjd for o in obs])
                 obs_ras = np.array([o.ra for o in obs])
                 obs_decs = np.array([o.dec for o in obs])
+
+                # If any observation MJD does not match the mjd of the ephemeris
+                # to then adjust the predicted ephemeris accordingly
+                time_delta = obs_mjds - exact_ephem.mjd
+                if np.any(np.abs(time_delta) > 0):
+                    pred_ephems = orbit.compute_ephemeris(
+                        obscode,
+                        obs_mjds,
+                        PropagationIntegrator.TWO_BODY,
+                        time_scale=EpochTimescale.UTC,
+                    )
+                    pred_ras = np.array([w.ra for w in pred_ephems])
+                    pred_decs = np.array([w.dec for w in pred_ephems])
+                    pred_vras = np.array([w.ra_velocity for w in pred_ephems])
+                    pred_vdecs = np.array([w.dec_velocity for w in pred_ephems])
+                else:
+                    pred_ras = np.array([exact_ephem.ra for _ in range(n_obs)])
+                    pred_decs = np.array([exact_ephem.dec for _ in range(n_obs)])
+                    pred_vras = np.array(
+                        [exact_ephem.ra_velocity for _ in range(n_obs)]
+                    )
+                    pred_vdecs = np.array(
+                        [exact_ephem.dec_velocity for _ in range(n_obs)]
+                    )
+
                 distances = haversine_distance_deg(
-                    exact_ephem.ra,
+                    pred_ras,
                     obs_ras,
-                    exact_ephem.dec,
+                    pred_decs,
                     obs_decs,
                 )
-                dras = exact_ephem.ra - obs_ras
-                ddecs = exact_ephem.dec - obs_decs
+                dras = pred_ras - obs_ras
+                ddecs = pred_decs - obs_decs
                 # filter to observations with distance below tolerance
                 idx = distances < tolerance
                 distances = distances[idx]
                 dras = dras[idx]
                 ddecs = ddecs[idx]
                 obs = obs[idx]
-                for o, distance, dra, ddec in zip(obs, distances, dras, ddecs):
+                for (
+                    o,
+                    pred_ra,
+                    pred_dec,
+                    pred_vra,
+                    pred_vdec,
+                    distance,
+                    dra,
+                    ddec,
+                ) in zip(
+                    obs,
+                    pred_ras,
+                    pred_decs,
+                    pred_vras,
+                    pred_vdecs,
+                    distances,
+                    dras,
+                    ddecs,
+                ):
                     candidate = PrecoveryCandidate(
-                        mjd_utc=f.mjd_mid,  # TODO replace with a unique observation time in a future PR
+                        mjd=o.mjd,
                         ra_deg=o.ra,
                         dec_deg=o.dec,
                         ra_sigma_arcsec=o.ra_sigma / ARCSEC,
                         dec_sigma_arcsec=o.dec_sigma / ARCSEC,
                         mag=o.mag,
                         mag_sigma=o.mag_sigma,
-                        mjd_start_utc=f.mjd_start,
-                        mjd_mid_utc=f.mjd_mid,
+                        exposure_mjd_start=f.exposure_mjd_start,
+                        exposure_mjd_mid=f.exposure_mjd_mid,
                         filter=f.filter,
                         obscode=f.obscode,
                         exposure_id=f.exposure_id,
                         exposure_duration=f.exposure_duration,
                         observation_id=o.id.decode(),
                         healpix_id=healpix_id,
-                        pred_ra_deg=exact_ephem.ra,
-                        pred_dec_deg=exact_ephem.dec,
-                        pred_vra_degpday=exact_ephem.ra_velocity,
-                        pred_vdec_degpday=exact_ephem.dec_velocity,
+                        pred_ra_deg=pred_ra,
+                        pred_dec_deg=pred_dec,
+                        pred_vra_degpday=pred_vra,
+                        pred_vdec_degpday=pred_vdec,
                         delta_ra_arcsec=dra / ARCSEC,
                         delta_dec_arcsec=ddec / ARCSEC,
                         distance_arcsec=distance / ARCSEC,
@@ -421,20 +476,20 @@ class PrecoveryDatabase:
                     )
                     yield candidate
 
-                logger.info("checked %d observations in frame", n)
-                if (len(obs) == 0) & (include_frame_candidates):
+                logger.info("checked %d observations in frame", n_obs)
+                if (n_obs == 0) and (include_frame_candidates):
                     frame_candidate = FrameCandidate(
-                        mjd_start_utc=f.mjd_start,
-                        mjd_mid_utc=f.mjd_mid,
+                        exposure_mjd_start=f.exposure_mjd_start,
+                        exposure_mjd_mid=f.exposure_mjd_mid,
                         filter=f.filter,
                         obscode=f.obscode,
                         exposure_id=f.exposure_id,
                         exposure_duration=f.exposure_duration,
                         healpix_id=healpix_id,
-                        pred_ra_deg=exact_ephem.ra,
-                        pred_dec_deg=exact_ephem.dec,
-                        pred_vra_degpday=exact_ephem.ra_velocity,
-                        pred_vdec_degpday=exact_ephem.dec_velocity,
+                        pred_ra_deg=pred_ra,
+                        pred_dec_deg=pred_dec,
+                        pred_vra_degpday=pred_vra,
+                        pred_vdec_degpday=pred_vdec,
                         dataset_id=f.dataset_id,
                     )
                     yield frame_candidate

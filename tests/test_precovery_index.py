@@ -16,6 +16,7 @@ SAMPLE_ORBITS_FILE = os.path.join(
 TEST_OBSERVATION_FILE = os.path.join(
     os.path.dirname(__file__), "data/index", "observations.csv"
 )
+MILLIARCSECOND = 1 / 3600 / 1000
 
 
 @pytest.fixture
@@ -96,17 +97,17 @@ def test_precovery(test_db_dir):
         results["dec_sigma"] /= 3600.0
 
         # We are assuming that both the test observation file and the results
-        # are sorted by mjd_utc
+        # are sorted by mjd
         for col in [
-            "mjd_utc",
+            "mjd",
             "ra",
             "ra_sigma",
             "dec",
             "dec_sigma",
             "mag",
             "mag_sigma",
-            "mjd_start_utc",
-            "mjd_mid_utc",
+            "exposure_mjd_start",
+            "exposure_mjd_mid",
             "exposure_duration"
             # "filter", # can't do string comparisons this way
         ]:
@@ -126,24 +127,28 @@ def test_precovery(test_db_dir):
         ]:
             assert (results[col].values == object_observations[col].values).all()
 
-        # Test that the predicted location of each objet in each exposure is
+        # Test that the predicted location of each object in each exposure is
         # close to the actual location of the object in that exposure (we did
         # not add any errors to the test observations)
         # Note that the predicted location is sensitive to accumulating float point arithmetic
         # errors since orbits in precovery are propagated, then stored, then propagated again, and so on.
         # The number of propagations will have an effect on the consistency of the predicted
         # location when compared to the single propagation required to create the test observations.
+        # Additionally, the observations in the test data are not defined at the same as the midpoint of
+        # the exposure. Internally precovery will use 2-body propagation to adjust the predicted location
+        # of the orbit within the frame in the cases, which will also introduce some error.
         np.testing.assert_allclose(
             results[["pred_ra_deg", "pred_dec_deg"]].values,
             object_observations[["ra", "dec"]].values,
-            atol=1e-12,
-            rtol=1e-12,
+            atol=MILLIARCSECOND / 10,
+            rtol=0,
         )
 
-        # Test that the calculated distance is within 1e-10 degrees or 360 nanoarcseconds of zero
+        # Test that the calculated distance is within 1 millarcsecond (need additional order of magnitude
+        # tolerance to account for errors added in quadrature)
         np.testing.assert_allclose(
             results["distance_arcsec"].values / 3600.0,
             np.zeros(len(results), dtype=np.float64),
-            atol=1e-10,
+            atol=MILLIARCSECOND,
             rtol=0,
         )

@@ -40,16 +40,51 @@ efficient format. Input files should be sorted by ascending time.
 
 |Name|Unit|Type|Description|
 |---|---|---|---|
-| obs_id      | None | str |Unique observation ID for the observation |
-| exposure_id | None | str |Exposure or Image ID from which observation was measured |
+| obs_id | None | str |Unique observation ID for the observation |
+| exposure_id | None | str | Exposure or Image ID from which observation was measured |
+| mjd | days | float | MJD of the observation in UTC** |
 | ra  | degree | float | Right Ascension (J2000) |
 | dec  | degree | float | Declination (J2000) |
 | ra_sigma  | degree | float | 1-sigma uncertainty in Right Ascension |
 | dec_sigma  | degree | float | 1-sigma uncertainty in Declination |
 | mag  | None | float | Photometric magnitude measured for observation |
-| mag_sigma  | None | float | 1-sigma uncertainty in photmetric magnitude |
+| mag_sigma  | None | float | 1-sigma uncertainty in photometric magnitude |
 | filter | None | str | Filter/bandpass in which the observation was made |
-| mjd_start_utc | days | float | Start MJD of the exposure in UTC |
-| mjd_mid_utc | days | float | Midpoint MJD of the exposure in UTC (the observation is assumed to reported at this time)|
+| exposure_mjd_start | days | float | Start MJD of the exposure in UTC |
+| exposure_mjd_mid | days | float | Midpoint MJD of the exposure in UTC |
 | exposure_duration | seconds | float | The length of the exposure |
 | observatory_code | None | str | MPC observatory code for the observatory/observing program |
+
+Note:  
+** The time at which the observation is reported may be different than the exposure midpoint time to account for effects such as shutter motion
+
+## Precovery Results
+
+|Name|Unit|Type|Description|
+|---|---|---|---|
+| mjd | days | float | MJD of the observation in UTC** |
+| ra_deg  | degree | float | Right Ascension (J2000) |
+| dec_deg  | degree | float | Declination (J2000) |
+| ra_sigma_arcsec  | arcsecond | float | 1-sigma uncertainty in Right Ascension |
+| dec_sigma_arcsec  | arcsecond | float | 1-sigma uncertainty in Declination |
+| mag  | None | float | Photometric magnitude measured for observation |
+| mag_sigma  | None | float | 1-sigma uncertainty in photometric magnitude |
+| filter | None | str | Filter/bandpass in which the observation was made |
+| obscode | None | str | MPC observatory code for the observatory/observing program |
+| exposure_id | None | str | Exposure or Image ID from which observation was measured |
+| exposure_mjd_start | days | float | Start MJD of the exposure in UTC |
+| exposure_mjd_mid | days | float | Midpoint MJD of the exposure in UTC |
+| exposure_duration | seconds | float | The length of the exposure |
+| observation_id | None | str |Unique observation ID for the observation |
+| healpix_id | None | int | ID of the HEALPixel onto which the exposure was mapped |
+| pred_ra_deg  | degree | float | Predicted Right Ascension (J2000) of the object at the time of the observation |
+| pred_dec_deg  | degree | float | Predicted Declination (J2000) of the object at the time of the observation |
+| pred_vra_degpday  | degree / day| float | Predicted velocity in Right Ascension (J2000) of the object at the time of the observation |
+| pred_vdec_degpday  | degree /day | float | Predicted velocity in Declination (J2000) of the object at the time of the observation |
+| delta_ra_arcsec  | arcsecond | float | Difference between predicted and observed Right Ascension (predicted - observed) |
+| delta_dec_arcsec  | arcsecond | float | Difference between predicted and observed Declination (predicted - observed) |   
+| distance_arcsec  | arcsecond | float | Angular offset between the predicted location of the object and the obervation |
+| dataset_id  | None | str | Dataset ID from where the observation was precovered |
+
+Note:  
+** The time at which the observation is reported may be different than the exposure midpoint time to account for effects such as shutter motion

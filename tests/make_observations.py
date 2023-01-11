@@ -89,26 +89,26 @@ def make_observations(
     orbits_df: pd.DataFrame, orbit_type: str = "keplerian"
 ) -> pd.DataFrame:
     """
-        Make a synthetic observations file to use for testing. Orbits are read from the input dataframe
-        into the Orbit class. Setting orbit_type will determine which representation of the orbit
-        should be used to generate the observations.
+    Make a synthetic observations file to use for testing. Orbits are read from the input dataframe
+    into the Orbit class. Setting orbit_type will determine which representation of the orbit
+    should be used to generate the observations.
 
-        Observations are created with the following cadence: 4 observations per day for 2 weeks.
-        Each observations is seperated by 30 minutes. The epoch of each orbit is used as the start time
-        of the 2-week observation period. The exposure duration is 30, 60, 90, and 120 seconds for each
-        nightly observaion quadruplet.
+    Observations are created with the following cadence: 4 observations per day for 2 weeks.
+    Each observations is seperated by 30 minutes. The epoch of each orbit is used as the start time
+    of the 2-week observation period. The exposure duration is 30, 60, 90, and 120 seconds for each
+    nightly observaion quadruplet.
 
-        Parameters
-        ----------
-    `   orbits_df : `~pd.DataFrame`
-            DataFrame containing orbital elements for each orbit.
-        orbit_type : str, optional
-            Type of orbit to initialize. Must be either "keplerian" or "cometary".
+    Parameters
+    ----------
+    orbits_df : `~pd.DataFrame`
+        DataFrame containing orbital elements for each orbit.
+    orbit_type : str, optional
+        Type of orbit to initialize. Must be either "keplerian" or "cometary".
 
-        Returns
-        -------
-        observations : `~pandas.DataFrame`
-            DataFrame containing observations.
+    Returns
+    -------
+    observations : `~pandas.DataFrame`
+        DataFrame containing observations.
     """
     # Extract orbit names and read orbits into Orbit class
     orbit_ids = orbits_df["orbit_name"].values
@@ -134,13 +134,17 @@ def make_observations(
         for i in range(num_obs)
     ]
 
+    # Set random seed
+    rng = np.random.default_rng(seed=2023)
+
     ephemeris_dfs = []
     for i, orbit in enumerate(orbits):
         initial_epoch = Time(orbit._epoch, scale="tt", format="mjd")
-        # Observation times are defined at the center of the exposure (for now)
-        observation_times = (
-            initial_epoch.utc.mjd + dts + exposure_duration / 86400 / 2.0
-        )
+
+        # Calculate a random offset from the start of the exposure
+        # to give each observation a unique obervation time
+        offset_from_start = rng.uniform(dts, dts + exposure_duration / 86400)
+        observation_times = initial_epoch.utc.mjd + offset_from_start
         exposure_ids = [f"{obs_i}_{k:06d}" for k, obs_i in enumerate(observatory_codes)]
 
         ephemeris_list = []
@@ -155,7 +159,7 @@ def make_observations(
             )
 
         ephemeris_dict = {
-            "mjd_utc": [],
+            "mjd": [],
             "ra": [],
             "dec": [],
             "mag": [],
@@ -173,7 +177,7 @@ def make_observations(
             # geocentric distance (au)
             # predicted apparent V-band magnitude
             # true anomaly (deg)
-            ephemeris_dict["mjd_utc"].append(eph_i._raw_data[0])
+            ephemeris_dict["mjd"].append(eph_i._raw_data[0])
             ephemeris_dict["ra"].append(eph_i._raw_data[1])
             ephemeris_dict["dec"].append(eph_i._raw_data[2])
             ephemeris_dict["mag"].append(eph_i._raw_data[9])
@@ -186,15 +190,15 @@ def make_observations(
         ephemeris_df.insert(7, "filter", "V")
         ephemeris_df.insert(8, "exposure_id", exposure_ids)
         ephemeris_df["observatory_code"] = observatory_codes
-        ephemeris_df["mjd_start_utc"] = initial_epoch.utc.mjd + dts
-        ephemeris_df["mjd_mid_utc"] = (
+        ephemeris_df["exposure_mjd_start"] = initial_epoch.utc.mjd + dts
+        ephemeris_df["exposure_mjd_mid"] = (
             initial_epoch.utc.mjd + dts + exposure_duration / 86400 / 2.0
         )
         ephemeris_df["exposure_duration"] = exposure_duration
         ephemeris_dfs.append(ephemeris_df)
 
     observations = pd.concat(ephemeris_dfs, ignore_index=True)
-    observations.sort_values(by=["mjd_mid_utc", "observatory_code"], inplace=True)
+    observations.sort_values(by=["exposure_mjd_mid", "observatory_code"], inplace=True)
     observations.insert(1, "obs_id", [f"obs_{i:08d}" for i in range(len(observations))])
 
     return observations

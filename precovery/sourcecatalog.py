@@ -10,6 +10,7 @@ class SourceObservation:
     exposure_id: str
     obscode: str
     id: bytes
+    mjd: float
     ra: float
     dec: float
     ra_sigma: float
@@ -17,8 +18,8 @@ class SourceObservation:
     mag: float
     mag_sigma: float
     filter: str
-    mjd_start: float
-    mjd_mid: float
+    exposure_mjd_start: float
+    exposure_mjd_mid: float
     exposure_duration: float
 
 
@@ -27,8 +28,8 @@ class SourceExposure:
     exposure_id: str
     obscode: str
     filter: str
-    mjd_start: float
-    mjd_mid: float
+    exposure_mjd_start: float
+    exposure_mjd_mid: float
     exposure_duration: float
     observations: List[SourceObservation]
 
@@ -38,8 +39,8 @@ class SourceFrame:
     exposure_id: str
     obscode: str
     filter: str
-    mjd_start: float
-    mjd_mid: float
+    exposure_mjd_start: float
+    exposure_mjd_mid: float
     exposure_duration: float
     healpixel: int
     observations: List[SourceObservation]
@@ -69,8 +70,8 @@ def source_exposure_to_frames(
                 exposure_id=src_exp.exposure_id,
                 obscode=src_exp.obscode,
                 filter=src_exp.filter,
-                mjd_start=src_exp.mjd_start,
-                mjd_mid=src_exp.mjd_mid,
+                exposure_mjd_start=src_exp.exposure_mjd_start,
+                exposure_mjd_mid=src_exp.exposure_mjd_mid,
                 exposure_duration=src_exp.exposure_duration,
                 healpixel=pixel,
                 observations=[],
@@ -97,8 +98,8 @@ def iterate_exposures(
                 exposure_id=obs.exposure_id,
                 obscode=obs.obscode,
                 filter=obs.filter,
-                mjd_start=obs.mjd_start,
-                mjd_mid=obs.mjd_mid,
+                exposure_mjd_start=obs.exposure_mjd_start,
+                exposure_mjd_mid=obs.exposure_mjd_mid,
                 exposure_duration=obs.exposure_duration,
                 observations=[obs],
             )
@@ -118,8 +119,8 @@ def iterate_exposures(
                 exposure_id=obs.exposure_id,
                 obscode=obs.obscode,
                 filter=obs.filter,
-                mjd_start=obs.mjd_start,
-                mjd_mid=obs.mjd_mid,
+                exposure_mjd_start=obs.exposure_mjd_start,
+                exposure_mjd_mid=obs.exposure_mjd_mid,
                 exposure_duration=obs.exposure_duration,
                 observations=[obs],
             )
@@ -134,6 +135,7 @@ def iterate_observations(filename: str) -> Iterator[SourceObservation]:
                 exposure_id=row["exposure_id"],
                 obscode=row["observatory_code"],
                 id=row["obs_id"].encode(),
+                mjd=float(row["mjd"]),
                 ra=float(row["ra"]),
                 dec=float(row["dec"]),
                 ra_sigma=float(row["ra_sigma"]),
@@ -141,8 +143,8 @@ def iterate_observations(filename: str) -> Iterator[SourceObservation]:
                 mag=float(row["mag"]),
                 mag_sigma=float(row["mag_sigma"]),
                 filter=row["filter"],
-                mjd_start=float(row["mjd_start_utc"]),
-                mjd_mid=float(row["mjd_mid_utc"]),
+                exposure_mjd_start=float(row["exposure_mjd_start"]),
+                exposure_mjd_mid=float(row["exposure_mjd_mid"]),
                 exposure_duration=float(row["exposure_duration"]),
             )
             yield (obs)

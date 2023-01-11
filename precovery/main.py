@@ -9,7 +9,7 @@ from .precovery_db import FrameCandidate, PrecoveryCandidate, PrecoveryDatabase
 
 def _candidates_to_dict(candidates):
     data = {
-        "mjd_utc": [],
+        "mjd": [],
         "ra_deg": [],
         "dec_deg": [],
         "ra_sigma_arcsec": [],
@@ -19,8 +19,8 @@ def _candidates_to_dict(candidates):
         "filter": [],
         "obscode": [],
         "exposure_id": [],
-        "mjd_start_utc": [],
-        "mjd_mid_utc": [],
+        "exposure_mjd_start": [],
+        "exposure_mjd_mid": [],
         "exposure_duration": [],
         "observation_id": [],
         "healpix_id": [],
@@ -113,5 +113,5 @@ def precover(
 
     df = pd.DataFrame(_candidates_to_dict(candidates))
     df.loc[:, "observation_id"] = df.loc[:, "observation_id"].astype(str)
-    df.sort_values(by=["mjd_utc", "obscode"], inplace=True, ignore_index=True)
+    df.sort_values(by=["mjd", "obscode"], inplace=True, ignore_index=True)
     return df
