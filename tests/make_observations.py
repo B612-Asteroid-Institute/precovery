@@ -227,4 +227,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     orbits_df = pd.read_csv(args.in_file)
     observations = make_observations(orbits_df, orbit_type=args.orbit_type)
-    observations.to_csv(args.out_file, index=False)
+    observations.to_csv(args.out_file, index=False, float_format="%.16f")
