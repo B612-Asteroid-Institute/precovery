@@ -58,7 +58,7 @@ def test_precovery(test_db_dir):
         orbits_keplerian.append(orbit)
 
     # Load observations from csv file
-    observations_df = pd.read_csv(TEST_OBSERVATION_FILE, float_precision="high")
+    observations_df = pd.read_csv(TEST_OBSERVATION_FILE, float_precision="round_trip")
 
     # Test that the number of frames is equal to the number of observations
     # Note that this will only be true for a small enough number of objects that are not near
@@ -111,7 +111,9 @@ def test_precovery(test_db_dir):
             # "filter", # can't do string comparisons this way
         ]:
             np.testing.assert_array_equal(
-                object_observations[col].values, results[col].values
+                object_observations[col].values,
+                results[col].values,
+                err_msg=f"Column {col} does not match",
             )
 
         # Test that the observation_id, exposure_id, observatory_code, and filter
