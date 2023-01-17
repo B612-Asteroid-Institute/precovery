@@ -1,17 +1,16 @@
-import os
-
-from precovery.precovery_db import PrecoveryDatabase
-
 import logging
 import multiprocessing as mp
+import os
 import time
 from functools import partial
-from typing import Iterable 
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
 from astropy.time import Time
 from sklearn.neighbors import BallTree
+
+from precovery.precovery_db import PrecoveryDatabase
 
 from .healpix_geom import radec_to_healpixel
 # replace this usage with Orbit.compute_ephemeris
