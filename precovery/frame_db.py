@@ -14,8 +14,8 @@ from sqlalchemy.sql import func as sqlfunc
 
 from . import sourcecatalog
 
-# ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id
-DATA_LAYOUT = "<ddddddl"
+# mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id
+DATA_LAYOUT = "<dddddddl"
 
 logger = logging.getLogger("frame_db")
 
@@ -27,7 +27,9 @@ class HealpixFrame:
     obscode: str
     exposure_id: str
     filter: str
-    mjd: float
+    exposure_mjd_start: float
+    exposure_mjd_mid: float
+    exposure_duration: float
     healpixel: int
     data_uri: str
     data_offset: int
@@ -67,6 +69,7 @@ class FrameWindow:
 
 @dataclasses.dataclass
 class Observation:
+    mjd: float
     ra: float
     dec: float
     ra_sigma: float
@@ -80,6 +83,7 @@ class Observation:
 
     def to_bytes(self) -> bytes:
         prefix = self.data_layout.pack(
+            self.mjd,
             self.ra,
             self.dec,
             self.ra_sigma,
@@ -96,6 +100,7 @@ class Observation:
         Cast a SourceObservation to an Observation.
         """
         return cls(
+            mjd=so.mjd,
             ra=so.ra,
             dec=so.dec,
             ra_sigma=so.ra_sigma,
@@ -138,7 +143,7 @@ class FrameIndex:
                     "No fast_query index exists on the frames table. This may cause"
                     " significant performance issues.To create the index run the"
                     " following SQL command:\n   CREATE INDEX fast_query ON frames"
-                    " (mjd, healpixel, obscode);\n"
+                    " (exposure_mjd_mid, healpixel, obscode);\n"
                 )
                 warnings.warn(warning, UserWarning)
         con.close()
@@ -165,7 +170,7 @@ class FrameIndex:
                 (
                     (
                         sq.cast(
-                            self.frames.c.mjd + offset,
+                            self.frames.c.exposure_mjd_mid + offset,
                             sq.Integer,
                         )
                         / window_size_days
@@ -177,8 +182,8 @@ class FrameIndex:
             )
             .distinct()
             .where(
-                self.frames.c.mjd >= start_mjd,
-                self.frames.c.mjd <= end_mjd,
+                self.frames.c.exposure_mjd_mid >= start_mjd,
+                self.frames.c.exposure_mjd_mid <= end_mjd,
             )
             .order_by("common_epoch")
         )
@@ -198,17 +203,17 @@ class FrameIndex:
         """
         select_stmt = (
             sq.select(
-                self.frames.c.mjd,
+                self.frames.c.exposure_mjd_mid,
                 self.frames.c.healpixel,
             )
             .where(
                 self.frames.c.obscode == obscode,
-                self.frames.c.mjd >= start_mjd,
-                self.frames.c.mjd <= end_mjd,
+                self.frames.c.exposure_mjd_mid >= start_mjd,
+                self.frames.c.exposure_mjd_mid <= end_mjd,
             )
             .distinct()
             .order_by(
-                self.frames.c.mjd.desc(),
+                self.frames.c.exposure_mjd_mid.desc(),
                 self.frames.c.healpixel,
             )
         )
@@ -235,7 +240,9 @@ class FrameIndex:
             self.frames.c.obscode,
             self.frames.c.exposure_id,
             self.frames.c.filter,
-            self.frames.c.mjd,
+            self.frames.c.exposure_mjd_start,
+            self.frames.c.exposure_mjd_mid,
+            self.frames.c.exposure_duration,
             self.frames.c.healpixel,
             self.frames.c.data_uri,
             self.frames.c.data_offset,
@@ -243,8 +250,8 @@ class FrameIndex:
         ).where(
             self.frames.c.obscode == obscode,
             self.frames.c.healpixel == int(healpixel),
-            self.frames.c.mjd >= mjd - 1e-7,
-            self.frames.c.mjd <= mjd + 1e-7,
+            self.frames.c.exposure_mjd_mid >= mjd - 1e-7,
+            self.frames.c.exposure_mjd_mid <= mjd + 1e-7,
         )
         result = self.dbconn.execute(select_stmt)
         # Turn result into a list so we can iterate over it twice: once
@@ -252,13 +259,14 @@ class FrameIndex:
         # yield the individual rows
         rows = list(result)
 
-        # Loop through rows and track MJDs
-        mjds = set()
+        # Loop through rows and track midpoint MJDs
+        mjds_mid = set()
         for r in rows:
-            # id, dataset_id, obscode, exposure_id, filter, mjd, healpixel, data uri, data offset, data length
-            mjds.add(r[5])
+            # id, dataset_id, obscode, exposure_id, filter, exposure_mjd_start, exposure_mjd_mid,
+            # exposure_duration, healpixel, data uri, data offset, data length
+            mjds_mid.add(r[6])
 
-        if len(mjds) > 1:
+        if len(mjds_mid) > 1:
             logger.warn(
                 f"Query returned non-unique MJDs for mjd: {mjd}, healpix:"
                 f" {int(healpixel)}, obscode: {obscode}."
@@ -279,13 +287,17 @@ class FrameIndex:
 
     def n_unique_frames(self) -> int:
         """
-        Count the number of unique (obscode, mjd, healpixel) triples in the index.
+        Count the number of unique (obscode, exposure_mjd_mid, healpixel) triples in the index.
 
         This is not the same as the number of total frames, because those
         triples might have multiple data URIs and offsets.
         """
         subq = (
-            sq.select(self.frames.c.obscode, self.frames.c.mjd, self.frames.c.healpixel)
+            sq.select(
+                self.frames.c.obscode,
+                self.frames.c.exposure_mjd_mid,
+                self.frames.c.healpixel,
+            )
             .distinct()
             .subquery()
         )
@@ -313,10 +325,10 @@ class FrameIndex:
         select_stmt = (
             sq.select(self.frames)
             .where(
-                self.frames.c.mjd >= bundle.start_epoch,
-                self.frames.c.mjd <= bundle.end_epoch,
+                self.frames.c.exposure_mjd_mid >= bundle.start_epoch,
+                self.frames.c.exposure_mjd_mid <= bundle.end_epoch,
             )
-            .order_by(self.frames.c.mjd.desc())
+            .order_by(self.frames.c.exposure_mjd_mid.desc())
         )
         rows = self.dbconn.execute(select_stmt)
         for row in rows:
@@ -324,11 +336,11 @@ class FrameIndex:
 
     def mjd_bounds(self) -> Tuple[float, float]:
         """
-        Returns the minimum and maximum mjd of all frames in the index.
+        Returns the minimum and maximum exposure_mjd_mid of all frames in the index.
         """
         select_stmt = sq.select(
-            sqlfunc.min(self.frames.c.mjd, type=sq.Float),
-            sqlfunc.max(self.frames.c.mjd, type=sq.Float),
+            sqlfunc.min(self.frames.c.exposure_mjd_mid, type=sq.Float),
+            sqlfunc.max(self.frames.c.exposure_mjd_mid, type=sq.Float),
         )
         first, last = self.dbconn.execute(select_stmt).fetchone()
         return first, last
@@ -351,11 +363,11 @@ class FrameIndex:
             sq.select(
                 self.frames.c.obscode,
                 self.frames.c.healpixel,
-                self.frames.c.mjd,
+                self.frames.c.exposure_mjd_mid,
                 (
                     (
                         sq.cast(
-                            self.frames.c.mjd + offset,
+                            self.frames.c.exposure_mjd_mid + offset,
                             sq.Integer,
                         )
                         / window_size_days
@@ -365,8 +377,8 @@ class FrameIndex:
                 ).label("common_epoch"),
             )
             .where(
-                self.frames.c.mjd >= mjd_start,
-                self.frames.c.mjd <= mjd_end,
+                self.frames.c.exposure_mjd_mid >= mjd_start,
+                self.frames.c.exposure_mjd_mid <= mjd_end,
             )
             .subquery()
         )
@@ -374,8 +386,8 @@ class FrameIndex:
             sq.select(
                 subq.c.common_epoch,
                 subq.c.obscode,
-                sqlfunc.min(subq.c.mjd).label("start_epoch"),
-                sqlfunc.max(subq.c.mjd).label("end_epoch"),
+                sqlfunc.min(subq.c.exposure_mjd_mid).label("start_epoch"),
+                sqlfunc.max(subq.c.exposure_mjd_mid).label("end_epoch"),
                 subq.c.healpixel,
                 sqlfunc.count(1).label("n_frames"),
             )
@@ -406,12 +418,18 @@ class FrameIndex:
             self.frames.c.obscode,
             self.frames.c.exposure_id,
             self.frames.c.filter,
-            self.frames.c.mjd,
+            self.frames.c.exposure_mjd_start,
+            self.frames.c.exposure_mjd_mid,
+            self.frames.c.exposure_duration,
             self.frames.c.healpixel,
             self.frames.c.data_uri,
             self.frames.c.data_offset,
             self.frames.c.data_length,
-        ).order_by(self.frames.c.obscode, self.frames.c.mjd, self.frames.c.healpixel)
+        ).order_by(
+            self.frames.c.obscode,
+            self.frames.c.exposure_mjd_mid,
+            self.frames.c.healpixel,
+        )
         result = self.dbconn.execute(stmt)
         for row in result:
             yield HealpixFrame(*row)
@@ -495,7 +513,9 @@ class FrameIndex:
                 "obscode": frame.obscode,
                 "exposure_id": frame.exposure_id,
                 "filter": frame.filter,
-                "mjd": frame.mjd,
+                "exposure_mjd_start": frame.exposure_mjd_start,
+                "exposure_mjd_mid": frame.exposure_mjd_mid,
+                "exposure_duration": frame.exposure_duration,
                 "healpixel": int(frame.healpixel),
                 "data_uri": frame.data_uri,
                 "data_offset": frame.data_offset,
@@ -545,13 +565,17 @@ class FrameIndex:
             sq.Column("obscode", sq.String),
             sq.Column("exposure_id", sq.String),
             sq.Column("filter", sq.String),
-            sq.Column("mjd", sq.Float),
+            sq.Column("exposure_mjd_start", sq.Float),
+            sq.Column("exposure_mjd_mid", sq.Float),
+            sq.Column("exposure_duration", sq.Float),
             sq.Column("healpixel", sq.Integer),
             sq.Column("data_uri", sq.String),
             sq.Column("data_offset", sq.Integer),
             sq.Column("data_length", sq.Integer),
-            # Create index on mjd, healpixel, obscode
-            sq.Index("fast_query", "mjd", "healpixel", "obscode", unique=True),
+            # Create index on midpoint mjd, healpixel, obscode
+            sq.Index(
+                "fast_query", "exposure_mjd_mid", "healpixel", "obscode", unique=True
+            ),
         )
 
         self.datasets = sq.Table(
@@ -596,25 +620,23 @@ class FrameDB:
         for f in self.data_files.values():
             f.close()
 
-    def load_hdf5(
+    def load_csv(
         self,
-        hdf5_file: str,
+        csv_file: str,
         dataset_id: str,
         skip: int = 0,
         limit: Optional[int] = None,
-        key: str = "data",
-        chunksize: int = 100000,
         name: Optional[str] = None,
         reference_doi: Optional[str] = None,
         documentation_url: Optional[str] = None,
         sia_url: Optional[str] = None,
     ):
         """
-        Load data from a HDF5 catalog file.
+        Load data from a CSV observation file.
 
         Parameters
         ----------
-        hdf5_file : str
+        csv_file : str
             Path to a file on disk.
         dataset_id : str
             Name of dataset (should be the same for each observation file that
@@ -623,11 +645,6 @@ class FrameDB:
             Number of frames to skip in the file.
         limit : int, optional
             Maximum number of frames to load from the file. None means no limit.
-        key : str
-            Name of key where the observations table is located in the hdf5 file.
-        chunksize:
-            Load observations in chunks of this size and then iterate over the chunks
-            to load observations.
         name : str, optional
             User-friendly name of the dataset.
         reference_doi : str, optional
@@ -657,16 +674,16 @@ class FrameDB:
 
         frames_to_add = []
         for src_frame in sourcecatalog.iterate_frames(
-            hdf5_file,
+            csv_file,
             limit,
             nside=self.healpix_nside,
             skip=skip,
-            key=key,
-            chunksize=chunksize,
         ):
             observations = [Observation.from_srcobs(o) for o in src_frame.observations]
             year_month_str = "-".join(
-                Time(src_frame.mjd, format="mjd", scale="utc").isot.split("-")[:2]
+                Time(src_frame.exposure_mjd_mid, format="mjd", scale="utc").isot.split(
+                    "-"
+                )[:2]
             )
 
             # Write observations to disk
@@ -680,7 +697,9 @@ class FrameDB:
                 obscode=src_frame.obscode,
                 exposure_id=src_frame.exposure_id,
                 filter=src_frame.filter,
-                mjd=src_frame.mjd,
+                exposure_mjd_start=src_frame.exposure_mjd_start,
+                exposure_mjd_mid=src_frame.exposure_mjd_mid,
+                exposure_duration=src_frame.exposure_duration,
                 healpixel=src_frame.healpixel,
                 data_uri=data_uri,
                 data_offset=offset,
@@ -737,12 +756,19 @@ class FrameDB:
         bytes_read = 0
         while bytes_read < exp.data_length:
             raw = f.read(datagram_size)
-            ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id_size = data_layout.unpack(
-                raw
-            )
+            (
+                mjd,
+                ra,
+                dec,
+                ra_sigma,
+                dec_sigma,
+                mag,
+                mag_sigma,
+                id_size,
+            ) = data_layout.unpack(raw)
             id = f.read(id_size)
             bytes_read += datagram_size + id_size
-            yield Observation(ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id)
+            yield Observation(mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id)
 
     def store_observations(
         self, observations: Iterable[Observation], dataset_id: str, year_month_str: str
@@ -798,7 +824,8 @@ class FrameDB:
         self.data_files[self._current_data_file_name(dataset_id, year_month_str)] = f
 
     def defragment(self, new_index: FrameIndex, new_db: "FrameDB"):
-        cur_key = ("", "", 0.0, 0)
+        # obscode, filter, exposure_mjd_start, exposure_mjd_mid, exposure_duration, healpixel
+        cur_key = ("", "", 0.0, 0.0, 0.0, 0)
         observations = []
         last_exposure_id = ""
 
@@ -809,12 +836,21 @@ class FrameDB:
             if cur_key[0] == "":
                 # First iteration
                 observations = list(self.iterate_observations(frame))
-                cur_key = (frame.obscode, frame.filter, frame.mjd, frame.healpixel)
+                cur_key = (
+                    frame.obscode,
+                    frame.filter,
+                    frame.exposure_mjd_start,
+                    frame.exposure_mjd_mid,
+                    frame.exposure_duration,
+                    frame.healpixel,
+                )
                 last_exposure_id = frame.exposure_id
             elif (
                 frame.obscode,
                 frame.filter,
-                frame.mjd,
+                frame.exposure_mjd_start,
+                frame.exposure_mjd_mid,
+                frame.exposure_duration,
                 frame.healpixel,
             ) == cur_key:
                 # Extending existing frame
@@ -829,8 +865,10 @@ class FrameDB:
                     id=None,
                     obscode=cur_key[0],
                     filter=cur_key[1],
-                    mjd=cur_key[2],
-                    healpixel=cur_key[3],
+                    exposure_mjd_start=cur_key[2],
+                    exposure_mjd_mid=cur_key[3],
+                    exposure_duration=cur_key[4],
+                    healpixel=cur_key[5],
                     exposure_id=last_exposure_id,
                     data_uri=data_uri,
                     data_offset=offset,
@@ -839,7 +877,14 @@ class FrameDB:
                 new_db.idx.add_frames([new_frame])
 
                 observations = list(self.iterate_observations(frame))
-                cur_key = (frame.obscode, frame.filter, frame.mjd, frame.healpixel)
+                cur_key = (
+                    frame.obscode,
+                    frame.filter,
+                    frame.exposure_mjd_start,
+                    frame.exposure_mjd_mid,
+                    frame.exposure_duration,
+                    frame.healpixel,
+                )
 
             last_exposure_id = frame.exposure_id
 
@@ -851,8 +896,10 @@ class FrameDB:
             id=None,
             obscode=cur_key[0],
             filter=cur_key[1],
-            mjd=cur_key[2],
-            healpixel=cur_key[3],
+            exposure_mjd_start=cur_key[2],
+            exposure_mjd_mid=cur_key[3],
+            exposure_duration=cur_key[4],
+            healpixel=cur_key[5],
             exposure_id=last_exposure_id,
             data_uri=data_uri,
             data_offset=offset,

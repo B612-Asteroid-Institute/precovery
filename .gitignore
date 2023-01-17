@@ -111,10 +111,9 @@ venv.bak/
 .mypy_cache/
 
 .eggs
-thorcontrol/version.py
 virtualenv3.10
 volume/
 ^data/
 out/
-
+database/
 precovery/version.py

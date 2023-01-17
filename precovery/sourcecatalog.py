@@ -1,7 +1,6 @@
+import csv
 import dataclasses
 from typing import Dict, Iterator, List, Optional
-
-import pandas as pd
 
 from . import healpix_geom
 
@@ -11,6 +10,7 @@ class SourceObservation:
     exposure_id: str
     obscode: str
     id: bytes
+    mjd: float
     ra: float
     dec: float
     ra_sigma: float
@@ -18,7 +18,9 @@ class SourceObservation:
     mag: float
     mag_sigma: float
     filter: str
-    epoch: float
+    exposure_mjd_start: float
+    exposure_mjd_mid: float
+    exposure_duration: float
 
 
 @dataclasses.dataclass
@@ -26,7 +28,9 @@ class SourceExposure:
     exposure_id: str
     obscode: str
     filter: str
-    mjd: float
+    exposure_mjd_start: float
+    exposure_mjd_mid: float
+    exposure_duration: float
     observations: List[SourceObservation]
 
 
@@ -35,7 +39,9 @@ class SourceFrame:
     exposure_id: str
     obscode: str
     filter: str
-    mjd: float
+    exposure_mjd_start: float
+    exposure_mjd_mid: float
+    exposure_duration: float
     healpixel: int
     observations: List[SourceObservation]
 
@@ -45,10 +51,8 @@ def iterate_frames(
     limit: Optional[int] = None,
     nside: int = 32,
     skip: int = 0,
-    key: str = "data",
-    chunksize: int = 100000,
 ) -> Iterator[SourceFrame]:
-    for exp in iterate_exposures(filename, limit, skip, key, chunksize):
+    for exp in iterate_exposures(filename, limit, skip):
         for frame in source_exposure_to_frames(exp, nside):
             yield frame
 
@@ -66,7 +70,9 @@ def source_exposure_to_frames(
                 exposure_id=src_exp.exposure_id,
                 obscode=src_exp.obscode,
                 filter=src_exp.filter,
-                mjd=src_exp.mjd,
+                exposure_mjd_start=src_exp.exposure_mjd_start,
+                exposure_mjd_mid=src_exp.exposure_mjd_mid,
+                exposure_duration=src_exp.exposure_duration,
                 healpixel=pixel,
                 observations=[],
             )
@@ -79,22 +85,22 @@ def iterate_exposures(
     filename,
     limit: Optional[int] = None,
     skip: int = 0,
-    key: str = "data",
-    chunksize: int = 100000,
 ):
     """
     Yields unique exposures from observations in a file
     """
     current_exposure: Optional[SourceExposure] = None
     n = 0
-    for obs in iterate_observations(filename, key=key, chunksize=chunksize):
+    for obs in iterate_observations(filename):
         if current_exposure is None:
             # first iteration
             current_exposure = SourceExposure(
                 exposure_id=obs.exposure_id,
                 obscode=obs.obscode,
                 filter=obs.filter,
-                mjd=obs.epoch,
+                exposure_mjd_start=obs.exposure_mjd_start,
+                exposure_mjd_mid=obs.exposure_mjd_mid,
+                exposure_duration=obs.exposure_duration,
                 observations=[obs],
             )
         elif obs.exposure_id == current_exposure.exposure_id:
@@ -113,82 +119,32 @@ def iterate_exposures(
                 exposure_id=obs.exposure_id,
                 obscode=obs.obscode,
                 filter=obs.filter,
-                mjd=obs.epoch,
+                exposure_mjd_start=obs.exposure_mjd_start,
+                exposure_mjd_mid=obs.exposure_mjd_mid,
+                exposure_duration=obs.exposure_duration,
                 observations=[obs],
             )
     yield current_exposure
 
 
-def iterate_observations(
-    filename: str, key: str = "data", chunksize: int = 100000
-) -> Iterator[SourceObservation]:
-    with pd.HDFStore(filename, key=key, mode="r") as store:
-        for chunk in store.select(
-            key=key,
-            iterator=True,
-            chunksize=chunksize,
-            columns=[
-                "obs_id",
-                "exposure_id",
-                "mjd_utc",
-                "ra",
-                "dec",
-                "ra_sigma",
-                "dec_sigma",
-                "mag",
-                "mag_sigma",
-                "filter",
-                "observatory_code",
-            ],
-        ):
-            exposure_ids = chunk["exposure_id"].values
-            obscodes = chunk["observatory_code"].values
-            ids = chunk["obs_id"].values
-            ras = chunk["ra"].values.astype(float)
-            decs = chunk["dec"].values.astype(float)
-            ra_sigmas = chunk["ra_sigma"].values.astype(float)
-            dec_sigmas = chunk["dec_sigma"].values.astype(float)
-            mags = chunk["mag"].values.astype(float)
-            mag_sigmas = chunk["mag_sigma"].values.astype(float)
-            filters = chunk["filter"].values
-            epochs = chunk["mjd_utc"].values
-
-            for (
-                exposure_id,
-                obscode,
-                id,
-                ra,
-                dec,
-                ra_sigma,
-                dec_sigma,
-                mag,
-                mag_sigma,
-                filter,
-                epoch,
-            ) in zip(
-                exposure_ids,
-                obscodes,
-                ids,
-                ras,
-                decs,
-                ra_sigmas,
-                dec_sigmas,
-                mags,
-                mag_sigmas,
-                filters,
-                epochs,
-            ):
-                obs = SourceObservation(
-                    exposure_id,
-                    obscode,
-                    id.encode(),
-                    ra,
-                    dec,
-                    ra_sigma,
-                    dec_sigma,
-                    mag,
-                    mag_sigma,
-                    filter,
-                    epoch,
-                )
-                yield (obs)
+def iterate_observations(filename: str) -> Iterator[SourceObservation]:
+    with open(filename) as csv_file:
+        csv_reader = csv.DictReader(csv_file)
+        for row in csv_reader:
+            obs = SourceObservation(
+                exposure_id=row["exposure_id"],
+                obscode=row["observatory_code"],
+                id=row["obs_id"].encode(),
+                mjd=float(row["mjd"]),
+                ra=float(row["ra"]),
+                dec=float(row["dec"]),
+                ra_sigma=float(row["ra_sigma"]),
+                dec_sigma=float(row["dec_sigma"]),
+                mag=float(row["mag"]),
+                mag_sigma=float(row["mag_sigma"]),
+                filter=row["filter"],
+                exposure_mjd_start=float(row["exposure_mjd_start"]),
+                exposure_mjd_mid=float(row["exposure_mjd_mid"]),
+                exposure_duration=float(row["exposure_duration"]),
+            )
+            yield (obs)

@@ -5,12 +5,17 @@ import pytest
 
 from precovery.frame_db import FrameIndex
 
-TEST_DB = os.path.join(os.path.dirname(__file__), "test.db")
+
+@pytest.fixture
+def test_db():
+    out_db = os.path.join(os.path.dirname(__file__), "test.db")
+    yield out_db
+    os.remove(out_db)
 
 
-def test_fast_query_warning():
+def test_fast_query_warning(test_db):
     """Test that a warning is raised when the fast_query index does not exist."""
-    con = sql.connect(TEST_DB)
+    con = sql.connect(test_db)
     con.execute(
         """
         CREATE TABLE frames (
@@ -19,7 +24,9 @@ def test_fast_query_warning():
             obscode TEXT,
             exposure_id TEXT,
             filter TEXT,
-            mjd FLOAT,
+            exposure_mjd_start FLOAT,
+            exposure_mjd_mid FLOAT,
+            exposure_duration FLOAT,
             healpixel INTEGER,
             data_uri TEXT,
             data_offset INTEGER,
@@ -28,8 +35,6 @@ def test_fast_query_warning():
     )
 
     with pytest.warns(UserWarning):
-        FrameIndex.open("sqlite:///" + TEST_DB, mode="r")
+        FrameIndex.open("sqlite:///" + test_db, mode="r")
 
-    # Clean up
-    os.remove(TEST_DB)
     return
