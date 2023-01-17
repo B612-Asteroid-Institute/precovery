@@ -2,10 +2,10 @@ import numpy as np
 from scipy.spatial.distance import mahalanobis
 from scipy.stats import chi2
 
-__all__ = ["calcResiduals", "calcSimpleResiduals", "calcProbabilisticResiduals"]
+__all__ = ["calc_residuals", "calcSimpleResiduals", "calcProbabilisticResiduals"]
 
 
-def calcResiduals(
+def calc_residuals(
     coords_actual,
     coords_desired,
     sigmas_actual=None,

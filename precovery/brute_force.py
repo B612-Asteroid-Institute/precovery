@@ -1,8 +1,23 @@
 import os
 
-from sqlalchemy import all_
-
 from precovery.precovery_db import PrecoveryDatabase
+
+import logging
+import multiprocessing as mp
+import time
+from functools import partial
+from typing import Iterable 
+
+import numpy as np
+import pandas as pd
+from astropy.time import Time
+from sklearn.neighbors import BallTree
+
+from .healpix_geom import radec_to_healpixel
+# replace this usage with Orbit.compute_ephemeris
+from .orbit import Orbit
+from .residuals import calc_residuals
+from .utils import calcChunkSize, yieldChunks
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -10,116 +25,103 @@ os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
-import logging
-import multiprocessing as mp
-import time
-from functools import partial
-from typing import Iterable, List, Optional, Tuple
-
-import numpy as np
-import pandas as pd
-from astropy.time import Time
-from sklearn.neighbors import BallTree
-
-from .healpix_geom import radec_to_healpixel, radec_to_healpixel_with_neighbors
-
-# replace this usage with Orbit.compute_ephemeris
-from .orbit import Orbit
-from .residuals import calcResiduals
-from .utils import _checkParallel, _initWorker, calcChunkSize, yieldChunks
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "get_observations_and_ephemerides_for_orbits",
+    "get_frame_times_by_obscode",
+    "ephemerides_from_orbits",
+    "intersecting_frames",
     "attribution_worker",
-    "attributeObservations",
+    "attribute_observations",
 ]
 
 
-def get_observations_and_ephemerides_for_orbits(
-    orbits: Iterable[Orbit],
+def get_frame_times_by_obscode(
     mjd_start: float,
     mjd_end: float,
     precovery_db: PrecoveryDatabase,
-    obscode: str = "W84",
 ):
-    """
-    Returns:
-    - ephemerides for the orbit list, propagated to all epochs for frames in 
-    the range (mjd_start, mjd_end)
-    - observations in the indexed PrecoveryDatabase consistent with intersecting
-    and neighboring frames for orbits propagated to each of the represented epochs
-
-    ***Currently breaks on non-NSC datasets
-        TODO propagation targets should be unique frames wrt obscode, mjd
-    """
-
-    # Find all the mjd we need to propagate to
     all_frame_mjd = precovery_db.frames.idx.unique_frame_times()
     frame_mjd_within_range = [
-        x for x in all_frame_mjd if (x > mjd_start and x < mjd_end)
+        x for x in all_frame_mjd if (x[0] > mjd_start and x[0] < mjd_end)
     ]
 
+    frame_mjds_by_obscode = dict()
+    for mjd, obscode in frame_mjd_within_range:
+        frame_mjds_by_obscode.setdefault(obscode, []).append(mjd)
+
+    return frame_mjds_by_obscode
+
+
+def ephemerides_from_orbits(
+    orbits: Iterable[Orbit],
+    epochs: Iterable[tuple],
+):
+
     ephemeris_dfs = []
-    frame_dfs = []
-    # this should pass through obscode...rather should use the relevant frames' obs codes
     for orbit in orbits:
-        eph = orbit.compute_ephemeris(obscode=obscode, epochs=frame_mjd_within_range)
-        mjd = [w.mjd for w in eph]
-        ra = [w.ra for w in eph]
-        dec = [w.dec for w in eph]
-        ephemeris_df = pd.DataFrame.from_dict(
-            {
-                "mjd_utc": mjd,
-                "RA_deg": ra,
-                "Dec_deg": dec,
-            }
-        )
-        ephemeris_df["orbit_id"] = orbit.orbit_id
-        ephemeris_df["observatory_code"] = obscode
-        ephemeris_dfs.append(ephemeris_df)
+        for obscode in epochs.keys():
+            eph = orbit.compute_ephemeris(obscode=obscode, epochs=epochs[obscode])
+            mjd = [w.mjd for w in eph]
+            ra = [w.ra for w in eph]
+            dec = [w.dec for w in eph]
+            ephemeris_df = pd.DataFrame.from_dict(
+                {
+                    "mjd_utc": mjd,
+                    "RA_deg": ra,
+                    "Dec_deg": dec,
+                }
+            )
+            ephemeris_df["orbit_id"] = orbit.orbit_id
+            ephemeris_df["observatory_code"] = obscode
+            ephemeris_dfs.append(ephemeris_df)
 
-        # Now we gathetr the healpixels and neighboring pixels for each propagated position
-        healpix = radec_to_healpixel_with_neighbors(
-            ra, dec, precovery_db.frames.healpix_nside
-        )
+    ephemerides = pd.concat(ephemeris_dfs, ignore_index=True)
+    return ephemerides
 
-        frame_df = pd.concat(
-            [
-                pd.DataFrame.from_dict(
-                    {
-                        "mjd_utc": [x[0] for y in range(9)],
-                        "obscode": [x[1] for y in range(9)],
-                        "healpix": list(x[2]),
-                    }
-                )
-                for x in zip(
-                    mjd, ephemeris_df["observatory_code"], list(healpix.transpose())
-                )
-            ],
-            ignore_index=True,
-        )
-        frame_dfs.append(frame_df)
 
-    # This will be passed back to be used as the ephemeris dataframe later
-    ephemeris = pd.concat(ephemeris_dfs, ignore_index=True)
-    unique_frames = pd.concat(frame_dfs, ignore_index=True).drop_duplicates()
+def intersecting_frames(
+    ephemerides,
+    precovery_db: PrecoveryDatabase,
+    neighbors=False,
+):
 
-    # This filter is very inefficient - there is surely a better way to do this
+    frame_identifier_dfs = []
+    healpixel = radec_to_healpixel(
+        list(ephemerides["RA_deg"]),
+        list(ephemerides["Dec_deg"]),
+        precovery_db.frames.healpix_nside,
+        include_neighbors=neighbors
+    )
+
+    # we are reformatting this dataframe to account for the 9 healpixels returned from
+    # radec_to_healpixel (central plus eight neighbors)
+    frame_identifier_df = pd.concat(
+        [
+            pd.DataFrame.from_dict(
+                {
+                    "mjd_utc": [x[0] for y in range(9)],
+                    "obscode": [x[1] for y in range(9)],
+                    "healpixel": list(x[2]),
+                }
+            )
+            for x in zip(
+                ephemerides["mjd_utc"], ephemerides["observatory_code"], list(healpixel.transpose())
+            )
+        ],
+        ignore_index=True,
+    )
+    frame_identifier_dfs.append(frame_identifier_df)
+
+    unique_frame_identifier_df = pd.concat(frame_identifier_dfs, ignore_index=True).drop_duplicates()
+
     filtered_frames = []
-    all_frames = precovery_db.frames.idx.frames_by_date(mjd_start, mjd_end)
-    for frame in all_frames:
-        if (
-            (unique_frames["mjd_utc"] == frame.mjd)
-            & (unique_frames["obscode"] == frame.obscode)
-            & (unique_frames["healpix"] == frame.healpixel)
-        ).any():
-            filtered_frames.append(frame)
-
-    observations = precovery_db.extract_observations_by_frames(filtered_frames)
-
-    return ephemeris, observations
+    for fi in unique_frame_identifier_df.itertuples():
+        for f in precovery_db.frames.idx.frames_by_obscode_mjd_hp(fi.obscode, fi.mjd_utc, fi.healpixel):
+            filtered_frames.append(f)
+   
+    return filtered_frames
 
 
 def attribution_worker(
@@ -127,7 +129,7 @@ def attribution_worker(
     observations,
     eps=1 / 3600,
     include_probabilistic=True,
-):  
+):
 
     """
     gather attributions for a df of ephemerides, observations
@@ -135,7 +137,6 @@ def attribution_worker(
     First filters ephemerides to match the chunked observations
 
     """
-
 
     # Create observer's dictionary from observations
     observers = {}
@@ -232,7 +233,7 @@ def attribution_worker(
             obs_times_associated.append(obs_times[mask[0]])
             distances.append(d[mask].reshape(-1, 1))
 
-            residuals_visit, stats_visit = calcResiduals(
+            residuals_visit, stats_visit = calc_residuals(
                 coords[mask[0]],
                 coords_predicted[i[mask]],
                 sigmas_actual=coords_sigma[mask[0]],
@@ -282,7 +283,7 @@ def attribution_worker(
     return attributions
 
 
-def attributeObservations(
+def attribute_observations(
     orbits,
     mjd_start: float,
     mjd_end: float,
@@ -293,8 +294,7 @@ def attributeObservations(
     backend_kwargs={},
     orbits_chunk_size=10,
     observations_chunk_size=100000,
-    num_jobs=1,
-    parallel_backend="mp",
+    num_jobs: int = 1,
 ):
     logger.info("Running observation attribution...")
     time_start = time.time()
@@ -304,17 +304,18 @@ def attributeObservations(
     attribution_dfs = []
 
     # prepare ephemeris and observation dictionaries
-    ephemeris, observations = get_observations_and_ephemerides_for_orbits(
-        orbits, mjd_start, mjd_end, precovery_db
-    )
+    # ephemeris, observations = get_observations_and_ephemerides_for_orbits(
+    #     orbits, mjd_start, mjd_end, precovery_db
+    # )
 
-    parallel, num_workers = _checkParallel(num_jobs, parallel_backend)
+    epochs = get_frame_times_by_obscode(mjd_start, mjd_end, precovery_db=precovery_db)
+    ephemerides = ephemerides_from_orbits(orbits, epochs)
+    frames_to_search = intersecting_frames(ephemerides, precovery_db=precovery_db, neighbors=True)
+    observations = precovery_db.extract_observations_by_frames(frames_to_search)
+    num_workers = min(num_jobs, mp.cpu_count() + 1)
     if num_workers > 1:
 
-        p = mp.Pool(
-            processes=num_workers,
-            initializer=_initWorker,
-        )
+        p = mp.Pool(processes=num_workers)
 
         # Send up to orbits_chunk_size orbits to each OD worker for processing
         chunk_size_ = calcChunkSize(
@@ -328,8 +329,8 @@ def attributeObservations(
         eph_split = []
         for orbit_c in orbits.split(orbits_chunk_size):
             eph_split.append(
-                ephemeris[
-                    ephemeris["orbit_id"].isin([orbit.orbit_id for orbit in orbit_c])
+                ephemerides[
+                    ephemerides["orbit_id"].isin([orbit.orbit_id for orbit in orbit_c])
                 ]
             )
         for observations_c in yieldChunks(observations, observations_chunk_size):
@@ -359,8 +360,8 @@ def attributeObservations(
                 for i in range(0, len(orbits), orbits_chunk_size)
             ]:
 
-                eph_c = ephemeris[
-                    ephemeris["orbit_id"].isin([orbit.orbit_id for orbit in orbit_c])
+                eph_c = ephemerides[
+                    ephemerides["orbit_id"].isin([orbit.orbit_id for orbit in orbit_c])
                 ]
                 attribution_df_i = attribution_worker(
                     eph_c,

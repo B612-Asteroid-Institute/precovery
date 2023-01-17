@@ -442,7 +442,10 @@ class PrecoveryDatabase:
             ]
         )
         frame_dfs = []
+        # iterate over frames, initially accumulating observations in numpy arrays for speed
+        # over loop, build dataframe of observations within each frame with shared frame scalars
         for frame in frames:
+            # can't mix numpy array types, so two accumulators: one for floats, one for obs_id strings
             inc_arr = np.empty((0, 5), float)
             obs_ids = np.empty((0, 1), object)
             for obs in self.frames.iterate_observations(frame):
