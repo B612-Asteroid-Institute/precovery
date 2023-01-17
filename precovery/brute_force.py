@@ -13,6 +13,7 @@ from sklearn.neighbors import BallTree
 from precovery.precovery_db import PrecoveryDatabase
 
 from .healpix_geom import radec_to_healpixel
+
 # replace this usage with Orbit.compute_ephemeris
 from .orbit import Orbit
 from .residuals import calc_residuals
@@ -40,6 +41,7 @@ def get_frame_times_by_obscode(
     mjd_start: float,
     mjd_end: float,
     precovery_db: PrecoveryDatabase,
+    obscodes_specified: Iterable[str] = [],
 ):
     all_frame_mjd = precovery_db.frames.idx.unique_frame_times()
     frame_mjd_within_range = [
@@ -48,7 +50,8 @@ def get_frame_times_by_obscode(
 
     frame_mjds_by_obscode = dict()
     for mjd, obscode in frame_mjd_within_range:
-        frame_mjds_by_obscode.setdefault(obscode, []).append(mjd)
+        if len(obscode) == 0 or obscode in obscodes_specified:
+            frame_mjds_by_obscode.setdefault(obscode, []).append(mjd)
 
     return frame_mjds_by_obscode
 
@@ -91,7 +94,7 @@ def intersecting_frames(
         list(ephemerides["RA_deg"]),
         list(ephemerides["Dec_deg"]),
         precovery_db.frames.healpix_nside,
-        include_neighbors=neighbors
+        include_neighbors=neighbors,
     )
 
     # we are reformatting this dataframe to account for the 9 healpixels returned from
@@ -106,20 +109,26 @@ def intersecting_frames(
                 }
             )
             for x in zip(
-                ephemerides["mjd_utc"], ephemerides["observatory_code"], list(healpixel.transpose())
+                ephemerides["mjd_utc"],
+                ephemerides["observatory_code"],
+                list(healpixel.transpose()),
             )
         ],
         ignore_index=True,
     )
     frame_identifier_dfs.append(frame_identifier_df)
 
-    unique_frame_identifier_df = pd.concat(frame_identifier_dfs, ignore_index=True).drop_duplicates()
+    unique_frame_identifier_df = pd.concat(
+        frame_identifier_dfs, ignore_index=True
+    ).drop_duplicates()
 
     filtered_frames = []
     for fi in unique_frame_identifier_df.itertuples():
-        for f in precovery_db.frames.idx.frames_by_obscode_mjd_hp(fi.obscode, fi.mjd_utc, fi.healpixel):
+        for f in precovery_db.frames.idx.frames_by_obscode_mjd_hp(
+            fi.obscode, fi.mjd_utc, fi.healpixel
+        ):
             filtered_frames.append(f)
-   
+
     return filtered_frames
 
 
@@ -294,6 +303,7 @@ def attribute_observations(
     orbits_chunk_size=10,
     observations_chunk_size=100000,
     num_jobs: int = 1,
+    obscodes_specified: Iterable[str] = [],
 ):
     logger.info("Running observation attribution...")
     time_start = time.time()
@@ -307,9 +317,16 @@ def attribute_observations(
     #     orbits, mjd_start, mjd_end, precovery_db
     # )
 
-    epochs = get_frame_times_by_obscode(mjd_start, mjd_end, precovery_db=precovery_db)
+    epochs = get_frame_times_by_obscode(
+        mjd_start,
+        mjd_end,
+        precovery_db=precovery_db,
+        obscodes_specified=obscodes_specified,
+    )
     ephemerides = ephemerides_from_orbits(orbits, epochs)
-    frames_to_search = intersecting_frames(ephemerides, precovery_db=precovery_db, neighbors=True)
+    frames_to_search = intersecting_frames(
+        ephemerides, precovery_db=precovery_db, neighbors=True
+    )
     observations = precovery_db.extract_observations_by_frames(frames_to_search)
     num_workers = min(num_jobs, mp.cpu_count() + 1)
     if num_workers > 1:
