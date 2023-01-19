@@ -77,8 +77,6 @@ def test_precovery(test_db_dir):
             observations_df["object_id"] == orbit_name_mapping[orbit.orbit_id]
         ]
         assert len(results) == len(object_observations)
-        assert len(results) == len(object_observations)
-        assert len(results) == len(object_observations)
         assert len(results) > 0
 
         results.rename(
