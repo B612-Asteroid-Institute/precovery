@@ -19,7 +19,7 @@ ARCMIN = DEGREE / 60
 ARCSEC = ARCMIN / 60
 
 CANDIDATE_K = 15
-CANDIDATE_NSIDE = 2 ** CANDIDATE_K
+CANDIDATE_NSIDE = 2**CANDIDATE_K
 
 logging.basicConfig()
 logger = logging.getLogger("precovery")
@@ -524,9 +524,7 @@ class PrecoveryDatabase:
             for obs in self.frames.iterate_observations(frame):
                 inc_arr = np.append(
                     inc_arr,
-                    np.array(
-                        [[obs.ra, obs.dec, obs.ra_sigma, obs.dec_sigma, frame.mjd]]
-                    ),
+                    np.array([[obs.ra, obs.dec, obs.ra_sigma, obs.dec_sigma, obs.mjd]]),
                     axis=0,
                 )
                 obs_ids = np.append(
@@ -562,4 +560,3 @@ class PrecoveryDatabase:
         frames = self.frames.idx.frames_by_date(mjd_start, mjd_end)
 
         return self.extract_observations_by_frames(frames)
-

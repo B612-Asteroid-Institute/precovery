@@ -2,6 +2,7 @@ import logging
 import multiprocessing as mp
 import os
 import time
+import warnings
 from functools import partial
 from typing import Iterable
 
@@ -13,8 +14,6 @@ from sklearn.neighbors import BallTree
 from precovery.precovery_db import PrecoveryDatabase
 
 from .healpix_geom import radec_to_healpixel
-
-# replace this usage with Orbit.compute_ephemeris
 from .orbit import Orbit
 from .residuals import calc_residuals
 from .utils import calcChunkSize, yieldChunks
@@ -47,11 +46,10 @@ def get_frame_times_by_obscode(
     frame_mjd_within_range = [
         x for x in all_frame_mjd if (x[0] > mjd_start and x[0] < mjd_end)
     ]
-
     frame_mjds_by_obscode = dict()
-    for mjd, obscode in frame_mjd_within_range:
-        if len(obscode) == 0 or obscode in obscodes_specified:
-            frame_mjds_by_obscode.setdefault(obscode, []).append(mjd)
+    for exposure_mjd_mid, obscode in frame_mjd_within_range:
+        if len(obscodes_specified) == 0 or obscode in obscodes_specified:
+            frame_mjds_by_obscode.setdefault(obscode, []).append(exposure_mjd_mid)
 
     return frame_mjds_by_obscode
 
@@ -327,7 +325,15 @@ def attribute_observations(
     frames_to_search = intersecting_frames(
         ephemerides, precovery_db=precovery_db, neighbors=True
     )
-    observations = precovery_db.extract_observations_by_frames(frames_to_search)
+    if len(frames_to_search) != 0:
+        observations = precovery_db.extract_observations_by_frames(frames_to_search)
+    else:
+        warning = (
+            "No intersecting frames were found. This is unlikely unless"
+            " a sparsely populated database or small O(1) orbit set is used."
+        )
+        warnings.warn(warning, UserWarning)
+        return []
     num_workers = min(num_jobs, mp.cpu_count() + 1)
     if num_workers > 1:
 
