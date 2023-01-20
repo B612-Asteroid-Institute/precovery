@@ -58,7 +58,7 @@ def calc_residuals(
         and sigmas_actual is not None
         and include_probabilistic
     ):
-        covariances_actual_ = [np.diag(i ** 2) for i in sigmas_actual]
+        covariances_actual_ = [np.diag(i**2) for i in sigmas_actual]
         sigmas_actual_ = sigmas_actual
     elif covariances_actual is not None and sigmas_actual is None:
         sigmas_actual_ = np.zeros_like(coords_actual)
@@ -132,7 +132,7 @@ def calcSimpleResiduals(
         sigma_dec = sigmas_actual[:, 1]
 
         # Calculate chi2
-        chi2 = (residual_ra ** 2 / sigma_ra ** 2) + (residual_dec ** 2 / sigma_dec ** 2)
+        chi2 = (residual_ra**2 / sigma_ra**2) + (residual_dec**2 / sigma_dec**2)
     else:
         chi2 = np.NaN
 

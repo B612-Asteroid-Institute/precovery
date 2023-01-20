@@ -310,11 +310,6 @@ def attribute_observations(
 
     attribution_dfs = []
 
-    # prepare ephemeris and observation dictionaries
-    # ephemeris, observations = get_observations_and_ephemerides_for_orbits(
-    #     orbits, mjd_start, mjd_end, precovery_db
-    # )
-
     epochs = get_frame_times_by_obscode(
         mjd_start,
         mjd_end,

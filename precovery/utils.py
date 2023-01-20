@@ -5,7 +5,7 @@ import signal
 import numpy as np
 import pandas as pd
 
-__all__ = ["yieldChunks", "calcChunkSize" ]
+__all__ = ["yieldChunks", "calcChunkSize"]
 
 logger = logging.getLogger(__name__)
 
@@ -67,4 +67,3 @@ def calcChunkSize(n, num_workers, max_chunk_size, min_chunk_size=1):
     # Make sure this number does not exceed the maximum chunk size
     chunk_size = np.minimum(c, max_chunk_size)
     return chunk_size
-
