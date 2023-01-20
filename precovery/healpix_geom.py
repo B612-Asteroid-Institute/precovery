@@ -4,7 +4,7 @@ import numpy.typing as npt
 
 
 def radec_to_healpixel(
-    ra: npt.NDArray[np.float64], dec: npt.NDArray[np.float64], nside: int, 
+    ra: npt.NDArray[np.float64], dec: npt.NDArray[np.float64], nside: int,
     include_neighbors: bool = False
 ) -> npt.NDArray[np.int64]:
 
