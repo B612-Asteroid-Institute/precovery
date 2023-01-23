@@ -17,6 +17,7 @@ TEST_OBSERVATION_FILE = os.path.join(
     os.path.dirname(__file__), "data/index", "observations.csv"
 )
 MILLIARCSECOND = 1 / 3600 / 1000
+RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 
 
 @pytest.fixture
@@ -135,20 +136,40 @@ def test_precovery(test_db_dir):
         # Additionally, the observations in the test data are not defined at the same as the midpoint of
         # the exposure. Internally precovery will use 2-body propagation to adjust the predicted location
         # of the orbit within the frame in the cases, which will also introduce some error.
-        np.testing.assert_allclose(
-            results[["pred_ra_deg", "pred_dec_deg"]].values,
-            object_observations[["ra", "dec"]].values,
-            atol=MILLIARCSECOND / 10,
-            rtol=0,
-            err_msg=f"Predicted location does match actual location for {orbit_name_mapping[orbit.orbit_id]}.",
-        )
+        try:
+            np.testing.assert_allclose(
+                results[["pred_ra_deg", "pred_dec_deg"]].values,
+                object_observations[["ra", "dec"]].values,
+                atol=MILLIARCSECOND / 10,
+                rtol=0,
+                err_msg=f"Predicted location does match actual location for {orbit_name_mapping[orbit.orbit_id]}.",
+            )
 
-        # Test that the calculated distance is within 1 millarcsecond (need additional order of magnitude
-        # tolerance to account for errors added in quadrature)
-        np.testing.assert_allclose(
-            results["distance_arcsec"].values / 3600.0,
-            np.zeros(len(results), dtype=np.float64),
-            atol=MILLIARCSECOND,
-            rtol=0,
-            err_msg=f"Distance for {orbit_name_mapping[orbit.orbit_id]} is not within tolerance.",
-        )
+            # Test that the calculated distance is within 1 millarcsecond (need additional order of magnitude
+            # tolerance to account for errors added in quadrature)
+            np.testing.assert_allclose(
+                results["distance_arcsec"].values / 3600.0,
+                np.zeros(len(results), dtype=np.float64),
+                atol=MILLIARCSECOND,
+                rtol=0,
+                err_msg=f"Distance for {orbit_name_mapping[orbit.orbit_id]} is not within tolerance.",
+            )
+
+        except AssertionError as e:
+            os.makedirs(RESULTS_DIR, exist_ok=True)
+            result_file = os.path.join(
+                RESULTS_DIR, f"results_{orbit_name_mapping[orbit.orbit_id]}.csv"
+            )
+            results.to_csv(result_file, float_format="%.16f", index=False)
+
+            object_observations_file = os.path.join(
+                RESULTS_DIR,
+                f"object_observations_{orbit_name_mapping[orbit.orbit_id]}.csv",
+            )
+            object_observations.to_csv(
+                object_observations_file, float_format="%.16f", index=False
+            )
+
+            print(f"Results written to: {result_file}")
+            print(f"Object observations written to: {object_observations_file}")
+            raise e
