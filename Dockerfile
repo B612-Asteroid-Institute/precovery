@@ -13,8 +13,8 @@ ENV OORB_TAG=v1.2.1a1.dev2
 ENV OORB_VERSION="pyoorb-1.2.1a1.dev2+66b7753.dirty"
 
 # Install oorb data
-RUN curl -L -o /tmp/oorb_data.zip \
-    https://github.com/B612-Asteroid-Institute/oorb/releases/download/$OORB_TAG/oorb_data.zip
+RUN curl -fL -o /tmp/oorb_data.zip \
+    "https://github.com/B612-Asteroid-Institute/oorb/releases/download/${OORB_TAG}/oorb_data.zip"
 RUN unzip -d /opt/oorb_data /tmp/oorb_data.zip
 ENV OORB_DATA=/opt/oorb_data
 
