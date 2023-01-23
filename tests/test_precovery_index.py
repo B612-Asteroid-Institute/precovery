@@ -112,7 +112,7 @@ def test_precovery(test_db_dir):
             np.testing.assert_array_equal(
                 object_observations[col].values,
                 results[col].values,
-                err_msg=f"Column {col} does not match",
+                err_msg=f"Column {col} does not match for {orbit_name_mapping[orbit.orbit_id]}.",
             )
 
         # Test that the observation_id, exposure_id, observatory_code, and filter
@@ -140,6 +140,7 @@ def test_precovery(test_db_dir):
             object_observations[["ra", "dec"]].values,
             atol=MILLIARCSECOND / 10,
             rtol=0,
+            err_msg=f"Predicted location does match actual location for {orbit_name_mapping[orbit.orbit_id]}.",
         )
 
         # Test that the calculated distance is within 1 millarcsecond (need additional order of magnitude
@@ -149,4 +150,5 @@ def test_precovery(test_db_dir):
             np.zeros(len(results), dtype=np.float64),
             atol=MILLIARCSECOND,
             rtol=0,
+            err_msg=f"Distance for {orbit_name_mapping[orbit.orbit_id]} is not within tolerance.",
         )
