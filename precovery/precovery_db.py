@@ -430,6 +430,10 @@ class PrecoveryDatabase:
                 dras = dras[idx]
                 ddecs = ddecs[idx]
                 obs = obs[idx]
+                pred_ras = pred_ras[idx]
+                pred_decs = pred_decs[idx]
+                pred_vras = pred_vras[idx]
+                pred_vdec = pred_vdecs[idx]
                 for (
                     o,
                     pred_ra,
