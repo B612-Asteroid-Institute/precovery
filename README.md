@@ -82,7 +82,7 @@ Note:
 | pred_vra_degpday  | degree / day| float | Predicted velocity in Right Ascension (J2000) of the object at the time of the observation |
 | pred_vdec_degpday  | degree /day | float | Predicted velocity in Declination (J2000) of the object at the time of the observation |
 | delta_ra_arcsec  | arcsecond | float | Difference between predicted and observed Right Ascension (predicted - observed) |
-| delta_dec_arcsec  | arcsecond | float | Difference between predicted and observed Declination (predicted - observed) |   
+| delta_dec_arcsec  | arcsecond | float | Difference between predicted and observed Declination (predicted - observed) |
 | distance_arcsec  | arcsecond | float | Angular offset between the predicted location of the object and the obervation |
 | dataset_id  | None | str | Dataset ID from where the observation was precovered |
 

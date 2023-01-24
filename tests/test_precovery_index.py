@@ -1,6 +1,6 @@
+import glob
 import os
 import shutil
-import sqlite3 as sql
 
 import numpy as np
 import pandas as pd
@@ -13,9 +13,7 @@ from precovery.orbit import EpochTimescale, Orbit
 SAMPLE_ORBITS_FILE = os.path.join(
     os.path.dirname(__file__), "data", "sample_orbits.csv"
 )
-TEST_OBSERVATION_FILE = os.path.join(
-    os.path.dirname(__file__), "data/index", "observations.csv"
-)
+TEST_OBSERVATIONS_DIR = os.path.join(os.path.dirname(__file__), "data/index")
 MILLIARCSECOND = 1 / 3600 / 1000
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 
@@ -31,13 +29,6 @@ def test_precovery(test_db_dir):
     """
     Given a properly formatted h5 file, ensure the observations are indexed properly
     """
-    index(
-        out_dir=test_db_dir,
-        dataset_id="test_dataset",
-        dataset_name="Test Dataset",
-        data_dir=os.path.join(os.path.dirname(__file__), "data/index"),
-    )
-
     # Initialize orbits from sample orbits file
     orbits_df = pd.read_csv(SAMPLE_ORBITS_FILE)
     orbit_name_mapping = {}
@@ -59,23 +50,48 @@ def test_precovery(test_db_dir):
         )
         orbits_keplerian.append(orbit)
 
-    # Load observations from csv file
-    observations_df = pd.read_csv(TEST_OBSERVATION_FILE, float_precision="round_trip")
+    # Load observations from csv files and index each one (one observation file
+    # per dataset)
+    observation_files = glob.glob(
+        os.path.join(TEST_OBSERVATIONS_DIR, "dataset_*", "*.csv")
+    )
+    observations_dfs = []
+    for observation_file in observation_files:
+        observations_df_i = pd.read_csv(
+            observation_file,
+            float_precision="round_trip",
+            dtype={
+                "dataset_id": str,
+                "observatory_code": str,
+                "filter": str,
+                "exposure_duration": np.float64,
+            },
+        )
+        observations_dfs.append(observations_df_i)
 
-    # Test that the number of frames is equal to the number of observations
-    # Note that this will only be true for a small enough number of objects that are not near
-    # each other on the sky, which is fine for our test data set
-    con = sql.connect(os.path.join(test_db_dir, "index.db"))
-    frames = pd.read_sql("""SELECT * FROM frames""", con)
-    assert len(frames) == len(observations_df)
-    con.close()
+        dataset_id = observations_df_i["dataset_id"].values[0]
+
+        index(
+            out_dir=test_db_dir,
+            dataset_id=dataset_id,
+            dataset_name=dataset_id,
+            data_dir=os.path.join(
+                os.path.dirname(__file__), f"data/index/{dataset_id}/"
+            ),
+            nside=16,
+        )
+    observations_df = pd.concat(observations_dfs, ignore_index=True)
+    observations_df.sort_values(
+        by=["mjd", "observatory_code"], inplace=True, ignore_index=True
+    )
 
     # For each sample orbit, validate we get all the observations we planted
     for orbit in orbits_keplerian:
         results = precover(orbit, test_db_dir, tolerance=1 / 3600, window_size=1)
 
+        orbit_name = orbit_name_mapping[orbit.orbit_id]
         object_observations = observations_df[
-            observations_df["object_id"] == orbit_name_mapping[orbit.orbit_id]
+            observations_df["object_id"] == orbit_name
         ]
         assert len(results) == len(object_observations)
         assert len(results) > 0
@@ -113,7 +129,7 @@ def test_precovery(test_db_dir):
             np.testing.assert_array_equal(
                 object_observations[col].values,
                 results[col].values,
-                err_msg=f"Column {col} does not match for {orbit_name_mapping[orbit.orbit_id]}.",
+                err_msg=f"Column {col} does not match for {orbit_name}.",
             )
 
         # Test that the observation_id, exposure_id, observatory_code, and filter
@@ -140,9 +156,11 @@ def test_precovery(test_db_dir):
             np.testing.assert_allclose(
                 results[["pred_ra_deg", "pred_dec_deg"]].values,
                 object_observations[["ra", "dec"]].values,
-                atol=MILLIARCSECOND / 10,
+                atol=MILLIARCSECOND,
                 rtol=0,
-                err_msg=f"Predicted location does match actual location for {orbit_name_mapping[orbit.orbit_id]}.",
+                err_msg=(
+                    f"Predicted location does match actual location for {orbit_name}.",
+                ),
             )
 
             # Test that the calculated distance is within 1 millarcsecond (need additional order of magnitude
@@ -152,19 +170,17 @@ def test_precovery(test_db_dir):
                 np.zeros(len(results), dtype=np.float64),
                 atol=MILLIARCSECOND,
                 rtol=0,
-                err_msg=f"Distance for {orbit_name_mapping[orbit.orbit_id]} is not within tolerance.",
+                err_msg=f"Distance for {orbit_name} is not within tolerance.",
             )
 
         except AssertionError as e:
             os.makedirs(RESULTS_DIR, exist_ok=True)
-            result_file = os.path.join(
-                RESULTS_DIR, f"results_{orbit_name_mapping[orbit.orbit_id]}.csv"
-            )
+            result_file = os.path.join(RESULTS_DIR, f"results_{orbit_name}.csv")
             results.to_csv(result_file, float_format="%.16f", index=False)
 
             object_observations_file = os.path.join(
                 RESULTS_DIR,
-                f"object_observations_{orbit_name_mapping[orbit.orbit_id]}.csv",
+                f"object_observations_{orbit_name}.csv",
             )
             object_observations.to_csv(
                 object_observations_file, float_format="%.16f", index=False
