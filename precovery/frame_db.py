@@ -781,8 +781,8 @@ class FrameDB:
         self.data_files[self._current_data_file_name(dataset_id, year_month_str)] = f
 
     def defragment(self, new_index: FrameIndex, new_db: "FrameDB"):
-        # obscode, filter, exposure_mjd_start, exposure_mjd_mid, exposure_duration, healpixel
-        cur_key = ("", "", 0.0, 0.0, 0.0, 0)
+        # dataset, obscode, filter, exposure_mjd_start, exposure_mjd_mid, exposure_duration, healpixel
+        cur_key = ("", "", "", 0.0, 0.0, 0.0, 0)
         observations = []
         last_exposure_id = ""
 
@@ -794,6 +794,7 @@ class FrameDB:
                 # First iteration
                 observations = list(self.iterate_observations(frame))
                 cur_key = (
+                    frame.dataset_id,
                     frame.obscode,
                     frame.filter,
                     frame.exposure_mjd_start,
@@ -803,6 +804,7 @@ class FrameDB:
                 )
                 last_exposure_id = frame.exposure_id
             elif (
+                frame.dataset_id,
                 frame.obscode,
                 frame.filter,
                 frame.exposure_mjd_start,
@@ -820,12 +822,13 @@ class FrameDB:
                 )
                 new_frame = HealpixFrame(
                     id=None,
-                    obscode=cur_key[0],
-                    filter=cur_key[1],
-                    exposure_mjd_start=cur_key[2],
-                    exposure_mjd_mid=cur_key[3],
-                    exposure_duration=cur_key[4],
-                    healpixel=cur_key[5],
+                    dataset_id=cur_key[0],
+                    obscode=cur_key[1],
+                    filter=cur_key[2],
+                    exposure_mjd_start=cur_key[3],
+                    exposure_mjd_mid=cur_key[4],
+                    exposure_duration=cur_key[5],
+                    healpixel=cur_key[6],
                     exposure_id=last_exposure_id,
                     data_uri=data_uri,
                     data_offset=offset,
@@ -835,6 +838,7 @@ class FrameDB:
 
                 observations = list(self.iterate_observations(frame))
                 cur_key = (
+                    frame.dataset_id,
                     frame.obscode,
                     frame.filter,
                     frame.exposure_mjd_start,
@@ -851,12 +855,13 @@ class FrameDB:
         )
         frame = HealpixFrame(
             id=None,
-            obscode=cur_key[0],
-            filter=cur_key[1],
-            exposure_mjd_start=cur_key[2],
-            exposure_mjd_mid=cur_key[3],
-            exposure_duration=cur_key[4],
-            healpixel=cur_key[5],
+            dataset_id=cur_key[0],
+            obscode=cur_key[1],
+            filter=cur_key[2],
+            exposure_mjd_start=cur_key[3],
+            exposure_mjd_mid=cur_key[4],
+            exposure_duration=cur_key[5],
+            healpixel=cur_key[6],
             exposure_id=last_exposure_id,
             data_uri=data_uri,
             data_offset=offset,
