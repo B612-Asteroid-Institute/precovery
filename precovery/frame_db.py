@@ -541,19 +541,18 @@ class FrameDB:
         for f in self.data_files.values():
             f.close()
 
-    def load_csv(
+    def add_dataset(
         self,
-        csv_file: str,
         dataset_id: str,
-        skip: int = 0,
-        limit: Optional[int] = None,
         name: Optional[str] = None,
         reference_doi: Optional[str] = None,
         documentation_url: Optional[str] = None,
         sia_url: Optional[str] = None,
     ):
-        """
-        Load data from a CSV observation file.
+        """Add a new (empty) dataset to the database.
+
+        If a dataset with the provided dataset_id already exists,
+        nothing happens.
 
         Parameters
         ----------
@@ -562,10 +561,6 @@ class FrameDB:
         dataset_id : str
             Name of dataset (should be the same for each observation file that
             comes from the same dataset).
-        skip : int, optional
-            Number of frames to skip in the file.
-        limit : int, optional
-            Maximum number of frames to load from the file. None means no limit.
         name : str, optional
             User-friendly name of the dataset.
         reference_doi : str, optional
@@ -574,38 +569,37 @@ class FrameDB:
             URL of any documentation describing the dataset.
         sia_url : str, optional
             Simple Image Access URL for accessing images for this particular dataset.
-        """
-        if dataset_id not in self.idx.get_dataset_ids():
-            logger.info(
-                f"Adding new entry into datasets table for dataset {dataset_id}."
-            )
-            dataset = Dataset(
-                id=dataset_id,
-                name=name,
-                reference_doi=reference_doi,
-                documentation_url=documentation_url,
-                sia_url=sia_url,
-            )
-            self.idx.add_dataset(dataset)
 
-        else:
+        """
+        if self.has_dataset(dataset_id):
             logger.info(
                 f"{dataset_id} dataset already has an entry in the datasets table."
             )
+            return
 
-        frames_to_add = []
-        for src_frame in sourcecatalog.iterate_frames(
-            csv_file,
-            limit,
-            nside=self.healpix_nside,
-            skip=skip,
-        ):
+        logger.info(f"Adding new entry into datasets table for dataset {dataset_id}.")
+        dataset = Dataset(
+            id=dataset_id,
+            name=name,
+            reference_doi=reference_doi,
+            documentation_url=documentation_url,
+            sia_url=sia_url,
+        )
+        self.idx.add_dataset(dataset)
+
+    def has_dataset(self, dataset_id: str) -> bool:
+        return dataset_id in self.idx.get_dataset_ids()
+
+    def add_frames(self, dataset_id: str, frames: Iterator[sourcecatalog.SourceFrame]):
+        """Adds many SourceFrames to the database. This includes both
+        writing binary observation data and storing frames in the
+        FrameIndex.
+
+        """
+        healpix_frames = []
+        for src_frame in frames:
             observations = [Observation.from_srcobs(o) for o in src_frame.observations]
-            year_month_str = "-".join(
-                Time(src_frame.exposure_mjd_mid, format="mjd", scale="utc").isot.split(
-                    "-"
-                )[:2]
-            )
+            year_month_str = self._compute_year_month_str(src_frame)
 
             # Write observations to disk
             data_uri, offset, length = self.store_observations(
@@ -626,9 +620,51 @@ class FrameDB:
                 data_offset=offset,
                 data_length=length,
             )
-            frames_to_add.append(frame)
 
-        self.idx.add_frames(frames_to_add)
+            healpix_frames.append(frame)
+
+        self.idx.add_frames(healpix_frames)
+
+    @staticmethod
+    def _compute_year_month_str(frame: sourcecatalog.SourceFrame) -> str:
+        """Gets the Year and Month parts of a SourceFrame's exposure
+        midpoint timestamp, and returns them in "YYYY-MM" format.
+
+        This is used as a partitioning key for observation data files.
+
+        """
+        time = Time(frame.exposure_mjd_mid, format="mjd", scale="utc")
+        return time.strftime("%Y-%m")
+
+    def load_csv(
+        self,
+        csv_file: str,
+        dataset_id: str,
+        skip: int = 0,
+        limit: Optional[int] = None,
+    ):
+        """
+        Load data from a CSV observation file.
+
+        Parameters
+        ----------
+        csv_file : str
+            Path to a file on disk.
+        dataset_id : str
+            Name of dataset (should be the same for each observation file that
+            comes from the same dataset).
+        skip : int, optional
+            Number of frames to skip in the file.
+        limit : int, optional
+            Maximum number of frames to load from the file. None means no limit.
+        """
+        frames = sourcecatalog.iterate_frames(
+            csv_file,
+            limit,
+            nside=self.healpix_nside,
+            skip=skip,
+        )
+        self.add_frames(dataset_id, frames)
 
     def _open_data_files(self):
         matcher = os.path.join(self.data_root, "**/frames*.data")
