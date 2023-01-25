@@ -23,7 +23,7 @@ repos:
       - toml
 
 - repo: https://github.com/psf/black
-  rev: 21.7b0
+  rev: 22.12.0
   hooks:
   - id: black
 
@@ -34,17 +34,3 @@ repos:
     additional_dependencies:
       - numpy
       - sqlalchemy
-
-- repo: https://github.com/jazzband/pip-tools
-  rev: 6.2.0
-  hooks:
-  - id: pip-compile
-    name: pip-compile dev-requirements.in
-    files: ^dev-requirements\.(in|txt)$
-    args:
-      - dev-requirements.in
-  - id: pip-compile
-    name: pip-compile requirements.in
-    files: ^requirements\.(in|txt)$
-    args:
-      - requirements.in
