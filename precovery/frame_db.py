@@ -39,10 +39,10 @@ class HealpixFrame:
 @dataclasses.dataclass
 class Dataset:
     id: str
-    name: str
-    reference_doi: str
-    documentation_url: str
-    sia_url: str
+    name: Optional[str]
+    reference_doi: Optional[str]
+    documentation_url: Optional[str]
+    sia_url: Optional[str]
 
 
 @dataclasses.dataclass
