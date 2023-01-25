@@ -1,5 +1,6 @@
 import argparse
 import os
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
@@ -166,14 +167,15 @@ def make_observations(
                 0, exposure_duration / 86400
             )
 
+
             ephemeris_list = orbit.compute_ephemeris(
                 observatory_code,
                 observation_times,
                 method=PropagationIntegrator.N_BODY,
                 time_scale=EpochTimescale.UTC,
             )
-
-            ephemeris_dict = {
+            
+            ephemeris_dict: Dict[str, List[float]] = {
                 "mjd": [],
                 "ra": [],
                 "dec": [],
