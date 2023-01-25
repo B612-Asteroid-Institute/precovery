@@ -642,15 +642,9 @@ class FrameDB:
         dataset_id: str,
         skip: int = 0,
         limit: Optional[int] = None,
-        name: Optional[str] = None,
-        reference_doi: Optional[str] = None,
-        documentation_url: Optional[str] = None,
-        sia_url: Optional[str] = None,
     ):
         """
         Load data from a CSV observation file.
-
-        Creates a new dataset if the given dataset_id is not already present.
 
         Parameters
         ----------
@@ -663,16 +657,7 @@ class FrameDB:
             Number of frames to skip in the file.
         limit : int, optional
             Maximum number of frames to load from the file. None means no limit.
-        name : str, optional
-            User-friendly name of the dataset.
-        reference_doi : str, optional
-            DOI of the reference paper for the dataset.
-        documentation_url : str, optional
-            URL of any documentation describing the dataset.
-        sia_url : str, optional
-            Simple Image Access URL for accessing images for this particular dataset.
         """
-        self.add_dataset(dataset_id, name, reference_doi, documentation_url, sia_url)
         frames = sourcecatalog.iterate_frames(
             csv_file,
             limit,
