@@ -792,7 +792,9 @@ class FrameDB:
 
         for frame in self.idx.all_frames():
             year_month_str = "-".join(
-                Time(frame.mjd, format="mjd", scale="utc").isot.split("-")[:2]
+                Time(frame.exposure_mjd_mid, format="mjd", scale="utc").isot.split("-")[
+                    :2
+                ]
             )
             if cur_key[0] == "":
                 # First iteration
