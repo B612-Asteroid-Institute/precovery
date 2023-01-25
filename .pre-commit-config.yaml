@@ -37,3 +37,4 @@ repos:
     additional_dependencies:
       - numpy
       - sqlalchemy
+      - types-requests
