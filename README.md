@@ -1,15 +1,15 @@
 # precovery: fast asteroid precovery at scale
-#### A Python package by the Asteroid Institute, a program of the B612 Foundation 
+#### A Python package by the Asteroid Institute, a program of the B612 Foundation
 [![Python 3.7+](https://img.shields.io/badge/Python-3.7%2B-blue)](https://img.shields.io/badge/Python-3.7%2B-blue)
 [![License](https://img.shields.io/badge/License-BSD%203--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
-[![DOI](https://zenodo.org/badge/414402801.svg)](https://zenodo.org/badge/latestdoi/414402801)  
+[![DOI](https://zenodo.org/badge/414402801.svg)](https://zenodo.org/badge/latestdoi/414402801)
 [![Python Package with conda](https://github.com/B612-Asteroid-Institute/precovery/actions/workflows/python-package-conda.yml/badge.svg)](https://github.com/B612-Asteroid-Institute/precovery/actions/workflows/python-package-conda.yml)
-[![Publish Python Package to conda](https://github.com/B612-Asteroid-Institute/precovery/actions/workflows/python-publish-conda.yml/badge.svg)](https://github.com/B612-Asteroid-Institute/precovery/actions/workflows/python-publish-conda.yml)  
+[![Publish Python Package to conda](https://github.com/B612-Asteroid-Institute/precovery/actions/workflows/python-publish-conda.yml/badge.svg)](https://github.com/B612-Asteroid-Institute/precovery/actions/workflows/python-publish-conda.yml)
 [![Anaconda-Server Badge](https://anaconda.org/asteroid-institute/precovery/badges/version.svg)](https://anaconda.org/asteroid-institute/precovery)
 [![Anaconda-Server Badge](https://anaconda.org/asteroid-institute/precovery/badges/platforms.svg)](https://anaconda.org/asteroid-institute/precovery)
-[![Anaconda-Server Badge](https://anaconda.org/asteroid-institute/precovery/badges/downloads.svg)](https://anaconda.org/asteroid-institute/precovery)  
+[![Anaconda-Server Badge](https://anaconda.org/asteroid-institute/precovery/badges/downloads.svg)](https://anaconda.org/asteroid-institute/precovery)
 
-## Installation 
+## Installation
 
 ### Docker
 You can build and use precovery using the Dockerfile and docker-compose.yml
@@ -18,14 +18,14 @@ You can build and use precovery using the Dockerfile and docker-compose.yml
 
 ### Conda
 
-To get the latest released version and install it into a conda environment:  
-`conda install -c asteroid-institute precovery`  
+To get the latest released version and install it into a conda environment:
+`conda install -c asteroid-institute precovery`
 
 ### Source
 
-To install the bleeding edge source code, clone this repository and then:  
+To install the bleeding edge source code, clone this repository and then:
 
-`pip install .`  
+`pip install .`
 
 **openorb**
 
@@ -35,7 +35,7 @@ to install it via source or conda. See the `Dockerfile` for example of how to bu
 ## Observation Schema
 ### Input CSV
 
-`precovery` expects a specific set of columns to be able to index observations into a search 
+`precovery` expects a specific set of columns to be able to index observations into a search
 efficient format. Input files should be sorted by ascending time.
 
 |Name|Unit|Type|Description|
@@ -55,7 +55,7 @@ efficient format. Input files should be sorted by ascending time.
 | exposure_duration | seconds | float | The length of the exposure |
 | observatory_code | None | str | MPC observatory code for the observatory/observing program |
 
-Note:  
+Note:
 ** The time at which the observation is reported may be different than the exposure midpoint time to account for effects such as shutter motion
 
 ## Precovery Results
@@ -82,9 +82,9 @@ Note:
 | pred_vra_degpday  | degree / day| float | Predicted velocity in Right Ascension (J2000) of the object at the time of the observation |
 | pred_vdec_degpday  | degree /day | float | Predicted velocity in Declination (J2000) of the object at the time of the observation |
 | delta_ra_arcsec  | arcsecond | float | Difference between predicted and observed Right Ascension (predicted - observed) |
-| delta_dec_arcsec  | arcsecond | float | Difference between predicted and observed Declination (predicted - observed) |   
+| delta_dec_arcsec  | arcsecond | float | Difference between predicted and observed Declination (predicted - observed) |
 | distance_arcsec  | arcsecond | float | Angular offset between the predicted location of the object and the obervation |
 | dataset_id  | None | str | Dataset ID from where the observation was precovered |
 
-Note:  
+Note:
 ** The time at which the observation is reported may be different than the exposure midpoint time to account for effects such as shutter motion
