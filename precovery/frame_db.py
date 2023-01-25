@@ -747,7 +747,11 @@ class FrameDB:
             self.new_data_file(dataset_id, year_month_str)
             f = self._current_data_file(dataset_id, year_month_str)
 
-        logger.info(f"Writing {len(observations)} observations to {f.name}")
+        if hasattr(observations, "__len__"):
+            logger.info(f"Writing {len(observations)} observations to {f.name}")
+        else:
+            logger.info(f"Writing stream of observations to {f.name}")
+
         f.seek(0, 2)  # seek to end
         start_pos = f.tell()
 
