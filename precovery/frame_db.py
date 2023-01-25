@@ -748,7 +748,7 @@ class FrameDB:
             f = self._current_data_file(dataset_id, year_month_str)
 
         if hasattr(observations, "__len__"):
-            logger.info(f"Writing {len(observations)} observations to {f.name}")
+            logger.info(f"Writing {len(observations)} observations to {f.name}")  # type: ignore
         else:
             logger.info(f"Writing stream of observations to {f.name}")
 
