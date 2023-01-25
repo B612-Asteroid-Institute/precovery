@@ -37,13 +37,13 @@ to install it via source or conda. See the `Dockerfile` for example of how to bu
 
 This project uses [pre-commit](https://pre-commit.com/) to run linters and code formatters.
 
-pre-commit sets the versions of these code analysis tools, and serves as an entrypoint for running them.;
+pre-commit sets the versions of these code analysis tools, and serves as an entrypoint for running them.
 
 ### pre-commit installation
 
 pre-commit is installed automatically inside the Docker container.
 
-If you're developing on yur local machine without Docker, install it
+If you're developing on your local machine without Docker, install it
 using either `pip install pre-commit` or `conda install -c conda-forge
 pre-commit`. Then, install the hooks with `pre-commit install-hooks`,
 run from the root of this repository. This will install all the
