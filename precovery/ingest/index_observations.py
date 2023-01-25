@@ -159,4 +159,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    index(**args)
+    index(**args)  # type: ignore
