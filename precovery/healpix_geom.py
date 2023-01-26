@@ -9,7 +9,6 @@ def radec_to_healpixel(
     nside: int,
     include_neighbors: bool = False,
 ) -> npt.NDArray[np.int64]:
-
     if not include_neighbors:
         return hp.ang2pix(nside, ra, dec, nest=True, lonlat=True).astype(np.int64)
     else:

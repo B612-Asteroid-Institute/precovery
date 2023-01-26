@@ -440,7 +440,8 @@ class FrameIndex:
         self, mjd_start: float, mjd_end: float
     ) -> Iterator[HealpixFrame]:
         """
-        Returns all frames in the index within a date range, sorted by obscode, exposure_mjd_mid, and healpixel.
+        Returns all frames in the index within a date range, sorted by obscode,
+        exposure_mjd_mid, and healpixel.
         """
         select_stmt = (
             sq.select(

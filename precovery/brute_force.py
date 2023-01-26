@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import multiprocessing as mp
 import os
@@ -11,7 +12,7 @@ import pandas as pd
 from astropy.time import Time
 from sklearn.neighbors import BallTree
 
-from precovery.precovery_db import PrecoveryDatabase
+from precovery.precovery_db import PrecoveryCandidate, PrecoveryDatabase
 
 from .healpix_geom import radec_to_healpixel
 from .orbit import Orbit
@@ -36,6 +37,14 @@ __all__ = [
 ]
 
 
+@dataclasses.dataclass
+class BruteForceAttribution(PrecoveryCandidate):
+    chi2: float
+    orbit_id: str
+    probability: float
+    mahalanobis_distance: float
+
+
 def get_frame_times_by_obscode(
     mjd_start: float,
     mjd_end: float,
@@ -58,7 +67,6 @@ def ephemerides_from_orbits(
     orbits: Iterable[Orbit],
     epochs: Iterable[tuple],
 ):
-
     ephemeris_dfs = []
     for orbit in orbits:
         for obscode in epochs.keys():
@@ -66,11 +74,15 @@ def ephemerides_from_orbits(
             mjd = [w.mjd for w in eph]
             ra = [w.ra for w in eph]
             dec = [w.dec for w in eph]
+            vra = [w.ra_velocity for w in eph]
+            vdec = [w.dec_velocity for w in eph]
             ephemeris_df = pd.DataFrame.from_dict(
                 {
                     "mjd_utc": mjd,
-                    "RA_deg": ra,
-                    "Dec_deg": dec,
+                    "ra_deg": ra,
+                    "dec_deg": dec,
+                    "vra_degperday": vra,
+                    "vdec_degperday": vdec,
                 }
             )
             ephemeris_df["orbit_id"] = orbit.orbit_id
@@ -86,11 +98,10 @@ def intersecting_frames(
     precovery_db: PrecoveryDatabase,
     neighbors=False,
 ):
-
     frame_identifier_dfs = []
-    healpixel = radec_to_healpixel(
-        list(ephemerides["RA_deg"]),
-        list(ephemerides["Dec_deg"]),
+    healpix_id = radec_to_healpixel(
+        list(ephemerides["ra_deg"]),
+        list(ephemerides["dec_deg"]),
         precovery_db.frames.healpix_nside,
         include_neighbors=neighbors,
     )
@@ -103,13 +114,13 @@ def intersecting_frames(
                 {
                     "mjd_utc": [x[0] for y in range(9)],
                     "obscode": [x[1] for y in range(9)],
-                    "healpixel": list(x[2]),
+                    "healpix_id": list(x[2]),
                 }
             )
             for x in zip(
                 ephemerides["mjd_utc"],
                 ephemerides["observatory_code"],
-                list(healpixel.transpose()),
+                list(healpix_id.transpose()),
             )
         ],
         ignore_index=True,
@@ -123,7 +134,7 @@ def intersecting_frames(
     filtered_frames = []
     for fi in unique_frame_identifier_df.itertuples():
         for f in precovery_db.frames.idx.frames_by_obscode_mjd_hp(
-            fi.obscode, fi.mjd_utc, fi.healpixel
+            fi.obscode, fi.mjd_utc, fi.healpix_id
         ):
             filtered_frames.append(f)
 
@@ -133,10 +144,9 @@ def intersecting_frames(
 def attribution_worker(
     ephemeris,
     observations,
-    eps=1 / 3600,
+    tolerance=1 / 3600,
     include_probabilistic=True,
 ):
-
     """
     gather attributions for a df of ephemerides, observations
 
@@ -144,6 +154,7 @@ def attribution_worker(
 
     """
 
+    attributions = []
     # Create observer's dictionary from observations
     observers = {}
     for observatory_code in observations["observatory_code"].unique():
@@ -166,7 +177,7 @@ def attribution_worker(
 
     ephemeris_pre_grouped = ephemeris.groupby(by=["observatory_code", "mjd_utc"])
     obs_group_keys = list(observations_grouped.groups.keys())
-    indices_to_drop = pd.Int64Index([])
+    indices_to_drop = pd.Index([], dtype="int64")
     for g_key in list(ephemeris_pre_grouped.groups.keys()):
         if g_key not in obs_group_keys:
             indices_to_drop = indices_to_drop.union(
@@ -182,39 +193,58 @@ def attribution_worker(
     ]
 
     # Loop through each unique exposure and visit, find the nearest observations within
-    # eps (haversine metric)
+    # tolerance (haversine metric)
     distances = []
     orbit_ids_associated = []
     obs_ids_associated = []
+    mag_associated = []
+    mag_sigma_associated = []
     obs_times_associated = []
-    eps_rad = np.radians(eps)
+    coords_associated = []
+    coords_pred_associated = []
+    velocities_associated = []
+    coords_sigma_associated = []
+    frame_metadata_associated = []
+    tolerance_rad = np.radians(tolerance)
     residuals = []
     stats = []
     for ephemeris_visit, observations_visit in zip(
         ephemeris_visits, observations_visits
     ):
-
         assert len(ephemeris_visit["mjd_utc"].unique()) == 1
         assert len(observations_visit["mjd_utc"].unique()) == 1
         assert (
             observations_visit["mjd_utc"].unique()[0]
             == ephemeris_visit["mjd_utc"].unique()[0]
         )
-
         obs_ids = observations_visit[["obs_id"]].values
         obs_times = observations_visit[["mjd_utc"]].values
+        mag = observations_visit[["mag"]].values
+        mag_sigma = observations_visit[["mag_sigma"]].values
         orbit_ids = ephemeris_visit[["orbit_id"]].values
-        coords = observations_visit[["RA_deg", "Dec_deg"]].values
-        coords_predicted = ephemeris_visit[["RA_deg", "Dec_deg"]].values
-        coords_sigma = observations_visit[["RA_sigma_deg", "Dec_sigma_deg"]].values
-
+        coords = observations_visit[["ra_deg", "dec_deg"]].values
+        coords_predicted = ephemeris_visit[["ra_deg", "dec_deg"]].values
+        velocities = ephemeris_visit[["vra_degperday", "vdec_degperday"]].values
+        coords_sigma = observations_visit[["ra_sigma_deg", "dec_sigma_deg"]].values
+        frame_metadata = observations_visit[
+            [
+                "exposure_mjd_start",
+                "exposure_mjd_mid",
+                "filter",
+                "observatory_code",
+                "exposure_id",
+                "exposure_duration",
+                "healpix_id",
+                "dataset_id",
+            ]
+        ].values
         # Haversine metric requires latitude first then longitude...
-        coords_latlon = np.radians(observations_visit[["Dec_deg", "RA_deg"]].values)
+        coords_latlon = np.radians(observations_visit[["dec_deg", "ra_deg"]].values)
         coords_predicted_latlon = np.radians(
-            ephemeris_visit[["Dec_deg", "RA_deg"]].values
+            ephemeris_visit[["dec_deg", "ra_deg"]].values
         )
-
         num_obs = len(coords_predicted)
+
         k = np.minimum(3, num_obs)
 
         # Build BallTree with a haversine metric on predicted ephemeris
@@ -231,12 +261,19 @@ def attribution_worker(
 
         # Select all observations with distance smaller or equal
         # to the maximum given distance
-        mask = np.where(d <= eps_rad)
+        mask = np.where(d <= tolerance_rad)
 
         if len(d[mask]) > 0:
             orbit_ids_associated.append(orbit_ids[i[mask]])
             obs_ids_associated.append(obs_ids[mask[0]])
             obs_times_associated.append(obs_times[mask[0]])
+            mag_associated.append(mag[mask[0]])
+            mag_sigma_associated.append(mag_sigma[mask[0]])
+            coords_associated.append(coords[mask[0]])
+            coords_pred_associated.append(coords_predicted[i[mask]])
+            velocities_associated.append(velocities[i[mask]])
+            coords_sigma_associated.append(coords_sigma[mask[0]])
+            frame_metadata_associated.append(frame_metadata[mask[0]])
             distances.append(d[mask].reshape(-1, 1))
 
             residuals_visit, stats_visit = calc_residuals(
@@ -253,39 +290,76 @@ def attribution_worker(
         orbit_ids_associated = np.vstack(orbit_ids_associated)
         obs_ids_associated = np.vstack(obs_ids_associated)
         obs_times_associated = np.vstack(obs_times_associated)
+        mag_associated = np.vstack(mag_associated)
+        mag_sigma_associated = np.vstack(mag_sigma_associated)
+        coords_associated = np.vstack(coords_associated)
+        coords_pred_associated = np.vstack(coords_pred_associated)
+        velocities_associated = np.vstack(velocities_associated)
+        coords_sigma_associated = np.vstack(coords_sigma_associated)
+        frame_metadata_associated = np.vstack(frame_metadata_associated)
         residuals = np.vstack(residuals)
         stats = np.vstack(stats)
 
-        attributions = {
-            "orbit_id": orbit_ids_associated[:, 0],
-            "obs_id": obs_ids_associated[:, 0],
-            "mjd_utc": obs_times_associated[:, 0],
-            "distance": distances[:, 0],
-            "residual_ra_arcsec": residuals[:, 0] * 3600,
-            "residual_dec_arcsec": residuals[:, 1] * 3600,
-            "chi2": stats[:, 0],
-        }
-        if include_probabilistic:
-            attributions["probability"] = stats[:, 1]
-            attributions["mahalanobis_distance"] = stats[:, 2]
-
-        attributions = pd.DataFrame(attributions)
-
-    else:
-        columns = [
-            "orbit_id",
-            "obs_id",
-            "mjd_utc",
-            "distance",
-            "residual_ra_arcsec",
-            "residual_dec_arcsec",
-            "chi2",
+        attributions = [
+            BruteForceAttribution(
+                mjd=mjd_utc[0],
+                ra_deg=coords[0],
+                dec_deg=coords[1],
+                ra_sigma_arcsec=coords_sigma[0] * 3600.0,
+                dec_sigma_arcsec=coords_sigma[1] * 3600.0,
+                mag=mag[0],
+                mag_sigma=mag_sigma[0],
+                observation_id=obs_id[0],
+                pred_ra_deg=coords_pred[0],
+                pred_dec_deg=coords_pred[1],
+                pred_vra_degpday=velocities[0],
+                pred_vdec_degpday=velocities[1],
+                delta_ra_arcsec=residual[0] * 3600.0,
+                delta_dec_arcsec=residual[1] * 3600.0,
+                distance_arcsec=distance[0] * 3600.0,
+                exposure_mjd_start=frame_metadata[0],
+                exposure_mjd_mid=frame_metadata[1],
+                filter=frame_metadata[2],
+                obscode=frame_metadata[3],
+                exposure_id=frame_metadata[4],
+                exposure_duration=frame_metadata[5],
+                healpix_id=frame_metadata[6],
+                dataset_id=frame_metadata[7],
+                chi2=stats[0],
+                orbit_id=orbit_id[0],
+                probability=stats[1],
+                mahalanobis_distance=stats[2],
+            )
+            for (
+                orbit_id,
+                obs_id,
+                mjd_utc,
+                mag,
+                mag_sigma,
+                distance,
+                residual,
+                coords,
+                coords_pred,
+                velocities,
+                coords_sigma,
+                stats,
+                frame_metadata,
+            ) in zip(
+                orbit_ids_associated,
+                obs_ids_associated,
+                obs_times_associated,
+                mag_associated,
+                mag_sigma_associated,
+                distances,
+                residuals,
+                coords_associated,
+                coords_pred_associated,
+                velocities_associated,
+                coords_sigma_associated,
+                stats,
+                frame_metadata_associated,
+            )
         ]
-        if include_probabilistic:
-            columns += ["probability", "mahalanobis_distance"]
-
-        attributions = pd.DataFrame(columns=columns)
-
     return attributions
 
 
@@ -294,22 +368,51 @@ def attribute_observations(
     mjd_start: float,
     mjd_end: float,
     precovery_db: PrecoveryDatabase,
-    eps=5 / 3600,
+    tolerance=5 / 3600,
     include_probabilistic=True,
-    backend="PYOORB",
-    backend_kwargs={},
-    orbits_chunk_size=10,
-    observations_chunk_size=100000,
+    orbits_chunk_size: int = 10,
+    observations_chunk_size: int = 100000,
     num_jobs: int = 1,
     obscodes_specified: Iterable[str] = [],
 ):
+    """
+
+
+    Parameters
+    ----------
+    orbits : list
+        List of Orbit objects to attribute observations to.
+    mjd_start : float
+        Start time of observations to attribute.
+    mjd_end : float
+        End time of observations to attribute.
+    precovery_db : PrecoveryDatabase
+        Precovery database to attribute observations from.
+    tolerance : float, optional
+        Tolerance in degrees to attribute observations to orbits, by default 5 / 3600
+    include_probabilistic : bool, optional
+        Whether to include probabilistic statistics in the attribution, by default True
+    orbits_chunk_size : int, optional
+        Number of orbits to attribute in each chunk, by default 10
+    observations_chunk_size : int, optional
+        Number of observations to attribute in each chunk, by default 100000
+    num_jobs : int, optional
+        Number of jobs to run in parallel, by default 1
+        Note that there is a very rare edge case when multiple versions of the same orbit
+        are provided - in this case the ballTree used will fail to consider all orbits
+        when computing nearest neighbors.
+    obscodes_specified : Iterable[str], optional
+        List of obscodes to attribute observations from, an empty list means no filter
+        is applied on the obscodes returned (i.e. every dataset is searched)
+    """
+
     logger.info("Running observation attribution...")
     time_start = time.time()
 
     num_orbits = len(orbits)
 
-    attribution_dfs = []
-
+    attribution_lists = []
+    observations = []
     epochs = get_frame_times_by_obscode(
         mjd_start,
         mjd_end,
@@ -321,7 +424,9 @@ def attribute_observations(
         ephemerides, precovery_db=precovery_db, neighbors=True
     )
     if len(frames_to_search) != 0:
-        observations = precovery_db.extract_observations_by_frames(frames_to_search)
+        observations = precovery_db.extract_observations_by_frames(
+            frames_to_search, include_frame_metadata=True
+        )
     else:
         warning = (
             "No intersecting frames were found. This is unlikely unless"
@@ -330,43 +435,46 @@ def attribute_observations(
         warnings.warn(warning, UserWarning)
         return []
     num_workers = min(num_jobs, mp.cpu_count() + 1)
-    if num_workers > 1:
 
+    logger.info(
+        "Splitting {} observations from {} frames over {} workers.".format(
+            len(observations),
+            len(frames_to_search),
+            num_workers,
+        )
+    )
+    if num_workers > 1:
         p = mp.Pool(processes=num_workers)
 
         # Send up to orbits_chunk_size orbits to each OD worker for processing
         chunk_size_ = calcChunkSize(
             num_orbits, num_workers, orbits_chunk_size, min_chunk_size=1
         )
-
         orbits_split = [
             orbits[i : i + chunk_size_] for i in range(0, len(orbits), chunk_size_)
         ]
 
         eph_split = []
-        for orbit_c in orbits.split(orbits_chunk_size):
+        for orbit_c in orbits_split:
             eph_split.append(
                 ephemerides[
                     ephemerides["orbit_id"].isin([orbit.orbit_id for orbit in orbit_c])
                 ]
             )
         for observations_c in yieldChunks(observations, observations_chunk_size):
-
             obs = [observations_c for i in range(len(orbits_split))]
-            attribution_dfs_i = p.starmap(
+            attribution_lists_i = p.starmap(
                 partial(
                     attribution_worker,
-                    eps=eps,
+                    tolerance=tolerance,
                     include_probabilistic=include_probabilistic,
-                    backend=backend,
-                    backend_kwargs=backend_kwargs,
                 ),
                 zip(
                     eph_split,
                     obs,
                 ),
             )
-            attribution_dfs += attribution_dfs_i
+            attribution_lists += attribution_lists_i
 
         p.close()
 
@@ -376,30 +484,36 @@ def attribute_observations(
                 orbits[i : i + orbits_chunk_size]
                 for i in range(0, len(orbits), orbits_chunk_size)
             ]:
-
                 eph_c = ephemerides[
                     ephemerides["orbit_id"].isin([orbit.orbit_id for orbit in orbit_c])
                 ]
-                attribution_df_i = attribution_worker(
+                attribution_list_i = attribution_worker(
                     eph_c,
                     observations_c,
-                    eps=eps,
+                    tolerance=tolerance,
                     include_probabilistic=include_probabilistic,
                 )
-                attribution_dfs.append(attribution_df_i)
+                attribution_lists.append(attribution_list_i)
 
-    attributions = pd.concat(attribution_dfs)
-    attributions.sort_values(
-        by=["orbit_id", "mjd_utc", "distance"], inplace=True, ignore_index=True
+    # Flatten the list of attribution lists
+    attributions = [
+        attribution
+        for attribution_list in attribution_lists
+        for attribution in attribution_list
+    ]
+    attribution_df = pd.DataFrame(attributions)
+    attribution_df.sort_values(
+        by=["orbit_id", "mjd", "distance_arcsec"], inplace=True, ignore_index=True
     )
-
     time_end = time.time()
     logger.info(
-        "Attributed {} observations to {} orbits.".format(
-            attributions["obs_id"].nunique(), attributions["orbit_id"].nunique()
+        "Attributed {} observations ({} unique) to {} orbits.".format(
+            attribution_df["observation_id"].count(),
+            attribution_df["observation_id"].nunique(),
+            attribution_df["orbit_id"].nunique(),
         )
     )
     logger.info(
         "Attribution completed in {:.3f} seconds.".format(time_end - time_start)
     )
-    return attributions
+    return attributions, attribution_df

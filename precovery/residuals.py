@@ -79,7 +79,6 @@ def calc_residuals(
         )
         stats = (chi2, p, d)
     else:
-
         stats = (chi2,)
 
     return residuals, stats

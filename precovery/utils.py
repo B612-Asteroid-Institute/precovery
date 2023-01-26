@@ -1,6 +1,4 @@
 import logging
-import multiprocessing as mp
-import signal
 
 import numpy as np
 import pandas as pd
@@ -34,7 +32,10 @@ def yieldChunks(indexable, chunk_size):
         for c in range(0, len(indexable), chunk_size):
             yield indexable.iloc[c : c + chunk_size]
     else:
-        err = "Indexable should be one of {list, `~numpy.ndarray`, `~pandas.DataFrame`, `~pandas.Series`}"
+        err = (
+            "Indexable should be one of {list, `~numpy.ndarray`, `~pandas.DataFrame`,"
+            " `~pandas.Series`}"
+        )
         raise ValueError(err)
 
 

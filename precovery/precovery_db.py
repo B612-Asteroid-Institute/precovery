@@ -500,17 +500,21 @@ class PrecoveryDatabase:
                 n_frame += 1
             logger.info("checked %d frames", n_frame)
 
-    def extract_observations_by_frames(self, frames: Iterable[HealpixFrame]):
+    def extract_observations_by_frames(
+        self, frames: Iterable[HealpixFrame], include_frame_metadata=False
+    ):
         # consider warnings for available memory
         obs_out = pd.DataFrame(
             columns=[
                 "observatory_code",
-                "healpixel",
+                "healpix_id",
                 "obs_id",
-                "RA_deg",
-                "Dec_deg",
-                "RA_sigma_deg",
-                "Dec_sigma_deg",
+                "ra_deg",
+                "dec_deg",
+                "ra_sigma_deg",
+                "dec_sigma_deg",
+                "mag",
+                "mag_sigma",
                 "mjd_utc",
             ]
         )
@@ -519,12 +523,24 @@ class PrecoveryDatabase:
         # over loop, build dataframe of observations within each frame with shared frame scalars
         for frame in frames:
             # can't mix numpy array types, so two accumulators: one for floats, one for obs_id strings
-            inc_arr = np.empty((0, 5), float)
+            inc_arr = np.empty((0, 7), float)
             obs_ids = np.empty((0, 1), object)
             for obs in self.frames.iterate_observations(frame):
                 inc_arr = np.append(
                     inc_arr,
-                    np.array([[obs.ra, obs.dec, obs.ra_sigma, obs.dec_sigma, obs.mjd]]),
+                    np.array(
+                        [
+                            [
+                                obs.ra,
+                                obs.dec,
+                                obs.ra_sigma,
+                                obs.dec_sigma,
+                                obs.mag,
+                                obs.mag_sigma,
+                                obs.mjd,
+                            ]
+                        ]
+                    ),
                     axis=0,
                 )
                 obs_ids = np.append(
@@ -536,16 +552,28 @@ class PrecoveryDatabase:
                 frame_obs = pd.DataFrame(
                     inc_arr,
                     columns=[
-                        "RA_deg",
-                        "Dec_deg",
-                        "RA_sigma_deg",
-                        "Dec_sigma_deg",
+                        "ra_deg",
+                        "dec_deg",
+                        "ra_sigma_deg",
+                        "dec_sigma_deg",
+                        "mag",
+                        "mag_sigma",
                         "mjd_utc",
                     ],
                 )
-                frame_obs.insert(0, "observatory_code", frame.obscode)
-                frame_obs.insert(1, "healpixel", frame.healpixel)
-                frame_obs.insert(2, "obs_id", obs_ids)
+
+                frame_obs.insert(0, "obs_id", obs_ids)
+                if include_frame_metadata:
+                    frame_obs.insert(0, "observatory_code", frame.obscode)
+                    frame_obs.insert(1, "healpix_id", frame.healpixel)
+                    frame_obs.insert(2, "frame_id", frame.id)
+                    frame_obs.insert(3, "exposure_id", frame.exposure_id)
+                    frame_obs.insert(4, "exposure_mjd_start", frame.exposure_mjd_start)
+                    frame_obs.insert(5, "exposure_mjd_mid", frame.exposure_mjd_mid)
+                    frame_obs.insert(6, "exposure_duration", frame.exposure_duration)
+                    frame_obs.insert(7, "dataset_id", frame.dataset_id)
+                    frame_obs.insert(7, "filter", frame.filter)
+
                 frame_dfs.append(frame_obs)
         obs_out = pd.concat(frame_dfs)
         return obs_out

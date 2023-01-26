@@ -38,9 +38,7 @@ def dataframe_to_orbit(
     """
     orbits = []
     for i in range(len(orbits_df)):
-
         if orbit_type == "keplerian":
-
             orbit_i = Orbit.keplerian(
                 i,
                 orbits_df["a"].values[i],
@@ -56,7 +54,6 @@ def dataframe_to_orbit(
             )
 
         elif orbit_type == "cometary":
-
             # Extract time of perihelion passage
             tp = Time(
                 orbits_df["tp"].values[i],
@@ -205,7 +202,6 @@ def make_observations(
 
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser(
         description="Get orbits of sample targets from JPL's Small-Body Database."
     )
