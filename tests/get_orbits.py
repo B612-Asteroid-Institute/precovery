@@ -101,7 +101,6 @@ def get_sample_orbits(targets: list[str]) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser(
         description="Get orbits of sample targets from JPL's Small-Body Database."
     )

@@ -305,6 +305,19 @@ class FrameIndex:
         row = self.dbconn.execute(stmt).fetchone()
         return row[0]
 
+    def unique_frame_times(self) -> Iterable[float]:
+        """
+        return unique values of mjd among all frames.
+
+        This is needed for brute force propagation to each time,
+        prior to extraction of observations
+        """
+        select_stmt = sq.select(
+            self.frames.c.exposure_mjd_mid, self.frames.c.obscode
+        ).distinct()
+        mjd_obscode_pairs = self.dbconn.execute(select_stmt).fetchall()
+        return [(x[0], x[1]) for x in mjd_obscode_pairs]
+
     def frames_for_bundle(
         self, bundle: FrameBundleDescription
     ) -> Iterator[HealpixFrame]:
@@ -420,6 +433,82 @@ class FrameIndex:
             self.frames.c.healpixel,
         )
         result = self.dbconn.execute(stmt)
+        for row in result:
+            yield HealpixFrame(*row)
+
+    def frames_by_date(
+        self, mjd_start: float, mjd_end: float
+    ) -> Iterator[HealpixFrame]:
+        """
+        Returns all frames in the index within a date range, sorted by obscode,
+        exposure_mjd_mid, and healpixel.
+        """
+        select_stmt = (
+            sq.select(
+                self.frames.c.id,
+                self.frames.c.dataset_id,
+                self.frames.c.obscode,
+                self.frames.c.exposure_id,
+                self.frames.c.filter,
+                self.frames.c.exposure_mjd_mid,
+                self.frames.c.healpixel,
+                self.frames.c.data_uri,
+                self.frames.c.data_offset,
+                self.frames.c.data_length,
+            )
+            .where(
+                self.frames.c.mjd >= mjd_start,
+                self.frames.c.mjd <= mjd_end,
+            )
+            .order_by(
+                self.frames.c.obscode,
+                self.frames.c.exposure_mjd_mid,
+                self.frames.c.healpixel,
+            )
+        )
+        result = self.dbconn.execute(select_stmt)
+        for row in result:
+            yield HealpixFrame(*row)
+
+    def frames_by_obscode_mjd_hp(
+        self, obscode: str, mjd: float, healpixel: int
+    ) -> Iterator[HealpixFrame]:
+        """
+        Returns all frames in the index for a particular obscode, mjd, healpixel.
+
+        TODO, this can be performed at an nside value lower than the nside value
+        that the database is indexed to, in which case it will include intersecting frames
+        at that less-granular healpixel grid.
+        """
+
+        select_stmt = (
+            sq.select(
+                self.frames.c.id,
+                self.frames.c.dataset_id,
+                self.frames.c.obscode,
+                self.frames.c.exposure_id,
+                self.frames.c.filter,
+                self.frames.c.exposure_mjd_start,
+                self.frames.c.exposure_mjd_mid,
+                self.frames.c.exposure_duration,
+                self.frames.c.healpixel,
+                self.frames.c.data_uri,
+                self.frames.c.data_offset,
+                self.frames.c.data_length,
+            )
+            .where(
+                self.frames.c.exposure_mjd_mid >= mjd - 1e-7,
+                self.frames.c.exposure_mjd_mid <= mjd + 1e-7,
+                self.frames.c.obscode == obscode,
+                self.frames.c.healpixel == healpixel,
+            )
+            .order_by(
+                self.frames.c.obscode,
+                self.frames.c.exposure_mjd_mid,
+                self.frames.c.healpixel,
+            )
+        )
+        result = self.dbconn.execute(select_stmt)
         for row in result:
             yield HealpixFrame(*row)
 

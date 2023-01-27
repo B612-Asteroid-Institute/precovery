@@ -117,3 +117,4 @@ volume/
 out/
 database/
 precovery/version.py
+.DS_Store
