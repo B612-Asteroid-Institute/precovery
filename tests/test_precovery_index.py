@@ -26,7 +26,11 @@ def test_db_dir():
     shutil.rmtree(out_dir)
 
 
-def test_precovery(test_db_dir):
+precovery_algorithms = ["nelson", "bruteforce"]
+
+
+@pytest.mark.parametrize("algorithm", precovery_algorithms)
+def test_precovery(test_db_dir, algorithm):
     """
     Given a properly formatted h5 file, ensure the observations are indexed properly
     """
@@ -71,7 +75,9 @@ def test_precovery(test_db_dir):
 
     # For each sample orbit, validate we get all the observations we planted
     for orbit in orbits_keplerian:
-        results = precover(orbit, test_db_dir, tolerance=1 / 3600, window_size=1)
+        results = precover(
+            orbit, test_db_dir, tolerance=1 / 3600, window_size=1, algorithm=algorithm
+        )
 
         object_observations = observations_df[
             observations_df["object_id"] == orbit_name_mapping[orbit.orbit_id]

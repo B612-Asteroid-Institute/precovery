@@ -5,7 +5,7 @@ import os
 import time
 import warnings
 from functools import partial
-from typing import Iterable
+from typing import Iterable, Optional
 
 import numpy as np
 import pandas as pd
@@ -46,15 +46,18 @@ class BruteForceAttribution(PrecoveryCandidate):
 
 
 def get_frame_times_by_obscode(
-    mjd_start: float,
-    mjd_end: float,
     precovery_db: PrecoveryDatabase,
+    mjd_start: Optional[float] = None,
+    mjd_end: Optional[float] = None,
     obscodes_specified: Iterable[str] = [],
 ):
     all_frame_mjd = precovery_db.frames.idx.unique_frame_times()
-    frame_mjd_within_range = [
-        x for x in all_frame_mjd if (x[0] > mjd_start and x[0] < mjd_end)
-    ]
+    if (mjd_start is None) and (mjd_end is None):
+        frame_mjd_within_range = all_frame_mjd
+    else:
+        frame_mjd_within_range = [
+            x for x in all_frame_mjd if (x[0] > mjd_start and x[0] < mjd_end)
+        ]
     frame_mjds_by_obscode = dict()
     for exposure_mjd_mid, obscode in frame_mjd_within_range:
         if len(obscodes_specified) == 0 or obscode in obscodes_specified:
@@ -280,7 +283,7 @@ def attribution_worker(
                 coords[mask[0]],
                 coords_predicted[i[mask]],
                 sigmas_actual=coords_sigma[mask[0]],
-                include_probabilistic=True,
+                include_probabilistic=include_probabilistic,
             )
             residuals.append(residuals_visit)
             stats.append(np.vstack(stats_visit).T)
@@ -299,7 +302,6 @@ def attribution_worker(
         frame_metadata_associated = np.vstack(frame_metadata_associated)
         residuals = np.vstack(residuals)
         stats = np.vstack(stats)
-
         attributions = [
             BruteForceAttribution(
                 mjd=mjd_utc[0],
@@ -325,10 +327,10 @@ def attribution_worker(
                 exposure_duration=frame_metadata[5],
                 healpix_id=frame_metadata[6],
                 dataset_id=frame_metadata[7],
-                chi2=stats[0],
+                chi2=None if not include_probabilistic else stats[0],
                 orbit_id=orbit_id[0],
-                probability=stats[1],
-                mahalanobis_distance=stats[2],
+                probability=None if not include_probabilistic else stats[1],
+                mahalanobis_distance=None if not include_probabilistic else stats[2],
             )
             for (
                 orbit_id,
@@ -365,9 +367,9 @@ def attribution_worker(
 
 def attribute_observations(
     orbits,
-    mjd_start: float,
-    mjd_end: float,
     precovery_db: PrecoveryDatabase,
+    mjd_start: Optional[float] = None,
+    mjd_end: Optional[float] = None,
     tolerance=5 / 3600,
     include_probabilistic=True,
     orbits_chunk_size: int = 10,
@@ -414,9 +416,9 @@ def attribute_observations(
     attribution_lists = []
     observations = []
     epochs = get_frame_times_by_obscode(
-        mjd_start,
-        mjd_end,
         precovery_db=precovery_db,
+        mjd_start=mjd_start,
+        mjd_end=mjd_end,
         obscodes_specified=obscodes_specified,
     )
     ephemerides = ephemerides_from_orbits(orbits, epochs)

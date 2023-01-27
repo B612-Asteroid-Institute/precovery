@@ -3,6 +3,7 @@ from typing import List, Optional, Union
 import numpy as np
 import pandas as pd
 
+from .brute_force import attribute_observations
 from .orbit import Orbit
 from .precovery_db import FrameCandidate, PrecoveryCandidate, PrecoveryDatabase
 
@@ -53,6 +54,7 @@ def precover(
     window_size: int = 7,
     include_frame_candidates: bool = False,
     algorithm: Optional[str] = "nelson",
+    include_probabilistic: bool = False,
 ) -> List[Union[PrecoveryCandidate, FrameCandidate]]:
     """
     Connect to database directory and run precovery for the input orbit.
@@ -94,6 +96,10 @@ def precover(
         for negative observation campaigns. Note that camera footprints are not modeled, all datasets
         are mapped onto a Healpixel space and this simply returns the Healpixel equivalent exposure
         information.
+    include_probablilistic : bool, optional, default False
+        In the case of 'bruteforce' algorithm, include probabilistic information in the matches
+        output. These include the candidate chi2, probability, and mahalanobis distance. Note that
+        the return type will be a BruteForceAttribution, which extends the PrecoveryCandidate class.
 
     Returns
     -------
@@ -120,18 +126,14 @@ def precover(
             )
         ]
     elif algorithm == "bruteforce":
-        candidates = [
-            c
-            for c in precovery_db.precover(
-                orbit,
-                tolerance=tolerance,
-                max_matches=max_matches,
-                start_mjd=start_mjd,
-                end_mjd=end_mjd,
-                window_size=window_size,
-                include_frame_candidates=include_frame_candidates,
-            )
-        ]
+        candidates, attribution_df = attribute_observations(
+            [orbit],
+            precovery_db=precovery_db,
+            mjd_start=start_mjd,
+            mjd_end=end_mjd,
+            tolerance=tolerance,
+            include_probabilistic=include_probabilistic,
+        )
 
     df = pd.DataFrame(_candidates_to_dict(candidates))
     df.loc[:, "observation_id"] = df.loc[:, "observation_id"].astype(str)
