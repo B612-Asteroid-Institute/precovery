@@ -17,13 +17,13 @@ jobs:
       - uses: jpribyl/action-docker-layer-caching@v0.1.0
         # Ignore the failure of a step and avoid terminating the job.
         continue-on-error: true
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-        with:
-          install: true
       - name: Build Precovery in Docker
-        run: docker build --load -t precovery:$IMAGE_TAG .
-      - name: lint
-        run: docker run -i precovery:$IMAGE_TAG pre-commit run --all-files
-      - name: lint tests
+        run: docker build -t precovery:$IMAGE_TAG .
+      - name: isort check
+        run:  docker run -i precovery:$IMAGE_TAG isort --check-only .
+      - name: black format check
+        run:  docker run -i precovery:$IMAGE_TAG black --check --diff .
+      - name: flake8
+        run:  docker run -i precovery:$IMAGE_TAG flake8
+      - name: unit tests
         run: docker run -i precovery:$IMAGE_TAG pytest --exitfirst .

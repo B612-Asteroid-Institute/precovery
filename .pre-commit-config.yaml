@@ -1,25 +1,22 @@
 # See https://pre-commit.com for more information
 # See https://pre-commit.com/hooks.html for more hooks
-default_language_version:
-  python: python3.10
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.4.0
+    rev: v3.2.0
     hooks:
     -   id: trailing-whitespace
-        args: [--markdown-linebreak-ext=md]
     -   id: end-of-file-fixer
     -   id: check-yaml
     -   id: check-added-large-files
 
 
 - repo: https://github.com/PyCQA/flake8
-  rev: 6.0.0
+  rev: 3.9.2
   hooks:
   - id: flake8
 
 - repo: https://github.com/PyCQA/isort
-  rev: 5.11.4
+  rev: 5.8.0
   hooks:
   - id: isort
     additional_dependencies:
@@ -31,7 +28,7 @@ repos:
   - id: black
 
 - repo: https://github.com/pre-commit/mirrors-mypy
-  rev: v0.991
+  rev: v0.910
   hooks:
   - id: mypy
     additional_dependencies:

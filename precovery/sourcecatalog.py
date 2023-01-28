@@ -132,9 +132,9 @@ def iterate_observations(filename: str) -> Iterator[SourceObservation]:
         csv_reader = csv.DictReader(csv_file)
         for row in csv_reader:
             obs = SourceObservation(
-                exposure_id=str(row["exposure_id"]),
-                obscode=str(row["observatory_code"]),
-                id=str(row["obs_id"]).encode(),
+                exposure_id=row["exposure_id"],
+                obscode=row["observatory_code"],
+                id=row["obs_id"].encode(),
                 mjd=float(row["mjd"]),
                 ra=float(row["ra"]),
                 dec=float(row["dec"]),
@@ -142,7 +142,7 @@ def iterate_observations(filename: str) -> Iterator[SourceObservation]:
                 dec_sigma=float(row["dec_sigma"]),
                 mag=float(row["mag"]),
                 mag_sigma=float(row["mag_sigma"]),
-                filter=str(row["filter"]),
+                filter=row["filter"],
                 exposure_mjd_start=float(row["exposure_mjd_start"]),
                 exposure_mjd_mid=float(row["exposure_mjd_mid"]),
                 exposure_duration=float(row["exposure_duration"]),

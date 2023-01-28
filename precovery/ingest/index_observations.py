@@ -43,16 +43,13 @@ def index_individual_file(
 
     # Initialize the database client within the worker.
     db = PrecoveryDatabase.from_dir(db_dir, mode="w")
-    db.frames.add_dataset(
-        dataset_id=dataset_id,
+    db.frames.load_csv(
+        filename,
+        dataset_id,
         name=dataset_name,
         reference_doi=reference_doi,
         documentation_url=documentation_url,
         sia_url=sia_url,
-    )
-    db.frames.load_csv(
-        filename,
-        dataset_id,
     )
     logger.info(f"Indexed {filename}")
 

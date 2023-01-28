@@ -424,16 +424,12 @@ class PrecoveryDatabase:
                 )
                 dras = pred_ras - obs_ras
                 ddecs = pred_decs - obs_decs
-                # Filter to observations with distance below tolerance
+                # filter to observations with distance below tolerance
                 idx = distances < tolerance
-                distances_filtered = distances[idx]
-                dras_filtered = dras[idx]
-                ddecs_filtered = ddecs[idx]
-                obs_filtered = obs[idx]
-                pred_ras_filtered = pred_ras[idx]
-                pred_decs_filtered = pred_decs[idx]
-                pred_vras_filtered = pred_vras[idx]
-                pred_vdecs_filtered = pred_vdecs[idx]
+                distances = distances[idx]
+                dras = dras[idx]
+                ddecs = ddecs[idx]
+                obs = obs[idx]
                 for (
                     o,
                     pred_ra,
@@ -444,14 +440,14 @@ class PrecoveryDatabase:
                     dra,
                     ddec,
                 ) in zip(
-                    obs_filtered,
-                    pred_ras_filtered,
-                    pred_decs_filtered,
-                    pred_vras_filtered,
-                    pred_vdecs_filtered,
-                    distances_filtered,
-                    dras_filtered,
-                    ddecs_filtered,
+                    obs,
+                    pred_ras,
+                    pred_decs,
+                    pred_vras,
+                    pred_vdecs,
+                    distances,
+                    dras,
+                    ddecs,
                 ):
                     candidate = PrecoveryCandidate(
                         mjd=o.mjd,
@@ -480,15 +476,8 @@ class PrecoveryDatabase:
                     )
                     yield candidate
 
-                logger.info(
-                    f"checked {n_obs} observations in frame and found {len(obs_filtered)}"
-                )
-                # If no observations were found in this frame then we
-                # yield a frame candidate if desired
-                # Note that for the frame candidate we report the predicted
-                # ephemeris at the exposure midpoint not at the observation
-                # times which may differ from the exposure midpoint time
-                if (len(obs_filtered) == 0) and (include_frame_candidates):
+                logger.info("checked %d observations in frame", n_obs)
+                if (n_obs == 0) and (include_frame_candidates):
                     frame_candidate = FrameCandidate(
                         exposure_mjd_start=f.exposure_mjd_start,
                         exposure_mjd_mid=f.exposure_mjd_mid,
@@ -497,10 +486,10 @@ class PrecoveryDatabase:
                         exposure_id=f.exposure_id,
                         exposure_duration=f.exposure_duration,
                         healpix_id=healpix_id,
-                        pred_ra_deg=exact_ephem.ra,
-                        pred_dec_deg=exact_ephem.dec,
-                        pred_vra_degpday=exact_ephem.ra_velocity,
-                        pred_vdec_degpday=exact_ephem.dec_velocity,
+                        pred_ra_deg=pred_ra,
+                        pred_dec_deg=pred_dec,
+                        pred_vra_degpday=pred_vra,
+                        pred_vdec_degpday=pred_vdec,
                         dataset_id=f.dataset_id,
                     )
                     yield frame_candidate

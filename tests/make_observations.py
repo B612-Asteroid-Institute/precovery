@@ -11,7 +11,9 @@ from precovery.orbit import EpochTimescale, Orbit, PropagationIntegrator
 SAMPLE_ORBITS_FILE = os.path.join(
     os.path.dirname(__file__), "data", "sample_orbits.csv"
 )
-TEST_OBSERVATIONS_DIR = os.path.join(os.path.dirname(__file__), "data/index")
+TEST_OBSERVATION_FILE = os.path.join(
+    os.path.dirname(__file__), "data/index", "observations.csv"
+)
 
 
 def dataframe_to_orbit(
@@ -85,20 +87,17 @@ def dataframe_to_orbit(
 
 
 def make_observations(
-    orbits_df: pd.DataFrame,
-    orbit_type: str = "keplerian",
+    orbits_df: pd.DataFrame, orbit_type: str = "keplerian"
 ) -> pd.DataFrame:
     """
-    Makes 3 synthetic observations files to use for testing. Orbits are read from the input dataframe
+    Make a synthetic observations file to use for testing. Orbits are read from the input dataframe
     into the Orbit class. Setting orbit_type will determine which representation of the orbit
     should be used to generate the observations.
 
-    Observations are created with the following cadence: 4 observations per day for 2 weeks per observatory.
-    Each observatory will be offset by 10 days from the previous observatory so that we have overlapping
-    and non-overlapping coverage between observatories. Each nightly observation is seperated by 30 minutes.
-    The epoch of each orbit is used as the start time of the 2-week observation period. The exposure duration
-    is 30, 60, 90, and 120 seconds for each nightly observation quadruplet. The last two observatories are
-    combined into one dataset to test multi-observatory functionality.
+    Observations are created with the following cadence: 4 observations per day for 2 weeks.
+    Each observations is seperated by 30 minutes. The epoch of each orbit is used as the start time
+    of the 2-week observation period. The exposure duration is 30, 60, 90, and 120 seconds for each
+    nightly observaion quadruplet.
 
     Parameters
     ----------
@@ -116,28 +115,25 @@ def make_observations(
     orbit_ids = orbits_df["orbit_name"].values
     orbits = dataframe_to_orbit(orbits_df, orbit_type=orbit_type)
 
-    # Create list of observatory codes, each observatory code will be placed into
-    # its own dataset, with the exception of the last two which will be combined into one
-    observatory_codes = ["500", "I11", "I41", "F51"]
-
-    # Each observatory is offset by a fixed amount from the start of the observation period ( approximate
-    # location on Earth relative to GMT)
-    observatory_nightly_offsets = [0, -5 / 24, -7 / 24, -10 / 24]
-
-    # Each observatory's observation window is offset so we create overlapping and non-overlapping coverage
-    observatory_window_offsets = [0, 10, 20, 30]
-
-    # Four observations daily for 2 weeks
-    dts = np.linspace(0, 14, 14 * 2)
+    # Four observations daily for two weeks
+    dts = np.linspace(0, 14, 15)
     dts = np.concatenate(
         [dts, dts + 1 / 24 / 2, dts + 1 / 24, dts + 1 / 24 + 1 / 24 / 2]
     )
     dts.sort()
 
-    # Create exposure quads
+    # Create exposure triplets
     unique_exposure_durations = np.array([30.0, 60.0, 90.0, 120.0])
     num_obs = int(len(dts) / len(unique_exposure_durations))
     exposure_duration = np.hstack([unique_exposure_durations for i in range(num_obs)])
+
+    # Create list of observatory codes
+    OBSERVATORY_CODES = ["500", "I11", "I41", "F51"]
+    observatory_codes = [
+        OBSERVATORY_CODES[j]
+        for j in range(len(unique_exposure_durations))
+        for i in range(num_obs)
+    ]
 
     # Set random seed
     rng = np.random.default_rng(seed=2023)
@@ -146,27 +142,22 @@ def make_observations(
     for i, orbit in enumerate(orbits):
         initial_epoch = Time(orbit._epoch, scale="tt", format="mjd")
 
-        ephemeris_list = []
-        for (
-            observatory_code,
-            observatory_nightly_offset,
-            observatory_window_offset,
-        ) in zip(
-            observatory_codes, observatory_nightly_offsets, observatory_window_offsets
-        ):
-            # Calculate a random offset from the start of the exposure
-            # to give each observation a unique obervation time
-            exposure_start_times = (
-                initial_epoch.utc.mjd
-                + dts
-                + observatory_nightly_offset
-                + observatory_window_offset
-            )
-            exposure_mid_times = exposure_start_times + exposure_duration / 2 / 86400
-            observation_times = exposure_start_times + rng.uniform(
-                0, exposure_duration / 86400
-            )
+        # Calculate a random offset from the start of the exposure
+        # to give each observation a unique obervation time
+        offset_from_start = rng.uniform(dts, dts + exposure_duration / 86400)
+        observation_times = initial_epoch.utc.mjd + offset_from_start
+        exposure_ids = [f"{obs_i}_{k:06d}" for k, obs_i in enumerate(observatory_codes)]
 
+        ephemeris_list = []
+        for obs_i, time_i in zip(observatory_codes, observation_times):
+            ephemeris_list.append(
+                orbit.compute_ephemeris(
+                    obs_i,
+                    [time_i],
+                    method=PropagationIntegrator.N_BODY,
+                    time_scale=EpochTimescale.UTC,
+                )[0]
+            )
 
             ephemeris_list = orbit.compute_ephemeris(
                 observatory_code,
@@ -213,24 +204,8 @@ def make_observations(
             ephemeris_dfs.append(ephemeris_df)
 
     observations = pd.concat(ephemeris_dfs, ignore_index=True)
+    observations.sort_values(by=["exposure_mjd_mid", "observatory_code"], inplace=True)
     observations.insert(1, "obs_id", [f"obs_{i:08d}" for i in range(len(observations))])
-
-    for observatory_code in ["500", "I11"]:
-        observations.loc[
-            observations["observatory_code"] == observatory_code, "dataset_id"
-        ] = f"dataset_{observatory_code}"
-
-    # Combine I41 and F51 into one dataset
-    observations.loc[
-        observations["observatory_code"].isin(["I41", "F51"]), "dataset_id"
-    ] = "dataset_I41+F51"
-
-    observations["exposure_id"] = observations[
-        ["observatory_code", "exposure_mjd_mid"]
-    ].apply(lambda x: f"{x[0]}_{x[1]:.5f}", axis=1)
-    observations.sort_values(
-        by=["dataset_id", "exposure_mjd_mid", "exposure_id"], inplace=True
-    )
 
     return observations
 
@@ -247,13 +222,10 @@ if __name__ == "__main__":
         help="Path to input orbits file saved as a CSV",
     )
     parser.add_argument(
-        "--out_dir",
+        "--out_file",
         type=str,
-        default=TEST_OBSERVATIONS_DIR,
-        help=(
-            "Directory in which to save new observations. "
-            "Each dataset is saved into a unique directory within the passed directory."
-        ),
+        default=TEST_OBSERVATION_FILE,
+        help="Path to output observations file saved as a CSV.",
     )
     parser.add_argument(
         "--orbit_type",
@@ -265,12 +237,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     orbits_df = pd.read_csv(args.in_file)
     observations = make_observations(orbits_df, orbit_type=args.orbit_type)
-    for dataset_id in observations["dataset_id"].unique():
-        dataset_observations = observations[observations["dataset_id"] == dataset_id]
-        dataset_dir = os.path.join(args.out_dir, dataset_id)
-        os.makedirs(dataset_dir, exist_ok=True)
-        dataset_observations.to_csv(
-            os.path.join(dataset_dir, f"{dataset_id}_observations.csv"),
-            index=False,
-            float_format="%.16f",
-        )
+    observations.to_csv(args.out_file, index=False, float_format="%.16f")
