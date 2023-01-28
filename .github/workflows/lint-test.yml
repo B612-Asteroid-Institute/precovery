@@ -23,11 +23,7 @@ jobs:
           install: true
       - name: Build Precovery in Docker
         run: docker build --load -t precovery:$IMAGE_TAG .
-      - name: isort check
-        run:  docker run -i precovery:$IMAGE_TAG isort --check-only .
-      - name: black format check
-        run:  docker run -i precovery:$IMAGE_TAG black --check --diff .
-      - name: flake8
-        run:  docker run -i precovery:$IMAGE_TAG flake8
-      - name: unit tests
+      - name: lint
+        run: docker run -i precovery:$IMAGE_TAG pre-commit run --all-files
+      - name: lint tests
         run: docker run -i precovery:$IMAGE_TAG pytest --exitfirst .
