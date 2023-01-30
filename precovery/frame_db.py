@@ -336,6 +336,10 @@ class FrameIndex:
             sqlfunc.max(self.frames.c.exposure_mjd_mid, type=sq.Float),
         )
         first, last = self.dbconn.execute(select_stmt).fetchone()
+        if first is None or last is None:
+            raise ValueError(
+                "the database has no data entered, and so no minimum and maximum can be computed"
+            )
         return first, last
 
     def frame_bundles(
