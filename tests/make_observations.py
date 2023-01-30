@@ -1,5 +1,6 @@
 import argparse
 import os
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
@@ -173,7 +174,7 @@ def make_observations(
                 time_scale=EpochTimescale.UTC,
             )
 
-            ephemeris_dict = {
+            ephemeris_dict: Dict[str, List[float]] = {
                 "mjd": [],
                 "ra": [],
                 "dec": [],

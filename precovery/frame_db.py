@@ -39,10 +39,10 @@ class HealpixFrame:
 @dataclasses.dataclass
 class Dataset:
     id: str
-    name: str
-    reference_doi: str
-    documentation_url: str
-    sia_url: str
+    name: Optional[str]
+    reference_doi: Optional[str]
+    documentation_url: Optional[str]
+    sia_url: Optional[str]
 
 
 @dataclasses.dataclass
@@ -132,11 +132,15 @@ class FrameIndex:
         # if it doesn't throw a warning with the command to create it
         con = engine.connect()
         curs = con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='frames';"
+            sq.text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='frames';"
+            )
         )
         table_names = [row[0] for row in curs.fetchall()]
         if "frames" in table_names:
-            curs = con.execute("SELECT name FROM sqlite_master WHERE type = 'index';")
+            curs = con.execute(
+                sq.text("SELECT name FROM sqlite_master WHERE type = 'index';")
+            )
             index_names = [row[0] for row in curs.fetchall()]
             if "fast_query" not in index_names:
                 warning = (
@@ -747,7 +751,11 @@ class FrameDB:
             self.new_data_file(dataset_id, year_month_str)
             f = self._current_data_file(dataset_id, year_month_str)
 
-        logger.info(f"Writing {len(observations)} observations to {f.name}")
+        if hasattr(observations, "__len__"):
+            logger.info(f"Writing {len(observations)} observations to {f.name}")  # type: ignore
+        else:
+            logger.info(f"Writing stream of observations to {f.name}")
+
         f.seek(0, 2)  # seek to end
         start_pos = f.tell()
 
@@ -781,19 +789,22 @@ class FrameDB:
         self.data_files[self._current_data_file_name(dataset_id, year_month_str)] = f
 
     def defragment(self, new_index: FrameIndex, new_db: "FrameDB"):
-        # obscode, filter, exposure_mjd_start, exposure_mjd_mid, exposure_duration, healpixel
-        cur_key = ("", "", 0.0, 0.0, 0.0, 0)
+        # dataset, obscode, filter, exposure_mjd_start, exposure_mjd_mid, exposure_duration, healpixel
+        cur_key = ("", "", "", 0.0, 0.0, 0.0, 0)
         observations = []
         last_exposure_id = ""
 
         for frame in self.idx.all_frames():
             year_month_str = "-".join(
-                Time(frame.mjd, format="mjd", scale="utc").isot.split("-")[:2]
+                Time(frame.exposure_mjd_mid, format="mjd", scale="utc").isot.split("-")[
+                    :2
+                ]
             )
             if cur_key[0] == "":
                 # First iteration
                 observations = list(self.iterate_observations(frame))
                 cur_key = (
+                    frame.dataset_id,
                     frame.obscode,
                     frame.filter,
                     frame.exposure_mjd_start,
@@ -803,6 +814,7 @@ class FrameDB:
                 )
                 last_exposure_id = frame.exposure_id
             elif (
+                frame.dataset_id,
                 frame.obscode,
                 frame.filter,
                 frame.exposure_mjd_start,
@@ -820,12 +832,13 @@ class FrameDB:
                 )
                 new_frame = HealpixFrame(
                     id=None,
-                    obscode=cur_key[0],
-                    filter=cur_key[1],
-                    exposure_mjd_start=cur_key[2],
-                    exposure_mjd_mid=cur_key[3],
-                    exposure_duration=cur_key[4],
-                    healpixel=cur_key[5],
+                    dataset_id=cur_key[0],
+                    obscode=cur_key[1],
+                    filter=cur_key[2],
+                    exposure_mjd_start=cur_key[3],
+                    exposure_mjd_mid=cur_key[4],
+                    exposure_duration=cur_key[5],
+                    healpixel=cur_key[6],
                     exposure_id=last_exposure_id,
                     data_uri=data_uri,
                     data_offset=offset,
@@ -835,6 +848,7 @@ class FrameDB:
 
                 observations = list(self.iterate_observations(frame))
                 cur_key = (
+                    frame.dataset_id,
                     frame.obscode,
                     frame.filter,
                     frame.exposure_mjd_start,
@@ -851,12 +865,13 @@ class FrameDB:
         )
         frame = HealpixFrame(
             id=None,
-            obscode=cur_key[0],
-            filter=cur_key[1],
-            exposure_mjd_start=cur_key[2],
-            exposure_mjd_mid=cur_key[3],
-            exposure_duration=cur_key[4],
-            healpixel=cur_key[5],
+            dataset_id=cur_key[0],
+            obscode=cur_key[1],
+            filter=cur_key[2],
+            exposure_mjd_start=cur_key[3],
+            exposure_mjd_mid=cur_key[4],
+            exposure_duration=cur_key[5],
+            healpixel=cur_key[6],
             exposure_id=last_exposure_id,
             data_uri=data_uri,
             data_offset=offset,
