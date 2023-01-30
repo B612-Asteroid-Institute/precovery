@@ -337,6 +337,7 @@ class FrameIndex:
         )
         first, last = self.dbconn.execute(select_stmt).fetchone()
         if first is None or last is None:
+
             raise ValueError(
                 "the database has no data entered, and so no minimum and maximum can be computed"
             )

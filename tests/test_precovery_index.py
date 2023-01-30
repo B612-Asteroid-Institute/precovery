@@ -1,4 +1,5 @@
 import glob
+import logging
 import os
 import shutil
 
@@ -16,6 +17,8 @@ SAMPLE_ORBITS_FILE = os.path.join(
 TEST_OBSERVATIONS_DIR = os.path.join(os.path.dirname(__file__), "data/index")
 MILLIARCSECOND = 1 / 3600 / 1000
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
+
+logger = logging.getLogger("precovery-test")
 
 
 @pytest.fixture
@@ -55,8 +58,10 @@ def test_precovery(test_db_dir):
     observation_files = glob.glob(
         os.path.join(TEST_OBSERVATIONS_DIR, "dataset_*", "*.csv")
     )
+    logger.info("observation files: {observation_files}")
     observations_dfs = []
     for observation_file in observation_files:
+        logger.info("reading file {observation_file}")
         observations_df_i = pd.read_csv(
             observation_file,
             float_precision="round_trip",
@@ -71,13 +76,19 @@ def test_precovery(test_db_dir):
 
         dataset_id = observations_df_i["dataset_id"].values[0]
 
+        data_dir = os.path.join(os.path.dirname(__file__), f"data/index/{dataset_id}/")
+        logger.info(
+            "indexing, out_dir={test_db_dir}, \
+            dataset_id={dataset_id}, \
+            dataset_name={dataset_id}, \
+            data_dir={data_dir}, \
+            nside=16"
+        )
         index(
             out_dir=test_db_dir,
             dataset_id=dataset_id,
             dataset_name=dataset_id,
-            data_dir=os.path.join(
-                os.path.dirname(__file__), f"data/index/{dataset_id}/"
-            ),
+            data_dir=data_dir,
             nside=16,
         )
     observations_df = pd.concat(observations_dfs, ignore_index=True)
@@ -87,6 +98,7 @@ def test_precovery(test_db_dir):
 
     # For each sample orbit, validate we get all the observations we planted
     for orbit in orbits_keplerian:
+        logger.info("precovering {orbit}")
         results = precover(orbit, test_db_dir, tolerance=1 / 3600, window_size=1)
 
         orbit_name = orbit_name_mapping[orbit.orbit_id]
