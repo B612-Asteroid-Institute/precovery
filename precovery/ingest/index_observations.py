@@ -54,6 +54,7 @@ def index_individual_file(
         filename,
         dataset_id,
     )
+    db.frames.close()
     logger.info(f"Indexed {filename}")
 
 
