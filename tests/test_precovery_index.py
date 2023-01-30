@@ -58,10 +58,10 @@ def test_precovery(test_db_dir):
     observation_files = glob.glob(
         os.path.join(TEST_OBSERVATIONS_DIR, "dataset_*", "*.csv")
     )
-    logger.info("observation files: {observation_files}")
+    logger.info(f"observation files: {observation_files}")
     observations_dfs = []
     for observation_file in observation_files:
-        logger.info("reading file {observation_file}")
+        logger.info(f"reading file {observation_file}")
         observations_df_i = pd.read_csv(
             observation_file,
             float_precision="round_trip",
@@ -78,7 +78,7 @@ def test_precovery(test_db_dir):
 
         data_dir = os.path.join(os.path.dirname(__file__), f"data/index/{dataset_id}/")
         logger.info(
-            "indexing, out_dir={test_db_dir}, \
+            f"indexing, out_dir={test_db_dir}, \
             dataset_id={dataset_id}, \
             dataset_name={dataset_id}, \
             data_dir={data_dir}, \
@@ -96,9 +96,12 @@ def test_precovery(test_db_dir):
         by=["mjd", "observatory_code"], inplace=True, ignore_index=True
     )
 
+    logger.info(f"index glob: {glob.glob('*index.db')}")
+    logger.info(f"index double glob: {glob.glob('**index.db')}")
+
     # For each sample orbit, validate we get all the observations we planted
     for orbit in orbits_keplerian:
-        logger.info("precovering {orbit}")
+        logger.info(f"precovering {orbit}")
         results = precover(orbit, test_db_dir, tolerance=1 / 3600, window_size=1)
 
         orbit_name = orbit_name_mapping[orbit.orbit_id]
@@ -154,7 +157,7 @@ def test_precovery(test_db_dir):
         ]:
             assert (results[col].values == object_observations[col].values).all()
 
-        # Test that the predicted location of each object in each exposure is
+        # test that the predicted location of each object in each exposure is
         # close to the actual location of the object in that exposure (we did
         # not add any errors to the test observations)
         # Note that the predicted location is sensitive to accumulating float point arithmetic
