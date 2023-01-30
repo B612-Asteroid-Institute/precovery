@@ -26,4 +26,4 @@ jobs:
       - name: lint
         run: docker run -i precovery:$IMAGE_TAG pre-commit run --all-files
       - name: lint tests
-        run: docker run -i precovery:$IMAGE_TAG pytest --log-level=DEBUG --log-cli-level=DEBUG -vv --exitfirst .
+        run: docker run -i precovery:$IMAGE_TAG pytest --log-level=INFO --log-cli-level=INFO -vv --exitfirst .
