@@ -171,7 +171,7 @@ class FrameIndex:
         # from frames;
         stmt = (
             sq.select(
-                (
+                sq.cast(
                     (
                         sq.cast(
                             self.frames.c.exposure_mjd_mid + offset,
@@ -180,7 +180,8 @@ class FrameIndex:
                         / window_size_days
                     )
                     * window_size_days
-                    + start_mjd
+                    + start_mjd,
+                    sq.Float,
                 ).label("common_epoch"),
                 self.frames.c.obscode,
             )
@@ -449,6 +450,7 @@ class FrameIndex:
             for frame in frames
         ]
         self.dbconn.execute(insert, values)
+        self.dbconn.commit()
 
     def add_dataset(self, dataset: Dataset):
         """
@@ -466,6 +468,7 @@ class FrameIndex:
             .on_conflict_do_nothing(index_elements=["id"])
         )
         self.dbconn.execute(insert)
+        self.dbconn.commit()
 
     def get_dataset_ids(self):
         unique_datasets_stmt = sq.select(
