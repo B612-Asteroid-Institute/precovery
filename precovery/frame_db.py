@@ -132,11 +132,15 @@ class FrameIndex:
         # if it doesn't throw a warning with the command to create it
         con = engine.connect()
         curs = con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='frames';"
+            sq.text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='frames';"
+            )
         )
         table_names = [row[0] for row in curs.fetchall()]
         if "frames" in table_names:
-            curs = con.execute("SELECT name FROM sqlite_master WHERE type = 'index';")
+            curs = con.execute(
+                sq.text("SELECT name FROM sqlite_master WHERE type = 'index';")
+            )
             index_names = [row[0] for row in curs.fetchall()]
             if "fast_query" not in index_names:
                 warning = (

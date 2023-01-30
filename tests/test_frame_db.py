@@ -2,6 +2,7 @@ import os
 import sqlite3 as sql
 
 import pytest
+import sqlalchemy as sq
 from astropy.time import Time
 
 from precovery.frame_db import FrameDB, FrameIndex
@@ -36,7 +37,8 @@ def test_fast_query_warning(test_db):
     """Test that a warning is raised when the fast_query index does not exist."""
     con = sql.connect(test_db)
     con.execute(
-        """
+        sq.text(
+            """
         CREATE TABLE frames (
             id INTEGER PRIMARY KEY,
             dataset_id TEXT,
@@ -51,6 +53,7 @@ def test_fast_query_warning(test_db):
             data_offset INTEGER,
             data_length INTEGER
             );"""
+        )
     )
 
     with pytest.warns(UserWarning):
