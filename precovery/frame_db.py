@@ -437,7 +437,7 @@ class FrameIndex:
         for row in results:
             yield FrameBundleDescription(*row)
 
-    def frames_by_key(self) -> Iterator[Tuple[HealpixFrameKey, List[HealpixFrame]]]:
+    def all_frames_by_key(self) -> Iterator[Tuple[HealpixFrameKey, List[HealpixFrame]]]:
         """Returns all frames in the index, sorted according to the
         HealpixFrameKey class's instructions.
 
@@ -884,7 +884,7 @@ class FrameDB:
         writing to a separate (presumably empty) FrameDB and
         FrameIndex.
         """
-        for key, frames in self.idx.frames_by_key():
+        for key, frames in self.idx.all_frames_by_key():
             year_month_str = "-".join(
                 Time(key.exposure_mjd_mid, format="mjd", scale="utc").isot.split("-")[
                     :2

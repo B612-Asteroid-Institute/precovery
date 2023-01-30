@@ -231,15 +231,16 @@ def test_add_frames(frame_db):
     frame_db.add_frames("test_dataset", [frame1, frame2, frame3])
 
     # Okay, setup is done - assertions begin here.
-    stored_frames = list(frame_db.idx.all_frames())
+    stored_frames = list(frame_db.idx.all_frames_by_key())
     assert len(stored_frames) == 3
 
     # Find frame 1
     stored_frame_1 = None
-    for f in stored_frames:
-        if f.exposure_id == "e1" and f.healpixel == 1:
-            stored_frame_1 = f
-            break
+    for key, frames in stored_frames:
+        for f in frames:
+            if f.exposure_id == "e1" and f.healpixel == 1:
+                stored_frame_1 = f
+                break
     assert stored_frame_1 is not None, "frame1 was not stored, or not retrieved"
 
     # Get associated observations
