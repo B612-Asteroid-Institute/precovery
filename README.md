@@ -28,10 +28,22 @@ To install the bleeding edge source code, clone this repository and then:
 `pip install .`  
 
 
-**openorb**
+#### openorb
 
 Note that, `openorb` is not available on the Python Package Index and so you wil need
 to install it via source or conda. See the `Dockerfile` for example of how to build on Ubuntu linux.
+
+
+#### healpy
+
+`healpy` is available on PyPI, but as of version 1.16.2, only x86_64 wheels are published.
+For developers using Apple M1 Macbooks, these wheels won't be runnable.
+
+Alternative wheels are therefore currently available on a [B612 fork](https://github.com/B612-Asteroid-Institute/healpy).
+`aarch64` linux wheels can be found here: https://github.com/B612-Asteroid-Institute/healpy/releases/tag/1.16.2
+
+Those wheels can be downloaded and directly pip-installed for developers using Docker containers on M1 Macbooks.
+See the `Dockerfile` for example.
 
 ## Developer Setup
 
