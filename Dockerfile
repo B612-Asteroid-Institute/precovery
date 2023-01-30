@@ -26,6 +26,17 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     export WHEEL_NAME="${OORB_VERSION}-cp310-cp310-manylinux_2_17_$(uname -m).manylinux2014_$(uname -m).whl" && \
     pip install "https://github.com/B612-Asteroid-Institute/oorb/releases/download/${OORB_TAG}/${WHEEL_NAME}"
 
+# HACK: Install healpy from a release hosted on our fork. This fork
+# has no actual changes from upstream healpy. The only purpose of this
+# is to install an architecture-specific wheel, since as of 1.16.2
+# healpy only produces x86_64 wheels, and M1 Macbooks use aarch64.
+#
+# The 1.16.3 release of healpy is expected to include aarch64 wheels;
+# once that is released and used by precovery this can be removed.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    export WHEEL_NAME="healpy-1.16.2-cp310-cp310-manylinux_2_17_$(uname -m).manylinux2014_$(uname -m).whl" && \
+    pip install "https://github.com/B612-Asteroid-Institute/healpy/releases/download/1.16.2/${WHEEL_NAME}"
+
 # Install precovery
 RUN mkdir -p /code/precovery
 # Install precovery dependencies
