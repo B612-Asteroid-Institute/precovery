@@ -505,9 +505,7 @@ class FrameIndex:
             sq.Column("data_offset", sq.Integer),
             sq.Column("data_length", sq.Integer),
             # Create index on midpoint mjd, healpixel, obscode
-            sq.Index(
-                "fast_query", "exposure_mjd_mid", "healpixel", "obscode", unique=True
-            ),
+            sq.Index("fast_query", "exposure_mjd_mid", "healpixel", "obscode"),
         )
 
         self.datasets = sq.Table(
