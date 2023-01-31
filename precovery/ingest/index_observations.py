@@ -55,6 +55,7 @@ def index_individual_file(
         dataset_id,
     )
     logger.info(f"Indexed {filename}")
+    db.frames.close()
 
 
 def index(
@@ -108,6 +109,7 @@ def index(
         completed += 1
         logger.info(f"{completed}/{len(files)} files completed.")
     pool.close()
+    pool.join()
 
     time_end = datetime.datetime.now()
     duration = time_end - time_start
