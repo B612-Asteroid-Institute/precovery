@@ -505,9 +505,7 @@ class FrameIndex:
             sq.Column("data_offset", sq.Integer),
             sq.Column("data_length", sq.Integer),
             # Create index on midpoint mjd, healpixel, obscode
-            sq.Index(
-                "fast_query", "exposure_mjd_mid", "healpixel", "obscode", unique=True
-            ),
+            sq.Index("fast_query", "exposure_mjd_mid", "healpixel", "obscode"),
         )
 
         self.datasets = sq.Table(
@@ -669,7 +667,7 @@ class FrameDB:
         limit : int, optional
             Maximum number of frames to load from the file. None means no limit.
         """
-        frames = sourcecatalog.iterate_frames(
+        frames = sourcecatalog.frames_from_csv_file(
             csv_file,
             limit,
             nside=self.healpix_nside,

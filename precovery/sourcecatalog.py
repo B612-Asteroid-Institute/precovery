@@ -1,6 +1,9 @@
 import csv
 import dataclasses
-from typing import Dict, Iterator, List, Optional
+from collections import defaultdict
+from typing import DefaultDict, Iterator, List, Optional
+
+import pandas as pd
 
 from . import healpix_geom
 
@@ -24,17 +27,6 @@ class SourceObservation:
 
 
 @dataclasses.dataclass
-class SourceExposure:
-    exposure_id: str
-    obscode: str
-    filter: str
-    exposure_mjd_start: float
-    exposure_mjd_mid: float
-    exposure_duration: float
-    observations: List[SourceObservation]
-
-
-@dataclasses.dataclass
 class SourceFrame:
     exposure_id: str
     obscode: str
@@ -45,89 +37,75 @@ class SourceFrame:
     healpixel: int
     observations: List[SourceObservation]
 
+    @classmethod
+    def from_observation(cls, obs: SourceObservation, healpixel: int) -> "SourceFrame":
+        """
+        Constructs a SourceFrame, sourcing fields from a SourceObservation.
 
-def iterate_frames(
-    filename: str,
-    limit: Optional[int] = None,
-    nside: int = 32,
-    skip: int = 0,
+        The observations list is left empty.
+        """
+        return SourceFrame(
+            exposure_id=obs.exposure_id,
+            obscode=obs.obscode,
+            filter=obs.filter,
+            exposure_mjd_start=obs.exposure_mjd_start,
+            exposure_mjd_mid=obs.exposure_mjd_mid,
+            exposure_duration=obs.exposure_duration,
+            healpixel=healpixel,
+            observations=[],
+        )
+
+
+def bundle_into_frames(
+    observations: Iterator[SourceObservation], nside: int = 32
 ) -> Iterator[SourceFrame]:
-    for exp in iterate_exposures(filename, limit, skip):
-        for frame in source_exposure_to_frames(exp, nside):
-            yield frame
+    """Groups SourceObservations into SourceFrames, suitable for
+    loading into the database. The observations iterator should be
+    sorted by exposure_id so that all SourceObservations for a frame
+    are linked together.
 
-
-def source_exposure_to_frames(
-    src_exp: SourceExposure, nside: int = 32
-) -> List[SourceFrame]:
-    """ """
-    by_pixel: Dict[int, SourceFrame] = {}
-    for obs in src_exp.observations:
-        pixel = healpix_geom.radec_to_healpixel(obs.ra, obs.dec, nside)
-        frame = by_pixel.get(pixel)
-        if frame is None:
-            frame = SourceFrame(
-                exposure_id=src_exp.exposure_id,
-                obscode=src_exp.obscode,
-                filter=src_exp.filter,
-                exposure_mjd_start=src_exp.exposure_mjd_start,
-                exposure_mjd_mid=src_exp.exposure_mjd_mid,
-                exposure_duration=src_exp.exposure_duration,
-                healpixel=pixel,
-                observations=[],
-            )
-            by_pixel[pixel] = frame
-        frame.observations.append(obs)
-    return list(by_pixel.values())
-
-
-def iterate_exposures(
-    filename,
-    limit: Optional[int] = None,
-    skip: int = 0,
-):
+    nside is the healpix nside parameter.
     """
-    Yields unique exposures from observations in a file
-    """
-    current_exposure: Optional[SourceExposure] = None
-    n = 0
-    for obs in iterate_observations(filename):
-        if current_exposure is None:
+
+    # Chomp through the observations iterator for an entire
+    # exposure. When exposure_id changes, do the work of partitioning
+    # the exposure's data into frames, and yield each frame out
+    # one-by-one.
+    cur_exposure_id: Optional[str] = None
+    observations_by_healpixel: DefaultDict[int, List[SourceObservation]] = defaultdict(
+        list
+    )
+    for obs in observations:
+        if cur_exposure_id is None:
             # first iteration
-            current_exposure = SourceExposure(
-                exposure_id=obs.exposure_id,
-                obscode=obs.obscode,
-                filter=obs.filter,
-                exposure_mjd_start=obs.exposure_mjd_start,
-                exposure_mjd_mid=obs.exposure_mjd_mid,
-                exposure_duration=obs.exposure_duration,
-                observations=[obs],
-            )
-        elif obs.exposure_id == current_exposure.exposure_id:
-            # continuing an existing exposure
-            current_exposure.observations.append(obs)
-        else:
-            # New exposure
-            if skip > 0:
-                skip -= 1
-            else:
-                yield current_exposure
-                n += 1
-            if limit is not None and n >= limit:
-                return
-            current_exposure = SourceExposure(
-                exposure_id=obs.exposure_id,
-                obscode=obs.obscode,
-                filter=obs.filter,
-                exposure_mjd_start=obs.exposure_mjd_start,
-                exposure_mjd_mid=obs.exposure_mjd_mid,
-                exposure_duration=obs.exposure_duration,
-                observations=[obs],
-            )
-    yield current_exposure
+            cur_exposure_id = obs.exposure_id
+
+        if obs.exposure_id != cur_exposure_id:
+            # change of exposure: emit frames
+            for pixel, pixel_observations in observations_by_healpixel.items():
+                frame = SourceFrame.from_observation(pixel_observations[0], pixel)
+                frame.observations = pixel_observations
+                yield frame
+
+            # Reset observations dictionary
+            observations_by_healpixel.clear()
+
+        healpixel = healpix_geom.radec_to_healpixel(obs.ra, obs.dec, nside)
+        observations_by_healpixel[healpixel].append(obs)
+
+    # Yield the final iteration
+    for pixel, pixel_observations in observations_by_healpixel.items():
+        frame = SourceFrame.from_observation(pixel_observations[0], pixel)
+        frame.observations = pixel_observations
+        yield frame
 
 
-def iterate_observations(filename: str) -> Iterator[SourceObservation]:
+def observations_from_csv_file(
+    filename: str, limit: Optional[int] = None, skip: int = 0
+) -> Iterator[SourceObservation]:
+    """
+    Reads a stream of SourceObservations out of a CSV data file.
+    """
     with open(filename) as csv_file:
         csv_reader = csv.DictReader(csv_file)
         for row in csv_reader:
@@ -148,3 +126,25 @@ def iterate_observations(filename: str) -> Iterator[SourceObservation]:
                 exposure_duration=float(row["exposure_duration"]),
             )
             yield (obs)
+
+
+def observations_from_dataframe(df: pd.DataFrame) -> Iterator[SourceObservation]:
+    raise NotImplementedError("not implemented yet")
+
+
+def frames_from_csv_file(
+    filename: str,
+    limit: Optional[int] = None,
+    nside: int = 32,
+    skip: int = 0,
+) -> Iterator[SourceFrame]:
+    """Reads out SourceFrames from a CSV file, suitable for loading
+    into the database. The rows of the source CSV file are expected to
+    be sorted by exposure_id.
+
+    """
+
+    observations = observations_from_csv_file(filename, limit, skip)
+    frames = bundle_into_frames(observations, nside)
+    for f in frames:
+        yield f
