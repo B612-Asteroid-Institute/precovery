@@ -669,7 +669,7 @@ class FrameDB:
         limit : int, optional
             Maximum number of frames to load from the file. None means no limit.
         """
-        frames = sourcecatalog.iterate_frames(
+        frames = sourcecatalog.frames_from_csv_file(
             csv_file,
             limit,
             nside=self.healpix_nside,
