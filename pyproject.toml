@@ -8,3 +8,6 @@ write_to_template = "__version__ = '{version}'"
 
 [tool.pytest.ini_options]
 python_functions = "test_*"
+
+[tool.isort]
+profile = "black"
