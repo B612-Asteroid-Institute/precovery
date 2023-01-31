@@ -1,6 +1,6 @@
 import csv
 import dataclasses
-from typing import Dict, Iterator, List, Optional
+from typing import Dict, Iterator, List, Optional, Union
 
 from . import healpix_geom
 
@@ -13,10 +13,10 @@ class SourceObservation:
     mjd: float
     ra: float
     dec: float
-    ra_sigma: float
-    dec_sigma: float
+    ra_sigma: Union[float, None]
+    dec_sigma: Union[float, None]
     mag: float
-    mag_sigma: float
+    mag_sigma: Union[float, None]
     filter: str
     exposure_mjd_start: float
     exposure_mjd_mid: float
@@ -138,10 +138,10 @@ def iterate_observations(filename: str) -> Iterator[SourceObservation]:
                 mjd=float(row["mjd"]),
                 ra=float(row["ra"]),
                 dec=float(row["dec"]),
-                ra_sigma=float(row["ra_sigma"]),
-                dec_sigma=float(row["dec_sigma"]),
+                ra_sigma=float(row["ra_sigma"]) if "ra_sigma" in row else None,
+                dec_sigma=float(row["dec_sigma"]) if "dec_sigma" in row else None,
                 mag=float(row["mag"]),
-                mag_sigma=float(row["mag_sigma"]),
+                mag_sigma=float(row["mag_sigma"]) if "mag_sigma" in row else None,
                 filter=str(row["filter"]),
                 exposure_mjd_start=float(row["exposure_mjd_start"]),
                 exposure_mjd_mid=float(row["exposure_mjd_mid"]),

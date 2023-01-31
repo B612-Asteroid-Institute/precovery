@@ -5,7 +5,7 @@ import logging
 import os
 import struct
 import warnings
-from typing import Iterable, Iterator, Optional, Set, Tuple
+from typing import Iterable, Iterator, Optional, Set, Tuple, Union
 
 import sqlalchemy as sq
 from astropy.time import Time
@@ -72,10 +72,10 @@ class Observation:
     mjd: float
     ra: float
     dec: float
-    ra_sigma: float
-    dec_sigma: float
+    ra_sigma: Union[float, None]
+    dec_sigma: Union[float, None]
     mag: float
-    mag_sigma: float
+    mag_sigma: Union[float, None]
     id: bytes
 
     data_layout = struct.Struct(DATA_LAYOUT)
