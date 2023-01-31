@@ -126,7 +126,11 @@ class FrameIndex:
         if db_uri.startswith("sqlite:///") and (mode == "r"):
             db_uri += "?mode=ro"
 
-        engine = sq.create_engine(db_uri, connect_args={"timeout": 60})
+        # future=True is required here for SQLAlchemy 2.0 API usage
+        # while we migrate from 1.x up. Version 2 is incompatible with
+        # dagster, so we need to actually pin to 1.x, but future=True
+        # lets us use the 2.0 API in this code.
+        engine = sq.create_engine(db_uri, connect_args={"timeout": 60}, future=True)
 
         # Check if fast_query index exists (older databases may not have it)
         # if it doesn't throw a warning with the command to create it
