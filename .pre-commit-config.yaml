@@ -36,5 +36,5 @@ repos:
   - id: mypy
     additional_dependencies:
       - numpy
-      - sqlalchemy
+      - sqlalchemy<2
       - types-requests
