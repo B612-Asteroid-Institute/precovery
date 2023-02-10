@@ -89,6 +89,7 @@ def bundle_into_frames(
 
             # Reset observations dictionary
             observations_by_healpixel.clear()
+            cur_exposure_id = obs.exposure_id
 
         healpixel = healpix_geom.radec_to_healpixel(obs.ra, obs.dec, nside)
         observations_by_healpixel[healpixel].append(obs)
