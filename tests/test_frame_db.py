@@ -5,7 +5,9 @@ import pytest
 from astropy.time import Time
 
 from precovery.frame_db import FrameDB, FrameIndex
-from precovery.sourcecatalog import SourceFrame, SourceObservation
+from precovery.sourcecatalog import SourceFrame, SourceObservation, bundle_into_frames
+
+from .testutils import make_sourceobs
 
 
 @pytest.fixture
@@ -245,3 +247,52 @@ def test_add_frames(frame_db):
     # Get associated observations
     stored_obs1 = list(frame_db.iterate_observations(stored_frame_1))
     assert len(stored_obs1) == 2
+
+
+def test_add_frames_dedupes_sorted_exposures(frame_db):
+    """When the database ingests sorted exposure data, observations
+    from the same frame should just generate one row in the index for
+    the frame, not multiple.
+
+    """
+    observations = [
+        make_sourceobs(
+            exposure_id=b"exp0",
+            id=b"obs1",
+            healpixel=1,
+        ),
+        make_sourceobs(
+            exposure_id=b"exp1",
+            id=b"obs2",
+            healpixel=1,
+        ),
+        make_sourceobs(
+            exposure_id=b"exp1",
+            id=b"obs3",
+            healpixel=1,
+        ),
+        make_sourceobs(
+            exposure_id=b"exp1",
+            id=b"obs4",
+            healpixel=2,
+        ),
+        make_sourceobs(
+            exposure_id=b"exp1",
+            id=b"obs5",
+            healpixel=2,
+        ),
+        make_sourceobs(
+            exposure_id=b"exp2",
+            id=b"obs6",
+            healpixel=1,
+        ),
+    ]
+    frames = list(bundle_into_frames(observations))
+
+    assert len(frames) == 4
+
+    dataset_id = "test_dataset"
+    frame_db.add_dataset(dataset_id)
+    frame_db.add_frames(dataset_id, frames)
+
+    assert len(list(frame_db.idx.all_frames())) == 4
