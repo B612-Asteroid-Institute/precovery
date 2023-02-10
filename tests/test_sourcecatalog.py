@@ -144,3 +144,38 @@ class TestBundleObservationsIntoFrames:
         result = list(frames)
 
         assert len(result) == 5
+
+    def test_multiple_exposures_2(self):
+        observations = [
+            # Frame 1: exp1, healpixel 1, 3 observations
+            make_sourceobs(
+                exposure_id=b"exp0",
+                healpixel=1,
+            ),
+            make_sourceobs(
+                exposure_id=b"exp1",
+                healpixel=1,
+            ),
+            make_sourceobs(
+                exposure_id=b"exp1",
+                healpixel=1,
+            ),
+            # Frame 2: exp1, healpixel 2, 2 observations
+            make_sourceobs(
+                exposure_id=b"exp1",
+                healpixel=2,
+            ),
+            make_sourceobs(
+                exposure_id=b"exp1",
+                healpixel=2,
+            ),
+            # Frame 3: exp2, healpixel 1, 1 observation
+            make_sourceobs(
+                exposure_id=b"exp2",
+                healpixel=1,
+            ),
+        ]
+        frames = list(bundle_into_frames(observations))
+
+        result = list(frames)
+        assert len(result) == 4

@@ -257,7 +257,7 @@ def test_add_frames_dedupes_sorted_exposures(frame_db):
     """
     observations = [
         make_sourceobs(
-            exposure_id="exp1",
+            exposure_id=b"exp0",
             id=b"obs1",
             healpixel=1,
         ),
@@ -289,10 +289,10 @@ def test_add_frames_dedupes_sorted_exposures(frame_db):
     ]
     frames = list(bundle_into_frames(observations))
 
-    assert len(frames) == 3
+    assert len(frames) == 4
 
     dataset_id = "test_dataset"
     frame_db.add_dataset(dataset_id)
     frame_db.add_frames(dataset_id, frames)
 
-    assert len(list(frame_db.idx.all_frames())) == 3
+    assert len(list(frame_db.idx.all_frames())) == 4
