@@ -52,6 +52,7 @@ def precover(
     end_mjd: Optional[float] = None,
     window_size: int = 7,
     include_frame_candidates: bool = False,
+    allow_version_mismatch: bool = False,
 ) -> List[Union[PrecoveryCandidate, FrameCandidate]]:
     """
     Connect to database directory and run precovery for the input orbit.
@@ -86,6 +87,8 @@ def precover(
         for negative observation campaigns. Note that camera footprints are not modeled, all datasets
         are mapped onto a Healpixel space and this simply returns the Healpixel equivalent exposure
         information.
+    allow_version_mismatch : bool, optional
+        Allows using a precovery db version that does not match the library version.
 
     Returns
     -------
@@ -95,7 +98,10 @@ def precover(
         found within the angular tolerance.
     """
     precovery_db = PrecoveryDatabase.from_dir(
-        database_directory, create=False, mode="r"
+        database_directory,
+        create=False,
+        mode="r",
+        allow_version_mismatch=allow_version_mismatch,
     )
 
     candidates = [
