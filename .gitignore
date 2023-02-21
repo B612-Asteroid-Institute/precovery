@@ -117,3 +117,4 @@ volume/
 out/
 database/
 precovery/version.py
+.docker_bash_history.txt
