@@ -296,4 +296,4 @@ def test_add_frames_dedupes_sorted_exposures(frame_db):
     frame_db.add_dataset(dataset_id)
     frame_db.add_frames(dataset_id, frames)
 
-    assert len(list(frame_db.idx.all_frames())) == 4
+    assert frame_db.idx.n_frames() == 4
