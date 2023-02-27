@@ -5,12 +5,13 @@ import logging
 import os
 import struct
 import warnings
-from typing import Iterable, Iterator, Optional, Set, Tuple
+from typing import Iterable, Iterator, List, Optional, Set, Tuple
 
 import sqlalchemy as sq
 from astropy.time import Time
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.sql import func as sqlfunc
+from sqlalchemy.sql.expression import ColumnClause
 
 from . import sourcecatalog
 
@@ -34,6 +35,36 @@ class HealpixFrame:
     data_uri: str
     data_offset: int
     data_length: int
+
+
+@dataclasses.dataclass
+class HealpixFrameKey:
+    """Represents the keys used to identify a unique
+    HealpixFrame. Note that the FrameDB might actually contain
+    multiple HealpixFrames with the same HealpixFrameKey, since when
+    HealpixFrames are written into the database they are not
+    automatically merged and compacted.
+    """
+
+    dataset_id: str
+    obscode: str
+    filter: str
+    exposure_mjd_start: float
+    exposure_mjd_mid: float
+    exposure_duration: float
+    healpixel: int
+
+    @staticmethod
+    def _sql_order_by_clauses(db_table: sq.Table) -> List[ColumnClause]:
+        return [
+            db_table.c.dataset_id,
+            db_table.c.obscode,
+            db_table.c.filter,
+            db_table.c.exposure_mjd_start,
+            db_table.c.exposure_mjd_mid,
+            db_table.c.exposure_duration,
+            db_table.c.healpixel,
+        ]
 
 
 @dataclasses.dataclass
@@ -406,9 +437,12 @@ class FrameIndex:
         for row in results:
             yield FrameBundleDescription(*row)
 
-    def all_frames(self) -> Iterator[HealpixFrame]:
-        """
-        Returns all frames in the index, sorted by obscode, mjd, and healpixel.
+    def all_frames_by_key(self) -> Iterator[Tuple[HealpixFrameKey, List[HealpixFrame]]]:
+        """Returns all frames in the index, sorted according to the
+        HealpixFrameKey class's instructions.
+
+        Returned frames are grouped by HealpixFrameKey.
+
         """
         stmt = sq.select(
             self.frames.c.id,
@@ -424,13 +458,55 @@ class FrameIndex:
             self.frames.c.data_offset,
             self.frames.c.data_length,
         ).order_by(
-            self.frames.c.obscode,
-            self.frames.c.exposure_mjd_mid,
-            self.frames.c.healpixel,
+            *HealpixFrameKey._sql_order_by_clauses(self.frames),
         )
         result = self.dbconn.execute(stmt)
+        cur_key: Optional[HealpixFrameKey] = None
+        cur_frames: List[HealpixFrame] = []
+
+        def frame_for_row(row: sq.engine.Row) -> HealpixFrame:
+            # Little helper to cast the results of the above query
+            return HealpixFrame(
+                id=None,
+                dataset_id=row.dataset_id,
+                obscode=row.obscode,
+                filter=row.filter,
+                exposure_mjd_start=row.exposure_mjd_start,
+                exposure_mjd_mid=row.exposure_mjd_mid,
+                exposure_duration=row.exposure_duration,
+                healpixel=row.healpixel,
+                exposure_id=row.exposure_id,
+                data_uri=row.data_uri,
+                data_offset=row.data_offset,
+                data_length=row.data_length,
+            )
+
         for row in result:
-            yield HealpixFrame(*row)
+            key = HealpixFrameKey(
+                dataset_id=row.dataset_id,
+                obscode=row.obscode,
+                filter=row.filter,
+                exposure_mjd_start=row.exposure_mjd_start,
+                exposure_mjd_mid=row.exposure_mjd_mid,
+                exposure_duration=row.exposure_duration,
+                healpixel=row.healpixel,
+            )
+            if cur_key is None:
+                # First iteration
+                cur_key = key
+                cur_frames = [frame_for_row(row)]
+            elif key == cur_key:
+                # Continuing a previous key
+                cur_frames.append(frame_for_row(row))
+            else:
+                # New key - flush what we have and reset
+                assert cur_key is not None
+                yield cur_key, cur_frames
+                cur_key = key
+                cur_frames = [frame_for_row(row)]
+        # End of iteration - yield the last pair
+        if cur_key is not None:
+            yield cur_key, cur_frames
 
     def add_frames(self, frames: list[HealpixFrame]):
         """
@@ -794,92 +870,50 @@ class FrameDB:
         self.data_files[self._current_data_file_name(dataset_id, year_month_str)] = f
 
     def defragment(self, new_index: FrameIndex, new_db: "FrameDB"):
-        # dataset, obscode, filter, exposure_mjd_start, exposure_mjd_mid, exposure_duration, healpixel
-        cur_key = ("", "", "", 0.0, 0.0, 0.0, 0)
-        observations = []
-        last_exposure_id = ""
+        """Deduplicates HealpixFrames by writing a new database.
 
-        for frame in self.idx.all_frames():
+        Iterates over all frames in the index, grouped by a common key
+        (see the HealpixFrameKey for the grouping).
+
+        For each frame key, all associated observations are gathered
+        and held in memory, and then reserialized to disk. A new
+        HealpixFrame is then created and inserted into the index,
+        pointing to the new data serialization.
+
+        This function does not modify the current FrameDB. It works by
+        writing to a separate (presumably empty) FrameDB and
+        FrameIndex.
+        """
+        for key, frames in self.idx.all_frames_by_key():
             year_month_str = "-".join(
-                Time(frame.exposure_mjd_mid, format="mjd", scale="utc").isot.split("-")[
+                Time(key.exposure_mjd_mid, format="mjd", scale="utc").isot.split("-")[
                     :2
                 ]
             )
-            if cur_key[0] == "":
-                # First iteration
-                observations = list(self.iterate_observations(frame))
-                cur_key = (
-                    frame.dataset_id,
-                    frame.obscode,
-                    frame.filter,
-                    frame.exposure_mjd_start,
-                    frame.exposure_mjd_mid,
-                    frame.exposure_duration,
-                    frame.healpixel,
-                )
-                last_exposure_id = frame.exposure_id
-            elif (
-                frame.dataset_id,
-                frame.obscode,
-                frame.filter,
-                frame.exposure_mjd_start,
-                frame.exposure_mjd_mid,
-                frame.exposure_duration,
-                frame.healpixel,
-            ) == cur_key:
-                # Extending existing frame
+            observations: List[Observation] = []
+            for frame in frames:
                 observations.extend(self.iterate_observations(frame))
+                last_exposure_id = frame.exposure_id
 
-            else:
-                # On to the next key. Flush what we have and reset.
-                data_uri, offset, length = new_db.store_observations(
-                    observations, frame.dataset_id, year_month_str
-                )
-                new_frame = HealpixFrame(
-                    id=None,
-                    dataset_id=cur_key[0],
-                    obscode=cur_key[1],
-                    filter=cur_key[2],
-                    exposure_mjd_start=cur_key[3],
-                    exposure_mjd_mid=cur_key[4],
-                    exposure_duration=cur_key[5],
-                    healpixel=cur_key[6],
-                    exposure_id=last_exposure_id,
-                    data_uri=data_uri,
-                    data_offset=offset,
-                    data_length=length,
-                )
-                new_db.idx.add_frames([new_frame])
-
-                observations = list(self.iterate_observations(frame))
-                cur_key = (
-                    frame.dataset_id,
-                    frame.obscode,
-                    frame.filter,
-                    frame.exposure_mjd_start,
-                    frame.exposure_mjd_mid,
-                    frame.exposure_duration,
-                    frame.healpixel,
-                )
-
-            last_exposure_id = frame.exposure_id
-
-        # Last frame was unflushed, so do that now.
-        data_uri, offset, length = new_db.store_observations(
-            observations, frame.dataset_id, year_month_str
-        )
-        frame = HealpixFrame(
-            id=None,
-            dataset_id=cur_key[0],
-            obscode=cur_key[1],
-            filter=cur_key[2],
-            exposure_mjd_start=cur_key[3],
-            exposure_mjd_mid=cur_key[4],
-            exposure_duration=cur_key[5],
-            healpixel=cur_key[6],
-            exposure_id=last_exposure_id,
-            data_uri=data_uri,
-            data_offset=offset,
-            data_length=length,
-        )
-        new_db.idx.add_frames([frame])
+            # Re-store the observations now that we have all of them for a common HealpixFrameKey
+            data_uri, offset, length = new_db.store_observations(
+                observations, frame.dataset_id, year_month_str
+            )
+            new_frame = HealpixFrame(
+                id=None,
+                # Fields common to all frames:
+                dataset_id=key.dataset_id,
+                obscode=key.obscode,
+                filter=key.filter,
+                exposure_mjd_start=key.exposure_mjd_start,
+                exposure_mjd_mid=key.exposure_mjd_mid,
+                exposure_duration=key.exposure_duration,
+                healpixel=key.healpixel,
+                # Pick one exposure_id - the last will suffice
+                exposure_id=last_exposure_id,
+                # Use the new data locators
+                data_uri=data_uri,
+                data_offset=offset,
+                data_length=length,
+            )
+            new_db.idx.add_frames([new_frame])
