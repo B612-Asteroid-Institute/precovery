@@ -3,9 +3,24 @@ import dataclasses
 from collections import defaultdict
 from typing import DefaultDict, Iterator, List, Optional
 
+import numpy as np
 import pandas as pd
 
 from . import healpix_geom
+
+
+def allow_nan(x: str) -> float:
+    """
+    NaNs are often serialized as empty strings. This function converts them back to NaNs.
+
+    Parameters
+    ----------
+    x : str
+    """
+    if x == "":
+        return np.NaN
+    else:
+        return float(x)
 
 
 @dataclasses.dataclass
@@ -117,10 +132,10 @@ def observations_from_csv_file(
                 mjd=float(row["mjd"]),
                 ra=float(row["ra"]),
                 dec=float(row["dec"]),
-                ra_sigma=float(row["ra_sigma"]),
-                dec_sigma=float(row["dec_sigma"]),
+                ra_sigma=allow_nan(row["ra_sigma"]),
+                dec_sigma=allow_nan(row["dec_sigma"]),
                 mag=float(row["mag"]),
-                mag_sigma=float(row["mag_sigma"]),
+                mag_sigma=allow_nan(row["mag_sigma"]),
                 filter=str(row["filter"]),
                 exposure_mjd_start=float(row["exposure_mjd_start"]),
                 exposure_mjd_mid=float(row["exposure_mjd_mid"]),
