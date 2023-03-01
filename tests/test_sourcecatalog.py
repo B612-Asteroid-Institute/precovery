@@ -1,6 +1,13 @@
-from precovery.sourcecatalog import SourceFrame, bundle_into_frames
+import numpy as np
+
+from precovery.sourcecatalog import SourceFrame, allow_nan, bundle_into_frames
 
 from .testutils import make_sourceobs
+
+
+def test_allow_nan():
+    assert allow_nan("1.0") == 1.0
+    assert np.isnan(allow_nan(""))
 
 
 def test_sourceframe_from_observation():
