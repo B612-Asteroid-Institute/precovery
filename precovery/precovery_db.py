@@ -7,7 +7,7 @@ from typing import Iterable, Iterator, Optional, Union
 import numpy as np
 
 from .config import Config, DefaultConfig
-from .frame_db import FrameDB, FrameIndex
+from .frame_db import FrameDB, FrameIndex, Observation
 from .healpix_geom import radec_to_healpixel
 from .orbit import EpochTimescale, Orbit, PropagationIntegrator
 from .spherical_geom import haversine_distance_deg
@@ -509,3 +509,30 @@ class PrecoveryDatabase:
 
                 n_frame += 1
             logger.info("checked %d frames", n_frame)
+
+    def find_observations_in_region(
+        self, ra: float, dec: float, obscode: str
+    ) -> Iterator[Observation]:
+        """Gets all the Observations within the same Healpixel as a
+        given RA, Dec for a particular observatory (specified as an obscode).
+
+        """
+        frames = self.frames.get_frames_for_ra_dec(ra, dec, obscode, self.config.nside)
+        for f in frames:
+            for o in self.frames.iterate_observations(f):
+                yield o
+
+    def find_observations_in_radius(
+        self, ra: float, dec: float, tolerance: float, obscode: str
+    ) -> Iterator[Observation]:
+        """Gets all the Observations within a radius (in degrees) of
+        a particular RA and Dec at a specific observatory.
+
+        This method is approximate, and does not correctly find
+        Observations that are within the radius, but on a different
+        healpixel.
+
+        """
+        for o in self.find_observations_in_region(ra, dec, obscode):
+            if haversine_distance_deg(o.ra, ra, o.dec, dec) <= tolerance:
+                yield o

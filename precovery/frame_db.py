@@ -13,12 +13,13 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.sql import func as sqlfunc
 from sqlalchemy.sql.expression import ColumnClause
 
-from . import sourcecatalog
+from . import healpix_geom, sourcecatalog
 
 # mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id
 DATA_LAYOUT = "<dddddddl"
 
-logger = logging.getLogger("frame_db")
+logger = logging.Logger("frame_db")
+logging.basicConfig()
 
 
 @dataclasses.dataclass
@@ -600,6 +601,17 @@ class FrameIndex:
         )
         self._metadata.create_all(self.db)
 
+    def frames_for_healpixel(
+        self, healpixel: int, obscode: str
+    ) -> Iterator[HealpixFrame]:
+        stmt = sq.select("*").where(
+            self.frames.c.healpixel == 4865,
+            self.frames.c.obscode == "testobs",
+        )
+        rows = self.dbconn.execute(stmt).fetchall()
+        for row in rows:
+            yield HealpixFrame(*row)
+
 
 class FrameDB:
     def __init__(
@@ -812,6 +824,14 @@ class FrameDB:
             bytes_read += datagram_size + id_size
             yield Observation(mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id)
 
+    def get_frames_for_ra_dec(self, ra: float, dec: float, obscode: str, nside: int):
+        logger.debug(
+            f"checking frames for ra={ra} dec={dec} obscode={obscode} nside={nside}"
+        )
+        healpixel = healpix_geom.radec_to_healpixel(ra, dec, nside)
+        for frame in self.idx.frames_for_healpixel(healpixel, obscode):
+            yield frame
+
     def store_observations(
         self, observations: Iterable[Observation], dataset_id: str, year_month_str: str
     ):
@@ -866,7 +886,6 @@ class FrameDB:
         current_data_file = self._current_data_file_full(dataset_id, year_month_str)
         os.makedirs(os.path.dirname(current_data_file), exist_ok=True)
         f = open(current_data_file, "a+b")
-        print("Opened new data file: {}".format(current_data_file))
         self.data_files[self._current_data_file_name(dataset_id, year_month_str)] = f
 
     def defragment(self, new_index: FrameIndex, new_db: "FrameDB"):
