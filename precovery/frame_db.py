@@ -18,8 +18,7 @@ from . import healpix_geom, sourcecatalog
 # mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id
 DATA_LAYOUT = "<dddddddl"
 
-logger = logging.Logger("frame_db")
-logging.basicConfig()
+logger = logging.getLogger("frame_db")
 
 
 @dataclasses.dataclass
@@ -604,6 +603,9 @@ class FrameIndex:
     def frames_for_healpixel(
         self, healpixel: int, obscode: str
     ) -> Iterator[HealpixFrame]:
+        """
+        Yields all the frames which are for a single healpixel-obscode pair.
+        """
         stmt = sq.select("*").where(
             self.frames.c.healpixel == 4865,
             self.frames.c.obscode == "testobs",
@@ -825,6 +827,10 @@ class FrameDB:
             yield Observation(mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id)
 
     def get_frames_for_ra_dec(self, ra: float, dec: float, obscode: str, nside: int):
+        """Yields all frames that overlap given ra, dec for a given
+        obscode, using nside for the healpix resolution.
+
+        """
         logger.debug(
             f"checking frames for ra={ra} dec={dec} obscode={obscode} nside={nside}"
         )
