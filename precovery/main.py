@@ -159,17 +159,14 @@ def precover(
         allow_version_mismatch=allow_version_mismatch,
     )
 
-    candidates = [
-        c
-        for c in precovery_db.precover(
-            orbit,
-            tolerance=tolerance,
-            start_mjd=start_mjd,
-            end_mjd=end_mjd,
-            window_size=window_size,
-            include_frame_candidates=include_frame_candidates,
-        )
-    ]
+    candidates = precovery_db.precover(
+        orbit,
+        tolerance=tolerance,
+        start_mjd=start_mjd,
+        end_mjd=end_mjd,
+        window_size=window_size,
+        include_frame_candidates=include_frame_candidates,
+    )
 
     df = pd.DataFrame(_candidates_to_dict(candidates))
     df.loc[:, "observation_id"] = df.loc[:, "observation_id"].astype(str)
