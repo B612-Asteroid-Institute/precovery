@@ -83,16 +83,26 @@ def sort_candidates(candidates: List[Union[PrecoveryCandidate, FrameCandidate]])
         Sorted list of candidates.
     """
     mjds = []
+    observation_ids = []
     for candidate_i in candidates:
         if isinstance(candidate_i, PrecoveryCandidate):
             mjds.append(candidate_i.mjd)
+            observation_ids.append(candidate_i.observation_id)
         elif isinstance(candidate_i, FrameCandidate):
             mjds.append(candidate_i.exposure_mjd_mid)
+            # Add empty observation ID since frame candidates don't have one
+            # Frames, so this is fine
+            observation_ids.append("")
         else:
             raise TypeError("Candidates must be PrecoveryCandidate or FrameCandidate")
 
     cand_array = np.array(candidates)
-    return cand_array[np.argsort(mjds)].tolist()
+    mjds = np.array(mjds)
+    observation_ids = np.array(observation_ids)
+    # Primary sort key is MJD, secondary sort key is observation ID
+    # lexsort takes sort order in reverse
+    sorted_indices = np.lexsort((observation_ids, mjds))
+    return cand_array[sorted_indices].tolist()
 
 
 class PrecoveryDatabase:
