@@ -145,7 +145,6 @@ class PrecoveryDatabase:
         self,
         orbit: Orbit,
         tolerance: float = 30 * ARCSEC,
-        max_matches: Optional[int] = None,
         start_mjd: Optional[float] = None,
         end_mjd: Optional[float] = None,
         window_size: int = 7,
@@ -186,7 +185,6 @@ class PrecoveryDatabase:
             if end_mjd is None:
                 end_mjd = last
 
-        n = 0
         logger.info(
             "precovering orbit %s from %.5f to %.5f, window=%d",
             orbit.orbit_id,
@@ -214,9 +212,6 @@ class PrecoveryDatabase:
             )
             for result in matches:
                 yield result
-                n += 1
-                if max_matches is not None and n >= max_matches:
-                    return
 
     def _check_windows(
         self,
