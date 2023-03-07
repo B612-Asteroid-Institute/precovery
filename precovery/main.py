@@ -1,10 +1,17 @@
-from typing import List, Optional, Union
+import logging
+import multiprocessing
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
+from adam_core.orbits.query import sbdb
 
-from .orbit import Orbit
-from .precovery_db import FrameCandidate, PrecoveryCandidate, PrecoveryDatabase
+from .orbit import EpochTimescale, Orbit
+from .precovery_db import PrecoveryDatabase
+
+logger = logging.getLogger("precovery")
+logging.basicConfig()
+logger.setLevel(logging.INFO)
 
 
 def _candidates_to_dict(candidates):
@@ -43,6 +50,53 @@ def _candidates_to_dict(candidates):
     return data
 
 
+def precover_many(
+    orbits: List[Orbit],
+    database_directory: str,
+    tolerance: float = 1 / 3600,
+    max_matches: Optional[int] = None,
+    start_mjd: Optional[float] = None,
+    end_mjd: Optional[float] = None,
+    window_size: int = 7,
+    include_frame_candidates: bool = False,
+    allow_version_mismatch: bool = False,
+    n_workers: int = multiprocessing.cpu_count(),
+) -> dict[int, pd.DataFrame]:
+    """
+    Run a precovery search algorithm against many orbits at once.
+    """
+
+    inputs = [
+        (
+            o,
+            database_directory,
+            tolerance,
+            max_matches,
+            start_mjd,
+            end_mjd,
+            window_size,
+            include_frame_candidates,
+            allow_version_mismatch,
+        )
+        for o in orbits
+    ]
+
+    pool = multiprocessing.Pool(processes=n_workers)
+    results = pool.starmap(
+        precover,
+        inputs,
+    )
+    pool.close()
+    pool.join()
+
+    result_dict = {}
+    for r in results:
+        orbit_id = r["orbit_id"][0]
+        result_dict[orbit_id] = r
+
+    return result_dict
+
+
 def precover(
     orbit: Orbit,
     database_directory: str,
@@ -53,7 +107,7 @@ def precover(
     window_size: int = 7,
     include_frame_candidates: bool = False,
     allow_version_mismatch: bool = False,
-) -> List[Union[PrecoveryCandidate, FrameCandidate]]:
+) -> pd.DataFrame:
     """
     Connect to database directory and run precovery for the input orbit.
 
@@ -119,5 +173,61 @@ def precover(
 
     df = pd.DataFrame(_candidates_to_dict(candidates))
     df.loc[:, "observation_id"] = df.loc[:, "observation_id"].astype(str)
+    df["orbit_id"] = orbit.orbit_id
     df.sort_values(by=["mjd", "obscode"], inplace=True, ignore_index=True)
     return df
+
+
+def precover_objects(
+    object_ids: List[str],
+    database_directory: str,
+    tolerance: float = 1 / 3600,
+    max_matches: Optional[int] = None,
+    start_mjd: Optional[float] = None,
+    end_mjd: Optional[float] = None,
+    window_size: int = 7,
+    include_frame_candidates: bool = False,
+    allow_version_mismatch: bool = False,
+) -> dict[str, pd.DataFrame]:
+
+    orbid_to_objid = {}
+    logging.info("looking up orbital elements for objects")
+    orbits = []
+    for i, obj_id in enumerate(object_ids):
+        logging.info(f"resolving {obj_id} (orbit_id={i})")
+        sbdb_orbit = sbdb.query_sbdb([obj_id])
+        precovery_orbit = Orbit.keplerian(
+            orbit_id=i,
+            semimajor_axis_au=sbdb_orbit.keplerian.a[0],
+            eccentricity=sbdb_orbit.keplerian.e[0],
+            inclination_deg=sbdb_orbit.keplerian.i[0],
+            ascending_node_longitude_deg=sbdb_orbit.keplerian.raan[0],
+            periapsis_argument_deg=sbdb_orbit.keplerian.ap[0],
+            mean_anomaly_deg=sbdb_orbit.keplerian.M[0],
+            osculating_element_epoch_mjd=sbdb_orbit.keplerian.times[0].tt.mjd,
+            epoch_timescale=EpochTimescale.TT,
+            abs_magnitude=20,
+            photometric_slope_parameter=0.15,
+        )
+        orbid_to_objid[i] = obj_id
+        orbits.append(precovery_orbit)
+    logging.info("executing precovery")
+    results = precover_many(
+        orbits,
+        database_directory,
+        tolerance,
+        max_matches,
+        start_mjd,
+        end_mjd,
+        window_size,
+        include_frame_candidates,
+        allow_version_mismatch,
+    )
+    logging.info("got all results")
+
+    final_dataframe = pd.DataFrame()
+    for orbid, dataframe in results.items():
+        obj_id = orbid_to_objid[orbid]
+        dataframe["object_id"] = obj_id
+        final_dataframe = pd.concat([final_dataframe, dataframe])
+    return final_dataframe
