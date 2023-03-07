@@ -5,6 +5,7 @@ import os
 from typing import Iterable, Iterator, List, Optional, Union
 
 import numpy as np
+import pandas as pd
 
 from .config import Config, DefaultConfig
 from .frame_db import FrameDB, FrameIndex, Observation
@@ -67,7 +68,9 @@ class FrameCandidate:
     dataset_id: str
 
 
-def sort_candidates(candidates: List[Union[PrecoveryCandidate, FrameCandidate]]):
+def sort_candidates(
+    candidates: List[Union[PrecoveryCandidate, FrameCandidate]]
+) -> List[Union[PrecoveryCandidate, FrameCandidate]]:
     """
     Sort candidates by ascending MJD. For precovery candidates, use the MJD of the observation.
     For frame candidates, use the MJD at the midpoint of the exposure.
@@ -97,12 +100,9 @@ def sort_candidates(candidates: List[Union[PrecoveryCandidate, FrameCandidate]])
             raise TypeError("Candidates must be PrecoveryCandidate or FrameCandidate")
 
     cand_array = np.array(candidates)
-    mjds = np.array(mjds)
-    observation_ids = np.array(observation_ids)
-    # Primary sort key is MJD, secondary sort key is observation ID
-    # lexsort takes sort order in reverse
-    sorted_indices = np.lexsort((observation_ids, mjds))
-    return cand_array[sorted_indices].tolist()
+    df = pd.DataFrame({"mjd": mjds, "observation_id": observation_ids})
+    df.sort_values(by=["mjd", "observation_id"], inplace=True)
+    return cand_array[df.index.values].tolist()
 
 
 class PrecoveryDatabase:
