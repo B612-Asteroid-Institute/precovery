@@ -188,7 +188,7 @@ class PrecoveryDatabase:
 
         n = 0
         logger.info(
-            "precovering orbit %s from %f.6f to %f.5f, window=%d",
+            "precovering orbit %s from %.5f to %.5f, window=%d",
             orbit.orbit_id,
             start_mjd,
             end_mjd,
@@ -266,7 +266,7 @@ class PrecoveryDatabase:
             # Check if start_mjd_window is not earlier than start_mjd (if defined)
             # If start_mjd_window is earlier, then set start_mjd_window to start_mjd
             if (start_mjd is not None) and (start_mjd_window < start_mjd):
-                logger.info(
+                logger.debug(
                     f"Window start MJD [UTC] ({start_mjd_window}) is earlier than"
                     f" desired start MJD [UTC] ({start_mjd})."
                 )
@@ -275,7 +275,7 @@ class PrecoveryDatabase:
             # Check if end_mjd_window is not later than end_mjd (if defined)
             # If end_mjd_window is later, then set end_mjd_window to end_mjd
             if (end_mjd is not None) and (end_mjd_window > end_mjd):
-                logger.info(
+                logger.debug(
                     f"Window end MJD [UTC] ({end_mjd_window}) is later than desired end"
                     f" MJD [UTC] ({end_mjd})."
                 )
@@ -361,7 +361,7 @@ class PrecoveryDatabase:
 
         for exact_ephem, mjd, healpix in zip(exact_ephems, mjds, healpixels):
             frames = self.frames.idx.get_frames(obscode, mjd, healpix)
-            logger.info(
+            logger.debug(
                 "checking frames for healpix=%d obscode=%s mjd=%f",
                 healpix,
                 obscode,
@@ -383,7 +383,7 @@ class PrecoveryDatabase:
             )
 
             for f in frames:
-                logger.info("checking frame: %s", f)
+                logger.debug("checking frame: %s", f)
                 obs = np.array(list(self.frames.iterate_observations(f)))
                 n_obs = len(obs)
 
@@ -480,8 +480,8 @@ class PrecoveryDatabase:
                     )
                     yield candidate
 
-                logger.info(
-                    f"checked {n_obs} observations in frame and found {len(obs_filtered)}"
+                logger.debug(
+                    f"checked {n_obs} observations in frame {f} and found {len(obs_filtered)}"
                 )
                 # If no observations were found in this frame then we
                 # yield a frame candidate if desired
@@ -505,7 +505,7 @@ class PrecoveryDatabase:
                     )
                     yield frame_candidate
 
-                    logger.info("no observations found in this frame")
+                    logger.debug("no observations found in this frame")
 
                 n_frame += 1
-            logger.info("checked %d frames", n_frame)
+            logger.debug("checked %d frames", n_frame)

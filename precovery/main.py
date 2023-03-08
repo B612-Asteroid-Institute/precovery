@@ -89,7 +89,12 @@ def precover_many(
     pool.join()
 
     result_dict = {}
+    if len(results) == 0:
+        return {}
+
     for r in results:
+        if len(r) == 0:
+            continue
         orbit_id = r["orbit_id"][0]
         result_dict[orbit_id] = r
 
