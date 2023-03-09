@@ -354,3 +354,38 @@ def test_add_frames_dedupes_sorted_exposures(frame_db):
     frame_db.add_frames(dataset_id, frames)
 
     assert frame_db.idx.n_frames() == 4
+
+
+def test_get_frames_for_ra_dec(frame_db):
+    observations = [
+        make_sourceobs(
+            exposure_id=b"exp0",
+            id=b"obs1",
+            ra=1,
+            dec=2,
+            obscode="testobs",
+        ),
+        make_sourceobs(
+            exposure_id=b"exp0",
+            id=b"obs1",
+            ra=1,
+            dec=2,
+            obscode="testobs",
+        ),
+        make_sourceobs(
+            exposure_id=b"exp0",
+            id=b"obs1",
+            ra=40,
+            dec=41,
+            obscode="testobs",
+        ),
+    ]
+    frames = list(bundle_into_frames(observations))
+    assert len(frames) == 2
+
+    dataset_id = "test_dataset"
+    frame_db.add_dataset(dataset_id)
+    frame_db.add_frames(dataset_id, frames)
+
+    results = list(frame_db.get_frames_for_ra_dec(1, 2, "testobs", 32))
+    assert len(results) == 1

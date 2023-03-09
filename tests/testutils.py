@@ -13,6 +13,7 @@ def make_sourceobs(
     nside: int = 32,
     ra: float = 1.0,
     dec: float = 2.0,
+    obscode: str = "obs",
 ) -> SourceObservation:
 
     if id is None:
@@ -23,7 +24,7 @@ def make_sourceobs(
 
     return SourceObservation(
         exposure_id=exposure_id,
-        obscode="obs",
+        obscode=obscode,
         id=id,
         mjd=50000,
         ra=ra,
