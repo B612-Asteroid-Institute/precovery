@@ -134,6 +134,22 @@ def make_observations(
     )
     dts.sort()
 
+    # Define different uncertainties for different observatories
+    # Set astrometric uncertainties for I41 to nan to test that they are interpreted correctly
+    # Set photometric uncertainties for 500 to nan to test that they are interpreted correctly
+    astrometric_uncertainties = {
+        "500": 1.0 / 3600.0,
+        "I11": 0.01 / 3600.0,
+        "I41": np.nan,
+        "F51": 0.1 / 3600.0,
+    }
+    photometric_uncertainties = {
+        "500": np.nan,
+        "I11": 0.001,
+        "I41": 0.1,
+        "F51": 0.01,
+    }
+
     # Create exposure quads
     unique_exposure_durations = np.array([30.0, 60.0, 90.0, 120.0])
     num_obs = int(len(dts) / len(unique_exposure_durations))
@@ -200,9 +216,15 @@ def make_observations(
 
             ephemeris_df = pd.DataFrame(ephemeris_dict)
             ephemeris_df.insert(0, "object_id", orbit_ids[orbit.orbit_id])
-            ephemeris_df.insert(4, "ra_sigma", 0.0)
-            ephemeris_df.insert(4, "dec_sigma", 0.0)
-            ephemeris_df.insert(6, "mag_sigma", 0.0)
+            ephemeris_df.insert(
+                4, "ra_sigma", astrometric_uncertainties[observatory_code]
+            )
+            ephemeris_df.insert(
+                5, "dec_sigma", astrometric_uncertainties[observatory_code]
+            )
+            ephemeris_df.insert(
+                6, "mag_sigma", photometric_uncertainties[observatory_code]
+            )
             ephemeris_df.insert(7, "filter", "V")
 
             ephemeris_df["observatory_code"] = observatory_code

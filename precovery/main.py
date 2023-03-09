@@ -1,10 +1,16 @@
-from typing import List, Optional, Union
+import logging
+import multiprocessing
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
 
 from .orbit import Orbit
-from .precovery_db import FrameCandidate, PrecoveryCandidate, PrecoveryDatabase
+from .precovery_db import PrecoveryDatabase
+
+logger = logging.getLogger("precovery")
+logging.basicConfig()
+logger.setLevel(logging.INFO)
 
 
 def _candidates_to_dict(candidates):
@@ -43,6 +49,58 @@ def _candidates_to_dict(candidates):
     return data
 
 
+def precover_many(
+    orbits: List[Orbit],
+    database_directory: str,
+    tolerance: float = 1 / 3600,
+    max_matches: Optional[int] = None,
+    start_mjd: Optional[float] = None,
+    end_mjd: Optional[float] = None,
+    window_size: int = 7,
+    include_frame_candidates: bool = False,
+    allow_version_mismatch: bool = False,
+    n_workers: int = multiprocessing.cpu_count(),
+) -> dict[int, pd.DataFrame]:
+    """
+    Run a precovery search algorithm against many orbits at once.
+    """
+
+    inputs = [
+        (
+            o,
+            database_directory,
+            tolerance,
+            max_matches,
+            start_mjd,
+            end_mjd,
+            window_size,
+            include_frame_candidates,
+            allow_version_mismatch,
+        )
+        for o in orbits
+    ]
+
+    pool = multiprocessing.Pool(processes=n_workers)
+    results = pool.starmap(
+        precover,
+        inputs,
+    )
+    pool.close()
+    pool.join()
+
+    result_dict = {}
+    if len(results) == 0:
+        return {}
+
+    for r in results:
+        if len(r) == 0:
+            continue
+        orbit_id = r["orbit_id"][0]
+        result_dict[orbit_id] = r
+
+    return result_dict
+
+
 def precover(
     orbit: Orbit,
     database_directory: str,
@@ -53,7 +111,7 @@ def precover(
     window_size: int = 7,
     include_frame_candidates: bool = False,
     allow_version_mismatch: bool = False,
-) -> List[Union[PrecoveryCandidate, FrameCandidate]]:
+) -> pd.DataFrame:
     """
     Connect to database directory and run precovery for the input orbit.
 
@@ -119,5 +177,6 @@ def precover(
 
     df = pd.DataFrame(_candidates_to_dict(candidates))
     df.loc[:, "observation_id"] = df.loc[:, "observation_id"].astype(str)
+    df["orbit_id"] = orbit.orbit_id
     df.sort_values(by=["mjd", "obscode"], inplace=True, ignore_index=True)
     return df

@@ -1,6 +1,7 @@
 import os
 import sqlite3 as sql
 
+import numpy as np
 import pytest
 from astropy.time import Time
 
@@ -248,6 +249,62 @@ def test_add_frames(frame_db):
     # Get associated observations
     stored_obs1 = list(frame_db.iterate_observations(stored_frame_1))
     assert len(stored_obs1) == 2
+
+
+def test_add_frames_optional(frame_db):
+    """Add a frame with an observation that contains optional quantities (represented as NaN)
+    and ensure that they are stored and retrieved correctly.
+
+    Optional quantities are currently limited to ra_sigma, dec_sigma, and mag_sigma.
+    """
+    frame_db.add_dataset(
+        dataset_id="test_dataset_optional",
+    )
+
+    start_time = 60000.0
+    exposure_duration = 60
+    midpoint_time = start_time + exposure_duration / 86400
+
+    # A frame with two observations in it.
+    frame = SourceFrame(
+        exposure_id="n1",
+        obscode="obs_optional",
+        filter="filter",
+        exposure_mjd_start=start_time,
+        exposure_mjd_mid=midpoint_time,
+        exposure_duration=exposure_duration,
+        healpixel=1,
+        observations=[
+            SourceObservation(
+                exposure_id="n1",
+                obscode="obs_optional",
+                id=b"1",
+                mjd=midpoint_time,
+                ra=1.0,
+                dec=2.0,
+                ra_sigma=np.nan,
+                dec_sigma=np.nan,
+                mag=5.0,
+                mag_sigma=np.nan,
+                filter="filter",
+                exposure_mjd_start=start_time,
+                exposure_mjd_mid=midpoint_time,
+                exposure_duration=exposure_duration,
+            ),
+        ],
+    )
+
+    frame_db.add_frames("test_dataset_optional", [frame])
+
+    frame_stored = list(frame_db.idx.get_frames("obs_optional", midpoint_time, 1))
+    assert len(frame_stored) == 1
+
+    # Let's extract the observation and check that the nans were
+    # correctly stored.
+    for obs in frame_db.iterate_observations(frame_stored[0]):
+        assert np.isnan(obs.ra_sigma)
+        assert np.isnan(obs.dec_sigma)
+        assert np.isnan(obs.mag_sigma)
 
 
 def test_add_frames_dedupes_sorted_exposures(frame_db):

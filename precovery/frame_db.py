@@ -529,8 +529,11 @@ class FrameIndex:
             }
             for frame in frames
         ]
-        self.dbconn.execute(insert, values)
-        self.dbconn.commit()
+        if len(values) > 0:
+            self.dbconn.execute(insert, values)
+            self.dbconn.commit()
+        else:
+            logger.warning("No frames to add")
 
     def add_dataset(self, dataset: Dataset):
         """
