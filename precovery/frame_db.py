@@ -610,7 +610,7 @@ class FrameIndex:
         Yields all the frames which are for a single healpixel-obscode pair.
         """
         stmt = sq.select("*").where(
-            self.frames.c.healpixel == healpixel,
+            self.frames.c.healpixel == int(healpixel),
             self.frames.c.obscode == obscode,
         )
         rows = self.dbconn.execute(stmt).fetchall()
