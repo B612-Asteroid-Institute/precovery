@@ -105,7 +105,6 @@ def precover(
     orbit: Orbit,
     database_directory: str,
     tolerance: float = 1 / 3600,
-    max_matches: Optional[int] = None,
     start_mjd: Optional[float] = None,
     end_mjd: Optional[float] = None,
     window_size: int = 7,
@@ -126,8 +125,6 @@ def precover(
     tolerance : float, optional
         The on-sky angular tolerance in degrees to which any PrecoveryCandidates should be
         returned.
-    max_matches : int, optional
-        Don't return more than this many potential PrecoveryCandidates.
     start_mjd : float, optional
         Limit precovery search to all MJD UTC times beyond this time.
     end_mjd : float, optional
@@ -162,18 +159,14 @@ def precover(
         allow_version_mismatch=allow_version_mismatch,
     )
 
-    candidates = [
-        c
-        for c in precovery_db.precover(
-            orbit,
-            tolerance=tolerance,
-            max_matches=max_matches,
-            start_mjd=start_mjd,
-            end_mjd=end_mjd,
-            window_size=window_size,
-            include_frame_candidates=include_frame_candidates,
-        )
-    ]
+    candidates = precovery_db.precover(
+        orbit,
+        tolerance=tolerance,
+        start_mjd=start_mjd,
+        end_mjd=end_mjd,
+        window_size=window_size,
+        include_frame_candidates=include_frame_candidates,
+    )
 
     df = pd.DataFrame(_candidates_to_dict(candidates))
     df.loc[:, "observation_id"] = df.loc[:, "observation_id"].astype(str)

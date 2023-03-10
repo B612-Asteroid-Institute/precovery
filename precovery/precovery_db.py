@@ -2,7 +2,7 @@ import dataclasses
 import itertools
 import logging
 import os
-from typing import Iterable, Iterator, Optional, Union
+from typing import Iterable, Iterator, List, Optional, Union
 
 import numpy as np
 
@@ -65,6 +65,31 @@ class FrameCandidate:
     pred_vra_degpday: float
     pred_vdec_degpday: float
     dataset_id: str
+
+
+def sort_candidates(
+    candidates: List[Union[PrecoveryCandidate, FrameCandidate]]
+) -> List[Union[PrecoveryCandidate, FrameCandidate]]:
+    """
+    Sort candidates by ascending MJD. For precovery candidates, use the MJD of the observation.
+    For frame candidates, use the MJD at the midpoint of the exposure.
+
+    Parameters
+    ----------
+    candidates : List[Union[PrecoveryCandidate, FrameCandidate]]
+        List of candidates to sort.
+
+    Returns
+    -------
+    List[Union[PrecoveryCandidate, FrameCandidate]]
+        Sorted list of candidates.
+    """
+    return sorted(
+        candidates,
+        key=lambda c: (c.mjd, c.observation_id)
+        if isinstance(c, PrecoveryCandidate)
+        else (c.exposure_mjd_mid, ""),
+    )
 
 
 class PrecoveryDatabase:
@@ -145,12 +170,11 @@ class PrecoveryDatabase:
         self,
         orbit: Orbit,
         tolerance: float = 30 * ARCSEC,
-        max_matches: Optional[int] = None,
         start_mjd: Optional[float] = None,
         end_mjd: Optional[float] = None,
         window_size: int = 7,
         include_frame_candidates: bool = False,
-    ):
+    ) -> List[Union[PrecoveryCandidate, FrameCandidate]]:
         """
         Find observations which match orbit in the database. Observations are
         searched in descending order by mjd.
@@ -165,6 +189,11 @@ class PrecoveryDatabase:
 
         end_mjd: Only consider observations from before this epoch (inclusive).
         If None, find all.
+
+        Returns
+        -------
+        list : List[PrecoveryCandidates, FrameCandidates]
+            Precovery candidate observations, and optionally frame candidates.
         """
         # basically:
         """
@@ -186,7 +215,6 @@ class PrecoveryDatabase:
             if end_mjd is None:
                 end_mjd = last
 
-        n = 0
         logger.info(
             "precovering orbit %s from %.5f to %.5f, window=%d",
             orbit.orbit_id,
@@ -198,11 +226,12 @@ class PrecoveryDatabase:
         windows = self.frames.idx.window_centers(start_mjd, end_mjd, window_size)
 
         # group windows by obscodes so that many windows can be searched at once
+        matches = []
         for obscode, obs_windows in itertools.groupby(
             windows, key=lambda pair: pair[1]
         ):
             mjds = [window[0] for window in obs_windows]
-            matches = self._check_windows(
+            matches_window = self._check_windows(
                 mjds,
                 obscode,
                 orbit,
@@ -212,11 +241,13 @@ class PrecoveryDatabase:
                 window_size=window_size,
                 include_frame_candidates=include_frame_candidates,
             )
-            for result in matches:
-                yield result
-                n += 1
-                if max_matches is not None and n >= max_matches:
-                    return
+            matches += list(matches_window)
+
+        # Sort matches by mjd
+        if len(matches) > 0:
+            matches = sort_candidates(matches)
+
+        return matches
 
     def _check_windows(
         self,
