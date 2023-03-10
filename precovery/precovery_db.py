@@ -5,7 +5,6 @@ import os
 from typing import Iterable, Iterator, List, Optional, Union
 
 import numpy as np
-import pandas as pd
 
 from .config import Config, DefaultConfig
 from .frame_db import FrameDB, FrameIndex, Observation
@@ -85,24 +84,12 @@ def sort_candidates(
     List[Union[PrecoveryCandidate, FrameCandidate]]
         Sorted list of candidates.
     """
-    mjds = []
-    observation_ids = []
-    for candidate_i in candidates:
-        if isinstance(candidate_i, PrecoveryCandidate):
-            mjds.append(candidate_i.mjd)
-            observation_ids.append(candidate_i.observation_id)
-        elif isinstance(candidate_i, FrameCandidate):
-            mjds.append(candidate_i.exposure_mjd_mid)
-            # Add empty observation ID since frame candidates don't have one
-            # Frames, so this is fine
-            observation_ids.append("")
-        else:
-            raise TypeError("Candidates must be PrecoveryCandidate or FrameCandidate")
-
-    cand_array = np.array(candidates)
-    df = pd.DataFrame({"mjd": mjds, "observation_id": observation_ids})
-    df.sort_values(by=["mjd", "observation_id"], inplace=True)
-    return cand_array[df.index.values].tolist()
+    return sorted(
+        candidates,
+        key=lambda c: (c.mjd, c.observation_id)
+        if isinstance(c, PrecoveryCandidate)
+        else (c.exposure_mjd_mid, ""),
+    )
 
 
 class PrecoveryDatabase:
