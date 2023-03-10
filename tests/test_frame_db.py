@@ -387,5 +387,5 @@ def test_get_frames_for_ra_dec(frame_db):
     frame_db.add_dataset(dataset_id)
     frame_db.add_frames(dataset_id, frames)
 
-    results = list(frame_db.get_frames_for_ra_dec(1, 2, "testobs", 32))
+    results = list(frame_db.get_frames_for_ra_dec(1, 2, "testobs"))
     assert len(results) == 1

@@ -610,7 +610,7 @@ class FrameIndex:
         Yields all the frames which are for a single healpixel-obscode pair.
         """
         stmt = sq.select("*").where(
-            self.frames.c.healpixel == healpixel,
+            self.frames.c.healpixel == int(healpixel),
             self.frames.c.obscode == obscode,
         )
         rows = self.dbconn.execute(stmt).fetchall()
@@ -829,15 +829,15 @@ class FrameDB:
             bytes_read += datagram_size + id_size
             yield Observation(mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id)
 
-    def get_frames_for_ra_dec(self, ra: float, dec: float, obscode: str, nside: int):
+    def get_frames_for_ra_dec(self, ra: float, dec: float, obscode: str):
         """Yields all frames that overlap given ra, dec for a given
         obscode, using nside for the healpix resolution.
 
         """
         logger.debug(
-            f"checking frames for ra={ra} dec={dec} obscode={obscode} nside={nside}"
+            f"checking frames for ra={ra} dec={dec} obscode={obscode} nside={self.healpix_nside}"
         )
-        healpixel = healpix_geom.radec_to_healpixel(ra, dec, nside)
+        healpixel = healpix_geom.radec_to_healpixel(ra, dec, self.healpix_nside)
         for frame in self.idx.frames_for_healpixel(healpixel, obscode):
             yield frame
 

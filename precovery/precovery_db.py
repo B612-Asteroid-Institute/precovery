@@ -517,7 +517,7 @@ class PrecoveryDatabase:
         given RA, Dec for a particular observatory (specified as an obscode).
 
         """
-        frames = self.frames.get_frames_for_ra_dec(ra, dec, obscode, self.config.nside)
+        frames = self.frames.get_frames_for_ra_dec(ra, dec, obscode)
         for f in frames:
             for o in self.frames.iterate_observations(f):
                 yield o
