@@ -261,7 +261,10 @@ class Orbit:
         # print(epochs_array.shape)
         # print(eph.shape)
         assert err == 0, "There was an issue with the pyoorb ephemeris generation"
-        return [Ephemeris(eph[0, i, :]) for i in range(epochs_array.shape[0])]
+        return [
+            Ephemeris.from_pyoorb_vector(eph[0, i, :])
+            for i in range(epochs_array.shape[0])
+        ]
 
     def precover_remote(
         self,
@@ -384,15 +387,22 @@ class Orbit:
 
 
 class Ephemeris:
-    def __init__(self, raw_data: npt.NDArray[np.float64]):
-        self._raw_data = raw_data
+    def __init__(self, mjd, ra, dec, ra_velocity, dec_velocity):
+        self.mjd = mjd
+        self.ra = ra
+        self.dec = dec
+        self.ra_velocity = ra_velocity
+        self.dec_velocity = dec_velocity
 
-        self.mjd = raw_data[0]
-        self.ra = raw_data[1]
-        self.dec = raw_data[2]
+    @classmethod
+    def from_pyoorb_vector(cls, raw_data: npt.NDArray[np.float64]):
+        mjd = raw_data[0]
+        ra = raw_data[1]
+        dec = raw_data[2]
         # oorb returns vracos(dec), so lets remove the cos(dec) term
-        self.ra_velocity = raw_data[3] / np.cos(np.radians(self.dec))  # deg per day
-        self.dec_velocity = raw_data[4]  # deg per day
+        ra_velocity = raw_data[3] / np.cos(np.radians(dec))  # deg per day
+        dec_velocity = raw_data[4]  # deg per day
+        return cls(mjd, ra, dec, ra_velocity, dec_velocity)
 
     def __str__(self):
         return f"<Ephemeris ra={self.ra:.4f} dec={self.dec:.4f} mjd={self.mjd:.6f}>"

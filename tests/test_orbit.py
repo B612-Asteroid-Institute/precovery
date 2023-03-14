@@ -1,6 +1,7 @@
 import numpy as np
 
 from precovery import orbit
+from precovery.observation import Observation, ObservationArray
 
 
 def test_orbit_initialization_from_state_vector():
@@ -86,3 +87,45 @@ def test_orbit_ephemeris_computation():
 
     ephem = o.compute_ephemeris(obscode, [epoch])
     assert ephem[0].mjd == epoch
+
+
+def test_ephemeris_distance():
+    ephemeris = orbit.Ephemeris(mjd=1, ra=2, dec=3, ra_velocity=4, dec_velocity=5)
+
+    observations = ObservationArray(
+        [
+            Observation(
+                mjd=1,
+                ra=2,
+                dec=3,
+                id=b"exact",
+                ra_sigma=0,
+                dec_sigma=0,
+                mag=0,
+                mag_sigma=0,
+            ),
+            Observation(
+                mjd=1,
+                ra=2,
+                dec=4,
+                id=b"one_degree_dec",
+                ra_sigma=0,
+                dec_sigma=0,
+                mag=0,
+                mag_sigma=0,
+            ),
+            Observation(
+                mjd=1,
+                ra=362,
+                dec=3,
+                id=b"wraparound",
+                ra_sigma=0,
+                dec_sigma=0,
+                mag=0,
+                mag_sigma=0,
+            ),
+        ]
+    )
+
+    distance = ephemeris.distance(observations)
+    np.testing.assert_almost_equal(distance, [0, 1, 0])
