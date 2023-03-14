@@ -3,6 +3,8 @@ import numpy as np
 from precovery import orbit
 from precovery.observation import Observation, ObservationArray
 
+from .testutils import requires_openorb_data
+
 
 def test_orbit_initialization_from_state_vector():
     state_vector = np.array(
@@ -29,6 +31,7 @@ def test_orbit_initialization_from_state_vector():
     assert o._orbit_type == orbit.OrbitElementType.KEPLERIAN
 
 
+@requires_openorb_data
 def test_orbit_propagation():
     state_vector = np.array(
         [
@@ -59,6 +62,7 @@ def test_orbit_propagation():
     assert o._epoch == 51544.5
 
 
+@requires_openorb_data
 def test_orbit_ephemeris_computation():
     state_vector = np.array(
         [

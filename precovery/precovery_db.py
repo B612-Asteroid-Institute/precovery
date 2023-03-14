@@ -248,6 +248,7 @@ class PrecoveryDatabase:
         end_mjd: Optional[float] = None,
         window_size: int = 7,
         include_frame_candidates: bool = False,
+        datasets: Optional[set[str]] = None,
     ) -> List[Union[PrecoveryCandidate, FrameCandidate]]:
         """
         Find observations which match orbit in the database. Observations are
@@ -260,6 +261,8 @@ class PrecoveryDatabase:
 
         end_mjd: Only consider observations from before this epoch (inclusive).
         If None, find all.
+
+        datasets: Only consider observations from the indicated datasets.
 
         Returns
         -------
@@ -279,6 +282,9 @@ class PrecoveryDatabase:
                     for each matching observation
                         yield match
         """
+        if datasets is not None:
+            self._warn_for_missing_datasets(datasets)
+
         if start_mjd is None or end_mjd is None:
             first, last = self.frames.idx.mjd_bounds()
             if start_mjd is None:
@@ -287,14 +293,17 @@ class PrecoveryDatabase:
                 end_mjd = last
 
         logger.info(
-            "precovering orbit %s from %.5f to %.5f, window=%d",
+            "precovering orbit %s from %.5f to %.5f, window=%d, datasets=%s",
             orbit.orbit_id,
             start_mjd,
             end_mjd,
             window_size,
+            datasets or "all",
         )
 
-        windows = self.frames.idx.window_centers(start_mjd, end_mjd, window_size)
+        windows = self.frames.idx.window_centers(
+            start_mjd, end_mjd, window_size, datasets=datasets
+        )
 
         # group windows by obscodes so that many windows can be searched at once
         matches = []
@@ -311,6 +320,7 @@ class PrecoveryDatabase:
                 end_mjd=end_mjd,
                 window_size=window_size,
                 include_frame_candidates=include_frame_candidates,
+                datasets=datasets,
             )
             matches += list(matches_window)
 
@@ -330,6 +340,7 @@ class PrecoveryDatabase:
         end_mjd: Optional[float] = None,
         window_size: int = 7,
         include_frame_candidates: bool = False,
+        datasets: Optional[set[str]] = None,
     ):
         """
         Find all observations that match orbit within a list of windows
@@ -386,7 +397,10 @@ class PrecoveryDatabase:
             test_mjds = []
             test_healpixels = []
             for mjd, healpixels in self.frames.idx.propagation_targets(
-                start_mjd_window, end_mjd_window, obscode
+                start_mjd_window,
+                end_mjd_window,
+                obscode,
+                datasets,
             ):
                 logger.debug("mjd=%.6f:\thealpixels with data: %r", mjd, healpixels)
                 test_mjds.append(mjd)
@@ -436,6 +450,7 @@ class PrecoveryDatabase:
                     keep_mjds,
                     tolerance,
                     include_frame_candidates,
+                    datasets,
                 )
                 for m in matches:
                     yield m
@@ -448,6 +463,7 @@ class PrecoveryDatabase:
         mjds: Iterable[float],
         tolerance: float,
         include_frame_candidates: bool,
+        datasets: Optional[set[str]],
     ) -> Iterator[Union[PrecoveryCandidate, FrameCandidate]]:
         """
         Deeply inspect all frames that match the given obscode, mjd, and healpix to
@@ -462,7 +478,7 @@ class PrecoveryDatabase:
         )
 
         for ephem, mjd, healpix in zip(all_ephems, mjds, healpixels):
-            frames = self.frames.idx.get_frames(obscode, mjd, healpix)
+            frames = self.frames.idx.get_frames(obscode, mjd, healpix, datasets)
             logger.debug(
                 "checking frames for healpix=%d obscode=%s mjd=%f",
                 healpix,
@@ -594,3 +610,22 @@ class PrecoveryDatabase:
         for o in self.find_observations_in_region(ra, dec, obscode):
             if haversine_distance_deg(o.ra, ra, o.dec, dec) <= tolerance:
                 yield o
+
+    def all_datasets(self) -> set[str]:
+        """
+        Returns the set of all dataset ID strings loaded in the database.
+        """
+        return set(self.frames.idx.get_dataset_ids())
+
+    def _warn_for_missing_datasets(self, datasets: set[str]):
+        """Log some warning messages if the given set includes
+        dataset IDs which are not present in the database.
+
+        """
+        any_missing = False
+        for ds in datasets:
+            if not self.frames.has_dataset(ds):
+                any_missing = True
+                logger.warn(f'dataset "{ds}" is not in the database')
+        if any_missing:
+            logger.warn(f"datasets in the databse: {self.all_datasets()}")
