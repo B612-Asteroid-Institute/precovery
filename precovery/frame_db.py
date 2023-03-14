@@ -77,28 +77,6 @@ class Dataset:
 
 
 @dataclasses.dataclass
-class FrameBundleDescription:
-    obscode: str
-    start_epoch: float
-    end_epoch: float
-    healpixel: int
-    n_frames: int
-
-    def epoch_midpoint(self) -> float:
-        return (self.start_epoch + self.end_epoch) / 2.0
-
-
-@dataclasses.dataclass
-class FrameWindow:
-    start_epoch: float
-    end_epoch: float
-    n_frames: int
-
-    def epoch_midpoint(self) -> float:
-        return (self.start_epoch + self.end_epoch) / 2.0
-
-
-@dataclasses.dataclass
 class Observation:
     mjd: float
     ra: float
@@ -345,24 +323,6 @@ class FrameIndex:
         row = self.dbconn.execute(stmt).fetchone()
         return row[0]
 
-    def frames_for_bundle(
-        self, bundle: FrameBundleDescription
-    ) -> Iterator[HealpixFrame]:
-        """
-        Yields frames which match a particular bundle.
-        """
-        select_stmt = (
-            sq.select(self.frames)
-            .where(
-                self.frames.c.exposure_mjd_mid >= bundle.start_epoch,
-                self.frames.c.exposure_mjd_mid <= bundle.end_epoch,
-            )
-            .order_by(self.frames.c.exposure_mjd_mid.desc())
-        )
-        rows = self.dbconn.execute(select_stmt)
-        for row in rows:
-            yield HealpixFrame(*row)
-
     def mjd_bounds(self) -> Tuple[float, float]:
         """
         Returns the minimum and maximum exposure_mjd_mid of all frames in the index.
@@ -373,69 +333,6 @@ class FrameIndex:
         )
         first, last = self.dbconn.execute(select_stmt).fetchone()
         return first, last
-
-    def frame_bundles(
-        self, window_size_days: int, mjd_start: float, mjd_end: float
-    ) -> Iterator[FrameBundleDescription]:
-        """
-        Returns an iterator which yields descriptions of bundles of frames with
-        a common epoch between start and end (inclusive).
-        """
-        first, _ = self.mjd_bounds()
-        offset = -first + window_size_days / 2
-        # select
-        #    obscode,
-        #    (cast(mjd - first + (window_size_days / 2) as int) / windows_size_days)
-        #     * window_size_days + first as common_epoch
-        # from frames;
-        subq = (
-            sq.select(
-                self.frames.c.obscode,
-                self.frames.c.healpixel,
-                self.frames.c.exposure_mjd_mid,
-                (
-                    (
-                        sq.cast(
-                            self.frames.c.exposure_mjd_mid + offset,
-                            sq.Integer,
-                        )
-                        / window_size_days
-                    )
-                    * window_size_days
-                    + first
-                ).label("common_epoch"),
-            )
-            .where(
-                self.frames.c.exposure_mjd_mid >= mjd_start,
-                self.frames.c.exposure_mjd_mid <= mjd_end,
-            )
-            .subquery()
-        )
-        select_stmt = (
-            sq.select(
-                subq.c.common_epoch,
-                subq.c.obscode,
-                sqlfunc.min(subq.c.exposure_mjd_mid).label("start_epoch"),
-                sqlfunc.max(subq.c.exposure_mjd_mid).label("end_epoch"),
-                subq.c.healpixel,
-                sqlfunc.count(1).label("n_frames"),
-            )
-            .group_by(
-                subq.c.obscode,
-                subq.c.common_epoch,
-                subq.c.healpixel,
-            )
-            .order_by(
-                subq.c.common_epoch.desc(),
-                subq.c.obscode,
-                subq.c.healpixel,
-            )
-        )
-        logger.debug("executing query: %s", select_stmt)
-        results = self.dbconn.execute(select_stmt)
-
-        for row in results:
-            yield FrameBundleDescription(*row)
 
     def all_frames_by_key(self) -> Iterator[Tuple[HealpixFrameKey, List[HealpixFrame]]]:
         """Returns all frames in the index, sorted according to the
