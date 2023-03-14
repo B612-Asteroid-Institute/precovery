@@ -387,7 +387,9 @@ class Orbit:
 
 
 class Ephemeris:
-    def __init__(self, mjd, ra, dec, ra_velocity, dec_velocity):
+    def __init__(
+        self, mjd: float, ra: float, dec: float, ra_velocity: float, dec_velocity: float
+    ):
         self.mjd = mjd
         self.ra = ra
         self.dec = dec
