@@ -9,6 +9,7 @@ from precovery.sourcecatalog import SourceObservation
 def make_sourceobs(
     exposure_id: str = "exposure",
     id: Optional[bytes] = None,
+    mjd: float = 50000,
     healpixel: Optional[int] = None,
     nside: int = 32,
     ra: float = 1.0,
@@ -26,7 +27,7 @@ def make_sourceobs(
         exposure_id=exposure_id,
         obscode=obscode,
         id=id,
-        mjd=50000,
+        mjd=mjd,
         ra=ra,
         dec=dec,
         ra_sigma=3.0,

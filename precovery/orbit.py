@@ -7,6 +7,9 @@ import numpy.typing as npt
 import requests as req
 from astropy.time import Time
 
+from .observation import ObservationArray
+from .spherical_geom import haversine_distance_deg
+
 try:
     import pyoorb
 except ImportError:
@@ -393,3 +396,8 @@ class Ephemeris:
 
     def __str__(self):
         return f"<Ephemeris ra={self.ra:.4f} dec={self.dec:.4f} mjd={self.mjd:.6f}>"
+
+    def distance(self, observations: ObservationArray) -> npt.NDArray[np.float64]:
+        return haversine_distance_deg(
+            self.ra, observations.values["ra"], self.dec, observations.values["dec"]
+        )

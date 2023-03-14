@@ -7,8 +7,9 @@ from typing import Iterable, Iterator, List, Optional, Union
 import numpy as np
 
 from .config import Config, DefaultConfig
-from .frame_db import FrameDB, FrameIndex, Observation
+from .frame_db import FrameDB, FrameIndex
 from .healpix_geom import radec_to_healpixel
+from .observation import Observation
 from .orbit import EpochTimescale, Orbit, PropagationIntegrator
 from .spherical_geom import haversine_distance_deg
 from .version import __version__
