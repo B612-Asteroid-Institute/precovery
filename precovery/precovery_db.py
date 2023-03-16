@@ -181,9 +181,6 @@ class PrecoveryDatabase:
 
         orbit: The orbit to match.
 
-        max_matches: End once this many matches have been found. If None, find
-        all matches.
-
         start_mjd: Only consider observations from after this epoch
         (inclusive). If None, find all.
 
