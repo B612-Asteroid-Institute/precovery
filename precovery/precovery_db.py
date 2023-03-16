@@ -7,10 +7,10 @@ from typing import Iterable, Iterator, List, Optional, Union
 import numpy as np
 
 from .config import Config, DefaultConfig
-from .frame_db import FrameDB, FrameIndex
+from .frame_db import FrameDB, FrameIndex, HealpixFrame
 from .healpix_geom import radec_to_healpixel
-from .observation import Observation
-from .orbit import EpochTimescale, Orbit, PropagationIntegrator
+from .observation import Observation, ObservationArray
+from .orbit import Ephemeris, EpochTimescale, Orbit, PropagationIntegrator
 from .spherical_geom import haversine_distance_deg
 from .version import __version__
 
@@ -51,6 +51,51 @@ class PrecoveryCandidate:
     distance_arcsec: float
     dataset_id: str
 
+    @classmethod
+    def from_observed_ephem(
+        cls, obs: Observation, frame: HealpixFrame, ephem: Ephemeris
+    ):
+        # Calculate the HEALpixel ID for the predicted ephemeris of
+        # the orbit with a high nside value (k=15, nside=2**15) The
+        # indexed observations are indexed to a much lower nside but
+        # we may decide in the future to re-index the database using
+        # different values for that parameter. As long as we return a
+        # Healpix ID generated with nside greater than the indexed
+        # database then we can always down-sample the ID to a lower
+        # nside value
+        healpix_id = int(radec_to_healpixel(ephem.ra, ephem.dec, nside=CANDIDATE_NSIDE))
+
+        return cls(
+            # Observation data:
+            observation_id=obs.id.decode(),
+            mjd=obs.mjd,
+            ra_deg=obs.ra,
+            dec_deg=obs.dec,
+            ra_sigma_arcsec=obs.ra_sigma / ARCSEC,
+            dec_sigma_arcsec=obs.dec_sigma / ARCSEC,
+            mag=obs.mag,
+            mag_sigma=obs.mag_sigma,
+            # Exposure data:
+            exposure_mjd_start=frame.exposure_mjd_start,
+            exposure_mjd_mid=frame.exposure_mjd_mid,
+            filter=frame.filter,
+            obscode=frame.obscode,
+            exposure_id=frame.exposure_id,
+            exposure_duration=frame.exposure_duration,
+            dataset_id=frame.dataset_id,
+            # Ephemeris data:
+            healpix_id=healpix_id,
+            pred_ra_deg=ephem.ra,
+            pred_dec_deg=ephem.dec,
+            pred_vra_degpday=ephem.ra_velocity,
+            pred_vdec_degpday=ephem.dec_velocity,
+            # Data on the distance between the observation and ephemeris:
+            delta_ra_arcsec=(obs.ra - ephem.ra) / ARCSEC,
+            delta_dec_arcsec=(obs.dec - ephem.dec) / ARCSEC,
+            distance_arcsec=haversine_distance_deg(obs.ra, ephem.ra, obs.dec, ephem.dec)
+            / ARCSEC,
+        )
+
 
 @dataclasses.dataclass
 class FrameCandidate:
@@ -66,6 +111,34 @@ class FrameCandidate:
     pred_vra_degpday: float
     pred_vdec_degpday: float
     dataset_id: str
+
+    @classmethod
+    def from_frame(cls, frame: HealpixFrame, ephem: Ephemeris):
+        # Calculate the HEALpixel ID for the predicted ephemeris of
+        # the orbit with a high nside value (k=15, nside=2**15) The
+        # indexed observations are indexed to a much lower nside but
+        # we may decide in the future to re-index the database using
+        # different values for that parameter. As long as we return a
+        # Healpix ID generated with nside greater than the indexed
+        # database then we can always down-sample the ID to a lower
+        # nside value
+        healpix_id = int(radec_to_healpixel(ephem.ra, ephem.dec, nside=CANDIDATE_NSIDE))
+        return cls(
+            # Exposure data:
+            exposure_mjd_start=frame.exposure_mjd_start,
+            exposure_mjd_mid=frame.exposure_mjd_mid,
+            filter=frame.filter,
+            obscode=frame.obscode,
+            exposure_id=frame.exposure_id,
+            exposure_duration=frame.exposure_duration,
+            dataset_id=frame.dataset_id,
+            healpix_id=healpix_id,
+            # Ephemeris data:
+            pred_ra_deg=ephem.ra,
+            pred_dec_deg=ephem.dec,
+            pred_vra_degpday=ephem.ra_velocity,
+            pred_vdec_degpday=ephem.dec_velocity,
+        )
 
 
 def sort_candidates(
@@ -381,14 +454,14 @@ class PrecoveryDatabase:
         see if they contain observations which match the ephemeris.
         """
         # Compute the position of the ephem carefully.
-        exact_ephems = orbit.compute_ephemeris(
+        all_ephems = orbit.compute_ephemeris(
             obscode,
             mjds,
             PropagationIntegrator.N_BODY,
             time_scale=EpochTimescale.UTC,
         )
 
-        for exact_ephem, mjd, healpix in zip(exact_ephems, mjds, healpixels):
+        for ephem, mjd, healpix in zip(all_ephems, mjds, healpixels):
             frames = self.frames.idx.get_frames(obscode, mjd, healpix)
             logger.debug(
                 "checking frames for healpix=%d obscode=%s mjd=%f",
@@ -398,146 +471,102 @@ class PrecoveryDatabase:
             )
             n_frame = 0
 
-            # Calculate the HEALpixel ID for the predicted ephemeris
-            # of the orbit with a high nside value (k=15, nside=2**15)
-            # The indexed observations are indexed to a much lower nside but
-            # we may decide in the future to re-index the database using different
-            # values for that parameter. As long as we return a Healpix ID generated with
-            # nside greater than the indexed database then we can always down-sample the
-            # ID to a lower nside value
-            healpix_id = int(
-                radec_to_healpixel(
-                    exact_ephem.ra, exact_ephem.dec, nside=CANDIDATE_NSIDE
-                )
-            )
-
             for f in frames:
-                logger.debug("checking frame: %s", f)
-                obs = np.array(list(self.frames.iterate_observations(f)))
-                n_obs = len(obs)
-
-                # Read observation mjds, ra, decs into arrays
-                obs_mjds = np.array([o.mjd for o in obs])
-                obs_ras = np.array([o.ra for o in obs])
-                obs_decs = np.array([o.dec for o in obs])
-
-                # If any observation MJD does not match the mjd of the ephemeris
-                # to then adjust the predicted ephemeris accordingly
-                time_delta = obs_mjds - exact_ephem.mjd
-                if np.any(np.abs(time_delta) > 0):
-                    pred_ephems = orbit.compute_ephemeris(
-                        obscode,
-                        obs_mjds,
-                        PropagationIntegrator.TWO_BODY,
-                        time_scale=EpochTimescale.UTC,
-                    )
-                    pred_ras = np.array([w.ra for w in pred_ephems])
-                    pred_decs = np.array([w.dec for w in pred_ephems])
-                    pred_vras = np.array([w.ra_velocity for w in pred_ephems])
-                    pred_vdecs = np.array([w.dec_velocity for w in pred_ephems])
-                else:
-                    pred_ras = np.array([exact_ephem.ra for _ in range(n_obs)])
-                    pred_decs = np.array([exact_ephem.dec for _ in range(n_obs)])
-                    pred_vras = np.array(
-                        [exact_ephem.ra_velocity for _ in range(n_obs)]
-                    )
-                    pred_vdecs = np.array(
-                        [exact_ephem.dec_velocity for _ in range(n_obs)]
-                    )
-
-                distances = haversine_distance_deg(
-                    pred_ras,
-                    obs_ras,
-                    pred_decs,
-                    obs_decs,
-                )
-                dras = pred_ras - obs_ras
-                ddecs = pred_decs - obs_decs
-                # Filter to observations with distance below tolerance
-                idx = distances < tolerance
-                distances_filtered = distances[idx]
-                dras_filtered = dras[idx]
-                ddecs_filtered = ddecs[idx]
-                obs_filtered = obs[idx]
-                pred_ras_filtered = pred_ras[idx]
-                pred_decs_filtered = pred_decs[idx]
-                pred_vras_filtered = pred_vras[idx]
-                pred_vdecs_filtered = pred_vdecs[idx]
-                for (
-                    o,
-                    pred_ra,
-                    pred_dec,
-                    pred_vra,
-                    pred_vdec,
-                    distance,
-                    dra,
-                    ddec,
-                ) in zip(
-                    obs_filtered,
-                    pred_ras_filtered,
-                    pred_decs_filtered,
-                    pred_vras_filtered,
-                    pred_vdecs_filtered,
-                    distances_filtered,
-                    dras_filtered,
-                    ddecs_filtered,
-                ):
-                    candidate = PrecoveryCandidate(
-                        mjd=o.mjd,
-                        ra_deg=o.ra,
-                        dec_deg=o.dec,
-                        ra_sigma_arcsec=o.ra_sigma / ARCSEC,
-                        dec_sigma_arcsec=o.dec_sigma / ARCSEC,
-                        mag=o.mag,
-                        mag_sigma=o.mag_sigma,
-                        exposure_mjd_start=f.exposure_mjd_start,
-                        exposure_mjd_mid=f.exposure_mjd_mid,
-                        filter=f.filter,
-                        obscode=f.obscode,
-                        exposure_id=f.exposure_id,
-                        exposure_duration=f.exposure_duration,
-                        observation_id=o.id.decode(),
-                        healpix_id=healpix_id,
-                        pred_ra_deg=pred_ra,
-                        pred_dec_deg=pred_dec,
-                        pred_vra_degpday=pred_vra,
-                        pred_vdec_degpday=pred_vdec,
-                        delta_ra_arcsec=dra / ARCSEC,
-                        delta_dec_arcsec=ddec / ARCSEC,
-                        distance_arcsec=distance / ARCSEC,
-                        dataset_id=f.dataset_id,
-                    )
-                    yield candidate
-
-                logger.debug(
-                    f"checked {n_obs} observations in frame {f} and found {len(obs_filtered)}"
-                )
+                any_matches = False
+                for match in self._find_matches_in_frame(f, orbit, ephem, tolerance):
+                    any_matches = True
+                    yield match
                 # If no observations were found in this frame then we
                 # yield a frame candidate if desired
                 # Note that for the frame candidate we report the predicted
                 # ephemeris at the exposure midpoint not at the observation
                 # times which may differ from the exposure midpoint time
-                if (len(obs_filtered) == 0) and (include_frame_candidates):
-                    frame_candidate = FrameCandidate(
-                        exposure_mjd_start=f.exposure_mjd_start,
-                        exposure_mjd_mid=f.exposure_mjd_mid,
-                        filter=f.filter,
-                        obscode=f.obscode,
-                        exposure_id=f.exposure_id,
-                        exposure_duration=f.exposure_duration,
-                        healpix_id=healpix_id,
-                        pred_ra_deg=exact_ephem.ra,
-                        pred_dec_deg=exact_ephem.dec,
-                        pred_vra_degpday=exact_ephem.ra_velocity,
-                        pred_vdec_degpday=exact_ephem.dec_velocity,
-                        dataset_id=f.dataset_id,
-                    )
-                    yield frame_candidate
-
+                if not any_matches and (include_frame_candidates):
                     logger.debug("no observations found in this frame")
-
+                    frame_candidate = FrameCandidate.from_frame(f, ephem)
+                    yield frame_candidate
                 n_frame += 1
             logger.debug("checked %d frames", n_frame)
+
+    def _find_matches_in_frame(
+        self, frame: HealpixFrame, orbit: Orbit, ephem: Ephemeris, tolerance: float
+    ) -> Iterator[PrecoveryCandidate]:
+        """
+        Find all sources in a single frame which match ephem.
+        """
+        logger.debug("checking frame: %s", frame)
+
+        # Gather all observations.
+        observations = ObservationArray(list(self.frames.iterate_observations(frame)))
+        n_obs = len(observations)
+
+        if not np.all(observations.values["mjd"] == ephem.mjd):
+            # Data has per-observation MJDs. We'll need propagate to every observation's time.
+            for match in self._find_matches_using_per_obs_timestamps(
+                frame, orbit, observations, tolerance
+            ):
+                yield (match)
+            return
+
+        # Compute distance between our single ephemeris and all observations
+        distances = ephem.distance(observations)
+
+        # Gather ones within the tolerance
+        observations.values = observations.values[distances < tolerance]
+        matching_observations = observations.to_list()
+
+        logger.debug(
+            f"checked {n_obs} observations in frame {frame} and found {len(matching_observations)}"
+        )
+
+        for obs in matching_observations:
+            yield PrecoveryCandidate.from_observed_ephem(obs, frame, ephem)
+
+    def _find_matches_using_per_obs_timestamps(
+        self,
+        frame: HealpixFrame,
+        orbit: Orbit,
+        observations: ObservationArray,
+        tolerance: float,
+    ) -> Iterator[PrecoveryCandidate]:
+        """If a frame has per-source observation times, we need to
+        propagate to every time in the frame, so
+
+        """
+        # First, propagate to the mean MJD using N-body propagation.
+        mean_mjd = observations.values["mjd"].mean()
+        mean_orbit_state = orbit.propagate(
+            epochs=[mean_mjd],
+            method=PropagationIntegrator.N_BODY,
+            time_scale=EpochTimescale.UTC,
+        )[0]
+
+        # Next, compute an ephemeris for every observation in the
+        # frame. Use 2-body propagation from the mean position to the
+        # individual timestamps.
+        ephemerides = mean_orbit_state.compute_ephemeris(
+            obscode=frame.obscode,
+            epochs=observations.values["mjd"],
+            method=PropagationIntegrator.TWO_BODY,
+            time_scale=EpochTimescale.UTC,
+        )
+
+        # Now check distances.
+        ephem_position_ra = np.array([e.ra for e in ephemerides])
+        ephem_position_dec = np.array([e.dec for e in ephemerides])
+
+        distances = haversine_distance_deg(
+            ephem_position_ra,
+            observations.values["ra"],
+            ephem_position_dec,
+            observations.values["dec"],
+        )
+
+        # Gather any matches.
+        for index in np.where(distances < tolerance)[0]:
+            obs = Observation(*observations.values[index])
+            ephem = ephemerides[index]
+            yield PrecoveryCandidate.from_observed_ephem(obs, frame, ephem)
 
     def find_observations_in_region(
         self, ra: float, dec: float, obscode: str
