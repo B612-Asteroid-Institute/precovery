@@ -14,9 +14,7 @@ from sqlalchemy.sql import func as sqlfunc
 from sqlalchemy.sql.expression import ColumnClause
 
 from . import healpix_geom, sourcecatalog
-
-# mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id
-DATA_LAYOUT = "<dddddddl"
+from .observation import DATA_LAYOUT, Observation
 
 logger = logging.getLogger("frame_db")
 
@@ -74,50 +72,6 @@ class Dataset:
     reference_doi: Optional[str]
     documentation_url: Optional[str]
     sia_url: Optional[str]
-
-
-@dataclasses.dataclass
-class Observation:
-    mjd: float
-    ra: float
-    dec: float
-    ra_sigma: float
-    dec_sigma: float
-    mag: float
-    mag_sigma: float
-    id: bytes
-
-    data_layout = struct.Struct(DATA_LAYOUT)
-    datagram_size = struct.calcsize(DATA_LAYOUT)
-
-    def to_bytes(self) -> bytes:
-        prefix = self.data_layout.pack(
-            self.mjd,
-            self.ra,
-            self.dec,
-            self.ra_sigma,
-            self.dec_sigma,
-            self.mag,
-            self.mag_sigma,
-            len(self.id),
-        )
-        return prefix + self.id
-
-    @classmethod
-    def from_srcobs(cls, so: sourcecatalog.SourceObservation):
-        """
-        Cast a SourceObservation to an Observation.
-        """
-        return cls(
-            mjd=so.mjd,
-            ra=so.ra,
-            dec=so.dec,
-            ra_sigma=so.ra_sigma,
-            dec_sigma=so.dec_sigma,
-            mag=so.mag,
-            mag_sigma=so.mag_sigma,
-            id=so.id,
-        )
 
 
 class FrameIndex:
