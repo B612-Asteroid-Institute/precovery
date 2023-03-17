@@ -394,73 +394,77 @@ class PrecoveryDatabase:
                 )
                 end_mjd_window = end_mjd
 
-            test_mjds = []
-            test_healpixels = []
-            for mjd, healpixels in self.frames.idx.propagation_targets(
-                start_mjd_window,
-                end_mjd_window,
-                obscode,
-                datasets,
-            ):
-                logger.debug("mjd=%.6f:\thealpixels with data: %r", mjd, healpixels)
-                test_mjds.append(mjd)
-                test_healpixels.append(healpixels)
-
-            # Propagate the orbit with 2-body dynamics to the propagation
-            # targets
-            approx_ephems = orbit_window.compute_ephemeris(
-                obscode,
-                test_mjds,
-                PropagationIntegrator.TWO_BODY,
-                time_scale=EpochTimescale.UTC,
+            yield from self._check_window(
+                window_start=start_mjd_window,
+                window_end=end_mjd_window,
+                orbit=orbit_window,
+                obscode=obscode,
+                tolerance=tolerance,
+                include_frame_candidates=include_frame_candidates,
+                datasets=datasets,
             )
-            approx_ras = np.array([w.ra for w in approx_ephems])
-            approx_decs = np.array([w.dec for w in approx_ephems])
 
-            approx_healpixels = radec_to_healpixel(
-                approx_ras, approx_decs, self.frames.healpix_nside
-            ).astype(int)
+    def _check_window(
+        self,
+        window_start: float,
+        window_end: float,
+        orbit: Orbit,
+        obscode: str,
+        tolerance: float,
+        include_frame_candidates: bool,
+        datasets: Optional[set[str]],
+    ):
+        # Gather all MJDs and their associated healpixels in the window.
+        timestamps: list[float] = []
+        observation_healpixels: list[set[int]] = []
+        for timestamp, healpixels in self.frames.idx.propagation_targets(
+            window_start,
+            window_end,
+            obscode,
+            datasets,
+        ):
+            logger.debug("mjd=%.6f:\thealpixels with data: %r", timestamp, healpixels)
+            timestamps.append(timestamp)
+            observation_healpixels.append(healpixels)
 
-            keep_mjds = []
-            keep_approx_healpixels = []
-            for mjd, healpixels, approx_ra, approx_dec, approx_healpix in zip(
-                test_mjds, test_healpixels, approx_ras, approx_decs, approx_healpixels
-            ):
-                logger.debug("mjd=%.6f:\thealpixels with data: %r", mjd, healpixels)
-                logger.debug(
-                    "mjd=%.6f:\tephemeris at ra=%.3f\tdec=%.3f\thealpix=%d",
-                    mjd,
-                    approx_ra,
-                    approx_dec,
-                    approx_healpix,
+        # Propagate the orbit with 2-body dynamics to every timestamp in the
+        # window.
+        ephems = orbit.compute_ephemeris(
+            obscode,
+            timestamps,
+            PropagationIntegrator.TWO_BODY,
+            time_scale=EpochTimescale.UTC,
+        )
+
+        # Convert those ephemerides to healpixels.
+        ephem_healpixels = radec_to_healpixel(
+            ra=np.array([w.ra for w in ephems]),
+            dec=np.array([w.dec for w in ephems]),
+            nside=self.frames.healpix_nside,
+        ).astype(int)
+
+        # Check which ephemerides land within data
+        for timestamp, observation_healpixel_set, ephem_healpixel in zip(
+            timestamps, observation_healpixels, ephem_healpixels
+        ):
+            if ephem_healpixel in observation_healpixel_set:
+                # We have a match! Check the frame.
+                yield from self._check_frame(
+                    orbit=orbit,
+                    healpixel=ephem_healpixel,
+                    obscode=obscode,
+                    mjd=timestamp,
+                    tolerance=tolerance,
+                    include_frame_candidates=include_frame_candidates,
+                    datasets=datasets,
                 )
 
-                if approx_healpix not in healpixels:
-                    # No exposures anywhere near the ephem, so move on.
-                    continue
-                logger.debug("mjd=%.6f: healpixel collision, checking frames", mjd)
-                keep_mjds.append(mjd)
-                keep_approx_healpixels.append(approx_healpix)
-
-            if len(keep_mjds) > 0:
-                matches = self._check_frames(
-                    orbit_window,
-                    keep_approx_healpixels,
-                    obscode,
-                    keep_mjds,
-                    tolerance,
-                    include_frame_candidates,
-                    datasets,
-                )
-                for m in matches:
-                    yield m
-
-    def _check_frames(
+    def _check_frame(
         self,
         orbit: Orbit,
-        healpixels: Iterable[int],
+        healpixel: int,
         obscode: str,
-        mjds: Iterable[float],
+        mjd: float,
         tolerance: float,
         include_frame_candidates: bool,
         datasets: Optional[set[str]],
@@ -470,39 +474,34 @@ class PrecoveryDatabase:
         see if they contain observations which match the ephemeris.
         """
         # Compute the position of the ephem carefully.
-        all_ephems = orbit.compute_ephemeris(
+        ephem = orbit.compute_ephemeris(
             obscode,
-            mjds,
+            [mjd],
             PropagationIntegrator.N_BODY,
             time_scale=EpochTimescale.UTC,
+        )[0]
+
+        frames = self.frames.idx.get_frames(obscode, mjd, healpixel, datasets)
+        logger.debug(
+            "checking frames for healpix=%d obscode=%s mjd=%f",
+            healpixel,
+            obscode,
+            mjd,
         )
-
-        for ephem, mjd, healpix in zip(all_ephems, mjds, healpixels):
-            frames = self.frames.idx.get_frames(obscode, mjd, healpix, datasets)
-            logger.debug(
-                "checking frames for healpix=%d obscode=%s mjd=%f",
-                healpix,
-                obscode,
-                mjd,
-            )
-            n_frame = 0
-
-            for f in frames:
-                any_matches = False
-                for match in self._find_matches_in_frame(f, orbit, ephem, tolerance):
-                    any_matches = True
-                    yield match
-                # If no observations were found in this frame then we
-                # yield a frame candidate if desired
-                # Note that for the frame candidate we report the predicted
-                # ephemeris at the exposure midpoint not at the observation
-                # times which may differ from the exposure midpoint time
-                if not any_matches and (include_frame_candidates):
-                    logger.debug("no observations found in this frame")
-                    frame_candidate = FrameCandidate.from_frame(f, ephem)
-                    yield frame_candidate
-                n_frame += 1
-            logger.debug("checked %d frames", n_frame)
+        for f in frames:
+            any_matches = False
+            for match in self._find_matches_in_frame(f, orbit, ephem, tolerance):
+                any_matches = True
+                yield match
+            # If no observations were found in this frame then we
+            # yield a frame candidate if desired
+            # Note that for the frame candidate we report the predicted
+            # ephemeris at the exposure midpoint not at the observation
+            # times which may differ from the exposure midpoint time
+            if not any_matches and (include_frame_candidates):
+                logger.debug("no observations found in this frame")
+                frame_candidate = FrameCandidate.from_frame(f, ephem)
+                yield frame_candidate
 
     def _find_matches_in_frame(
         self, frame: HealpixFrame, orbit: Orbit, ephem: Ephemeris, tolerance: float
@@ -593,8 +592,7 @@ class PrecoveryDatabase:
         """
         frames = self.frames.get_frames_for_ra_dec(ra, dec, obscode)
         for f in frames:
-            for o in self.frames.iterate_observations(f):
-                yield o
+            yield from self.frames.iterate_observations(f)
 
     def find_observations_in_radius(
         self, ra: float, dec: float, tolerance: float, obscode: str
