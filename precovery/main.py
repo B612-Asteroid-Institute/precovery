@@ -58,6 +58,7 @@ def precover_many(
     window_size: int = 7,
     include_frame_candidates: bool = False,
     allow_version_mismatch: bool = False,
+    datasets: Optional[set[str]] = None,
     n_workers: int = multiprocessing.cpu_count(),
 ) -> dict[int, pd.DataFrame]:
     """
@@ -74,6 +75,7 @@ def precover_many(
             window_size,
             include_frame_candidates,
             allow_version_mismatch,
+            datasets,
         )
         for o in orbits
     ]
@@ -108,6 +110,7 @@ def precover(
     window_size: int = 7,
     include_frame_candidates: bool = False,
     allow_version_mismatch: bool = False,
+    datasets: Optional[set[str]] = None,
 ) -> pd.DataFrame:
     """
     Connect to database directory and run precovery for the input orbit.
@@ -142,6 +145,8 @@ def precover(
         information.
     allow_version_mismatch : bool, optional
         Allows using a precovery db version that does not match the library version.
+    datasets : set[str], optional
+        Filter down searches to only scan selected datasets
 
     Returns
     -------
@@ -164,6 +169,7 @@ def precover(
         end_mjd=end_mjd,
         window_size=window_size,
         include_frame_candidates=include_frame_candidates,
+        datasets=datasets,
     )
 
     df = pd.DataFrame(_candidates_to_dict(candidates))

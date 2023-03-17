@@ -10,6 +10,8 @@ from precovery.ingest import index
 from precovery.main import precover
 from precovery.orbit import EpochTimescale, Orbit
 
+from .testutils import requires_openorb_data
+
 SAMPLE_ORBITS_FILE = os.path.join(
     os.path.dirname(__file__), "data", "sample_orbits.csv"
 )
@@ -25,6 +27,7 @@ def test_db_dir():
     shutil.rmtree(out_dir)
 
 
+@requires_openorb_data
 def test_precovery(test_db_dir):
     """
     Given a properly formatted h5 file, ensure the observations are indexed properly

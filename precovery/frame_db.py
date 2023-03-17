@@ -125,10 +125,17 @@ class FrameIndex:
         self.dbconn.close()
 
     def window_centers(
-        self, start_mjd: float, end_mjd: float, window_size_days: int
+        self,
+        start_mjd: float,
+        end_mjd: float,
+        window_size_days: int,
+        datasets: Optional[set[str]] = None,
     ) -> Iterator[Tuple[float, str]]:
-        """
-        Return the midpoint and obscode of all time windows with data in them.
+        """Return the midpoint and obscode of all time windows with data in them.
+
+        If datasets is provided, it will be applied as a filter on the
+        datasets used to find data.
+
         """
         offset = -start_mjd + window_size_days / 2
 
@@ -159,19 +166,29 @@ class FrameIndex:
             )
             .order_by("common_epoch")
         )
+        if datasets is not None:
+            stmt = stmt.where(self.frames.c.dataset_id.in_(list(datasets)))
+
         rows = self.dbconn.execute(stmt)
         for mjd, obscode in rows:
             yield (mjd, obscode)
 
     def propagation_targets(
-        self, start_mjd: float, end_mjd: float, obscode: str
+        self,
+        start_mjd: float,
+        end_mjd: float,
+        obscode: str,
+        datasets: Optional[set[str]] = None,
     ) -> Iterator[Tuple[float, Set[int]]]:
-        """
-        Yields (mjd, {healpixels}) pairs for the given obscode in the given range
+        """Yields (mjd, {healpixels}) pairs for the given obscode in the given range
         of MJDs.
 
         The yielded mjd is a float MJD epoch timestamp to propagate to, and
         {healpixels} is a set of integer healpixel IDs.
+
+        An optional set of dataset IDs can be provided to filter the
+        data that gets scanned.
+
         """
         select_stmt = (
             sq.select(
@@ -189,6 +206,10 @@ class FrameIndex:
                 self.frames.c.healpixel,
             )
         )
+        if datasets is not None:
+            select_stmt = select_stmt.where(
+                self.frames.c.dataset_id.in_(list(datasets))
+            )
 
         rows = self.dbconn.execute(select_stmt)
         for mjd, group in itertools.groupby(rows, key=lambda pair: pair[0]):
@@ -196,7 +217,11 @@ class FrameIndex:
             yield (mjd, healpixels)
 
     def get_frames(
-        self, obscode: str, mjd: float, healpixel: int
+        self,
+        obscode: str,
+        mjd: float,
+        healpixel: int,
+        datasets: Optional[set[str]] = None,
     ) -> Iterator[HealpixFrame]:
         """
         Yield all the frames which are for given obscode, MJD, healpix.
@@ -205,6 +230,9 @@ class FrameIndex:
         are within 8.64 ms of the given mjd will be returned. This does not garauntee
         that they will represent the desired exposure time and may lead to multiple
         matches computed at the wrong observation time.
+
+        An optional set of dataset IDs can be provided to filter the
+        data that gets scanned.
         """
         select_stmt = sq.select(
             self.frames.c.id,
@@ -225,6 +253,11 @@ class FrameIndex:
             self.frames.c.exposure_mjd_mid >= mjd - 1e-7,
             self.frames.c.exposure_mjd_mid <= mjd + 1e-7,
         )
+        if datasets is not None:
+            select_stmt = select_stmt.where(
+                self.frames.c.dataset_id.in_(list(datasets))
+            )
+
         result = self.dbconn.execute(select_stmt)
         # Turn result into a list so we can iterate over it twice: once
         # to check the MJDs for uniqueness and a second time to actually
