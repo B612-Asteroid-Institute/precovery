@@ -2,7 +2,7 @@ import dataclasses
 import itertools
 import logging
 import os
-from typing import Iterable, Iterator, List, Optional, Union
+from typing import Iterable, Iterator, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -96,6 +96,9 @@ class PrecoveryCandidate:
             / ARCSEC,
         )
 
+    def to_dict(self):
+        return dataclasses.asdict(self)
+
 
 @dataclasses.dataclass
 class FrameCandidate:
@@ -140,11 +143,16 @@ class FrameCandidate:
             pred_vdec_degpday=ephem.dec_velocity,
         )
 
+    def to_dict(self):
+        return dataclasses.asdict(self)
 
-def sort_candidates(
+
+def sift_candidates(
     candidates: List[Union[PrecoveryCandidate, FrameCandidate]]
-) -> List[Union[PrecoveryCandidate, FrameCandidate]]:
+) -> Tuple[List[PrecoveryCandidate], List[FrameCandidate]]:
     """
+    Separates candidates into precovery and frame candidates and sorts them.
+
     Sort candidates by ascending MJD. For precovery candidates, use the MJD of the observation.
     For frame candidates, use the MJD at the midpoint of the exposure.
 
@@ -155,15 +163,24 @@ def sort_candidates(
 
     Returns
     -------
-    List[Union[PrecoveryCandidate, FrameCandidate]]
-        Sorted list of candidates.
+    Tuple[List[PrecoveryCandidate], List[FrameCandidate]]
     """
-    return sorted(
-        candidates,
-        key=lambda c: (c.mjd, c.observation_id)
-        if isinstance(c, PrecoveryCandidate)
-        else (c.exposure_mjd_mid, ""),
+    precovery_candidates = []
+    frame_candidates = []
+    for candidate in candidates:
+        if isinstance(candidate, PrecoveryCandidate):
+            precovery_candidates.append(candidate)
+        elif isinstance(candidate, FrameCandidate):
+            frame_candidates.append(candidate)
+        else:
+            raise TypeError(f"Unexpected candidate type: {type(candidate)}")
+
+    precovery_candidates = sorted(
+        precovery_candidates, key=lambda c: (c.mjd, c.observation_id)
     )
+    frame_candidates = sorted(frame_candidates, key=lambda c: c.exposure_mjd_mid)
+
+    return precovery_candidates, frame_candidates
 
 
 class PrecoveryDatabase:
@@ -247,9 +264,8 @@ class PrecoveryDatabase:
         start_mjd: Optional[float] = None,
         end_mjd: Optional[float] = None,
         window_size: int = 7,
-        include_frame_candidates: bool = False,
         datasets: Optional[set[str]] = None,
-    ) -> List[Union[PrecoveryCandidate, FrameCandidate]]:
+    ) -> Tuple[List[PrecoveryCandidate], List[FrameCandidate]]:
         """
         Find observations which match orbit in the database. Observations are
         searched in descending order by mjd.
@@ -266,8 +282,8 @@ class PrecoveryDatabase:
 
         Returns
         -------
-        list : List[PrecoveryCandidates, FrameCandidates]
-            Precovery candidate observations, and optionally frame candidates.
+        Tuple[List[PrecoveryCandidate], List[FrameCandidate]]
+            Precovery candidate observations and frame candidates.
         """
         # basically:
         """
@@ -319,16 +335,13 @@ class PrecoveryDatabase:
                 start_mjd=start_mjd,
                 end_mjd=end_mjd,
                 window_size=window_size,
-                include_frame_candidates=include_frame_candidates,
                 datasets=datasets,
             )
             matches += list(matches_window)
 
-        # Sort matches by mjd
-        if len(matches) > 0:
-            matches = sort_candidates(matches)
+        precovery_candidates, frame_candidates = sift_candidates(matches)
 
-        return matches
+        return precovery_candidates, frame_candidates
 
     def _check_windows(
         self,
@@ -339,9 +352,8 @@ class PrecoveryDatabase:
         start_mjd: Optional[float] = None,
         end_mjd: Optional[float] = None,
         window_size: int = 7,
-        include_frame_candidates: bool = False,
         datasets: Optional[set[str]] = None,
-    ):
+    ) -> Iterable[Union[PrecoveryCandidate, FrameCandidate]]:
         """
         Find all observations that match orbit within a list of windows
         """
@@ -466,7 +478,6 @@ class PrecoveryDatabase:
         obscode: str,
         mjd: float,
         tolerance: float,
-        include_frame_candidates: bool,
         datasets: Optional[set[str]],
     ) -> Iterator[Union[PrecoveryCandidate, FrameCandidate]]:
         """
