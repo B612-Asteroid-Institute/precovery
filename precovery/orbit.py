@@ -388,13 +388,20 @@ class Orbit:
 
 class Ephemeris:
     def __init__(
-        self, mjd: float, ra: float, dec: float, ra_velocity: float, dec_velocity: float
+        self,
+        mjd: float,
+        ra: float,
+        dec: float,
+        ra_velocity: float,
+        dec_velocity: float,
+        mag: float,
     ):
         self.mjd = mjd
         self.ra = ra
         self.dec = dec
         self.ra_velocity = ra_velocity
         self.dec_velocity = dec_velocity
+        self.mag = mag
 
     @classmethod
     def from_pyoorb_vector(cls, raw_data: npt.NDArray[np.float64]):
@@ -404,7 +411,8 @@ class Ephemeris:
         # oorb returns vracos(dec), so lets remove the cos(dec) term
         ra_velocity = raw_data[3] / np.cos(np.radians(dec))  # deg per day
         dec_velocity = raw_data[4]  # deg per day
-        return cls(mjd, ra, dec, ra_velocity, dec_velocity)
+        mag = raw_data[9]
+        return cls(mjd, ra, dec, ra_velocity, dec_velocity, mag)
 
     def __str__(self):
         return f"<Ephemeris ra={self.ra:.4f} dec={self.dec:.4f} mjd={self.mjd:.6f}>"

@@ -94,7 +94,9 @@ def test_orbit_ephemeris_computation():
 
 
 def test_ephemeris_distance():
-    ephemeris = orbit.Ephemeris(mjd=1, ra=2, dec=3, ra_velocity=4, dec_velocity=5)
+    ephemeris = orbit.Ephemeris(
+        mjd=1, ra=2, dec=3, ra_velocity=4, dec_velocity=5, mag=6
+    )
 
     observations = ObservationArray(
         [
@@ -105,7 +107,7 @@ def test_ephemeris_distance():
                 id=b"exact",
                 ra_sigma=0,
                 dec_sigma=0,
-                mag=0,
+                mag=6,
                 mag_sigma=0,
             ),
             Observation(
@@ -115,7 +117,7 @@ def test_ephemeris_distance():
                 id=b"one_degree_dec",
                 ra_sigma=0,
                 dec_sigma=0,
-                mag=0,
+                mag=6,
                 mag_sigma=0,
             ),
             Observation(
@@ -125,7 +127,7 @@ def test_ephemeris_distance():
                 id=b"wraparound",
                 ra_sigma=0,
                 dec_sigma=0,
-                mag=0,
+                mag=6,
                 mag_sigma=0,
             ),
         ]

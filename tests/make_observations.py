@@ -209,10 +209,10 @@ def make_observations(
                 # geocentric distance (au)
                 # predicted apparent V-band magnitude
                 # true anomaly (deg)
-                ephemeris_dict["mjd"].append(eph_i._raw_data[0])
-                ephemeris_dict["ra"].append(eph_i._raw_data[1])
-                ephemeris_dict["dec"].append(eph_i._raw_data[2])
-                ephemeris_dict["mag"].append(eph_i._raw_data[9])
+                ephemeris_dict["mjd"].append(eph_i.mjd)
+                ephemeris_dict["ra"].append(eph_i.ra)
+                ephemeris_dict["dec"].append(eph_i.dec)
+                ephemeris_dict["mag"].append(eph_i.mag)
 
             ephemeris_df = pd.DataFrame(ephemeris_dict)
             ephemeris_df.insert(0, "object_id", orbit_ids[orbit.orbit_id])
