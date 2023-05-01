@@ -412,7 +412,6 @@ class PrecoveryDatabase:
                 orbit=orbit_window,
                 obscode=obscode,
                 tolerance=tolerance,
-                include_frame_candidates=include_frame_candidates,
                 datasets=datasets,
             )
 
@@ -423,7 +422,6 @@ class PrecoveryDatabase:
         orbit: Orbit,
         obscode: str,
         tolerance: float,
-        include_frame_candidates: bool,
         datasets: Optional[set[str]],
     ):
         # Gather all MJDs and their associated healpixels in the window.
@@ -467,7 +465,6 @@ class PrecoveryDatabase:
                     obscode=obscode,
                     mjd=timestamp,
                     tolerance=tolerance,
-                    include_frame_candidates=include_frame_candidates,
                     datasets=datasets,
                 )
 
@@ -509,7 +506,7 @@ class PrecoveryDatabase:
             # Note that for the frame candidate we report the predicted
             # ephemeris at the exposure midpoint not at the observation
             # times which may differ from the exposure midpoint time
-            if not any_matches and (include_frame_candidates):
+            if not any_matches:
                 logger.debug("no observations found in this frame")
                 frame_candidate = FrameCandidate.from_frame(f, ephem)
                 yield frame_candidate
