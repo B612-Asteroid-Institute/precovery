@@ -1,52 +1,13 @@
 import logging
 import multiprocessing
-from typing import List, Optional
-
-import numpy as np
-import pandas as pd
+from typing import List, Optional, Tuple
 
 from .orbit import Orbit
-from .precovery_db import PrecoveryDatabase
+from .precovery_db import FrameCandidate, PrecoveryCandidate, PrecoveryDatabase
 
 logger = logging.getLogger("precovery")
 logging.basicConfig()
 logger.setLevel(logging.INFO)
-
-
-def _candidates_to_dict(candidates):
-    data = {
-        "mjd": [],
-        "ra_deg": [],
-        "dec_deg": [],
-        "ra_sigma_arcsec": [],
-        "dec_sigma_arcsec": [],
-        "mag": [],
-        "mag_sigma": [],
-        "filter": [],
-        "obscode": [],
-        "exposure_id": [],
-        "exposure_mjd_start": [],
-        "exposure_mjd_mid": [],
-        "exposure_duration": [],
-        "observation_id": [],
-        "healpix_id": [],
-        "pred_ra_deg": [],
-        "pred_dec_deg": [],
-        "pred_vra_degpday": [],
-        "pred_vdec_degpday": [],
-        "delta_ra_arcsec": [],
-        "delta_dec_arcsec": [],
-        "distance_arcsec": [],
-        "dataset_id": [],
-    }
-    for c in candidates:
-        for k in data.keys():
-            if k in c.__dict__.keys():
-                data[k].append(c.__dict__[k])
-            else:
-                data[k].append(np.NaN)
-
-    return data
 
 
 def precover_many(
@@ -56,11 +17,10 @@ def precover_many(
     start_mjd: Optional[float] = None,
     end_mjd: Optional[float] = None,
     window_size: int = 7,
-    include_frame_candidates: bool = False,
     allow_version_mismatch: bool = False,
     datasets: Optional[set[str]] = None,
     n_workers: int = multiprocessing.cpu_count(),
-) -> dict[int, pd.DataFrame]:
+) -> dict[int, Tuple[List[PrecoveryCandidate], List[FrameCandidate]]]:
     """
     Run a precovery search algorithm against many orbits at once.
     """
@@ -73,7 +33,6 @@ def precover_many(
             start_mjd,
             end_mjd,
             window_size,
-            include_frame_candidates,
             allow_version_mismatch,
             datasets,
         )
@@ -82,7 +41,7 @@ def precover_many(
 
     pool = multiprocessing.Pool(processes=n_workers)
     results = pool.starmap(
-        precover,
+        precover_worker,
         inputs,
     )
     pool.close()
@@ -92,13 +51,37 @@ def precover_many(
     if len(results) == 0:
         return {}
 
-    for r in results:
-        if len(r) == 0:
-            continue
-        orbit_id = r["orbit_id"][0]
-        result_dict[orbit_id] = r
+    for orbit_id, precovery_candidates, frame_candidates in results:
+        result_dict[orbit_id] = (precovery_candidates, frame_candidates)
 
     return result_dict
+
+
+def precover_worker(
+    orbit: Orbit,
+    database_directory: str,
+    tolerance: float = 1 / 3600,
+    start_mjd: Optional[float] = None,
+    end_mjd: Optional[float] = None,
+    window_size: int = 7,
+    allow_version_mismatch: bool = False,
+    datasets: Optional[set[str]] = None,
+) -> Tuple[int, List[PrecoveryCandidate], List[FrameCandidate]]:
+    """
+    Wraps the precover function to return the orbit_id for mapping.
+    """
+    orbit_id = orbit.orbit_id
+    precovery_candidates, frame_candidates = precover(
+        orbit,
+        database_directory,
+        tolerance,
+        start_mjd,
+        end_mjd,
+        window_size,
+        allow_version_mismatch,
+        datasets,
+    )
+    return orbit_id, precovery_candidates, frame_candidates
 
 
 def precover(
@@ -108,10 +91,9 @@ def precover(
     start_mjd: Optional[float] = None,
     end_mjd: Optional[float] = None,
     window_size: int = 7,
-    include_frame_candidates: bool = False,
     allow_version_mismatch: bool = False,
     datasets: Optional[set[str]] = None,
-) -> pd.DataFrame:
+) -> Tuple[List[PrecoveryCandidate], List[FrameCandidate]]:
     """
     Connect to database directory and run precovery for the input orbit.
 
@@ -137,12 +119,6 @@ def precover(
         trajectory. Once the list of HealpixFrames has been made, the orbit is then propagated via
         n-body dynamics to each frame and the angular distance to each observation in that
         frame is checked.
-    include_frame_candidates : bool, optional
-        If no observations are found within the given angular tolerance, return the HealpixFrame
-        where the trajectory intersected the Healpixel but no observations were found. This is useful
-        for negative observation campaigns. Note that camera footprints are not modeled, all datasets
-        are mapped onto a Healpixel space and this simply returns the Healpixel equivalent exposure
-        information.
     allow_version_mismatch : bool, optional
         Allows using a precovery db version that does not match the library version.
     datasets : set[str], optional
@@ -150,7 +126,7 @@ def precover(
 
     Returns
     -------
-    candidates : List[PrecoveryCandidate, FrameCandidate]
+    candidates : Tuple[List[PrecoveryCandidate], List[FrameCandidate]]
         PrecoveryCandidate observations that may belong to this orbit. FrameCandidates of any frames
         that intersected the orbit's trajectory but did not have any observations (PrecoveryCandidates)
         found within the angular tolerance.
@@ -162,18 +138,13 @@ def precover(
         allow_version_mismatch=allow_version_mismatch,
     )
 
-    candidates = precovery_db.precover(
+    precovery_candidates, frame_candidates = precovery_db.precover(
         orbit,
         tolerance=tolerance,
         start_mjd=start_mjd,
         end_mjd=end_mjd,
         window_size=window_size,
-        include_frame_candidates=include_frame_candidates,
         datasets=datasets,
     )
 
-    df = pd.DataFrame(_candidates_to_dict(candidates))
-    df.loc[:, "observation_id"] = df.loc[:, "observation_id"].astype(str)
-    df["orbit_id"] = orbit.orbit_id
-    df.sort_values(by=["mjd", "obscode"], inplace=True, ignore_index=True)
-    return df
+    return precovery_candidates, frame_candidates

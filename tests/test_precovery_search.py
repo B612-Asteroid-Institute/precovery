@@ -26,10 +26,11 @@ def test_precover(precovery_db, sample_orbits):
     precovery_db.frames.add_frames(ds_id, frames)
 
     # Do the search. We should find the three observations we inserted.
-    results = list(precovery_db.precover(orbit))
-    assert len(results) == 3
+    matches, misses = list(precovery_db.precover(orbit))
+    assert len(matches) == 3
+    assert len(misses) == 0
 
-    have_ids = set(r.observation_id for r in results)
+    have_ids = set(r.observation_id for r in matches)
     want_ids = set(o.id.decode("utf8") for o in object_observations)
     assert have_ids == want_ids
 
@@ -56,18 +57,18 @@ def test_precover_dataset_filter(precovery_db, sample_orbits):
 
     # Do the search with no dataset filters. We should find all six
     # observations we inserted.
-    results = list(precovery_db.precover(orbit))
-    assert len(results) == 6
+    matches, misses = list(precovery_db.precover(orbit))
+    assert len(matches) == 6
 
-    have_ids = set(r.observation_id for r in results)
+    have_ids = set(r.observation_id for r in matches)
     want_ids = set(o.id.decode("utf8") for o in (ds1_observations + ds2_observations))
     assert have_ids == want_ids
 
     # Now repeat the search, but filter to just one dataset. We should
     # only find that dataset's observations.
-    results = list(precovery_db.precover(orbit, datasets={ds1_id}))
-    assert len(results) == 3
+    matches, misses = list(precovery_db.precover(orbit, datasets={ds1_id}))
+    assert len(matches) == 3
 
-    have_ids = set(r.observation_id for r in results)
+    have_ids = set(r.observation_id for r in matches)
     want_ids = set(o.id.decode("utf8") for o in ds1_observations)
     assert have_ids == want_ids

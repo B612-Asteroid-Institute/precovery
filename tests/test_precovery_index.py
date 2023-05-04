@@ -9,6 +9,7 @@ import pytest
 from precovery.ingest import index
 from precovery.main import precover
 from precovery.orbit import EpochTimescale, Orbit
+from precovery.utils import candidates_to_dataframe
 
 from .testutils import requires_openorb_data
 
@@ -90,16 +91,20 @@ def test_precovery(test_db_dir):
 
     # For each sample orbit, validate we get all the observations we planted
     for orbit in orbits_keplerian:
-        results = precover(orbit, test_db_dir, tolerance=1 / 3600, window_size=1)
+        matches, misses = precover(
+            orbit, test_db_dir, tolerance=1 / 3600, window_size=1
+        )
 
         orbit_name = orbit_name_mapping[orbit.orbit_id]
         object_observations = observations_df[
             observations_df["object_id"] == orbit_name
         ]
-        assert len(results) == len(object_observations)
-        assert len(results) > 0
+        assert len(matches) == len(object_observations)
+        assert len(matches) > 0
 
-        results.rename(
+        matches = candidates_to_dataframe(matches)
+
+        matches.rename(
             columns={
                 "ra_deg": "ra",
                 "dec_deg": "dec",
@@ -111,8 +116,8 @@ def test_precovery(test_db_dir):
             inplace=True,
         )
 
-        results["ra_sigma"] /= 3600.0
-        results["dec_sigma"] /= 3600.0
+        matches["ra_sigma"] /= 3600.0
+        matches["dec_sigma"] /= 3600.0
 
         # We are assuming that both the test observation file and the results
         # are sorted by mjd
@@ -131,7 +136,7 @@ def test_precovery(test_db_dir):
         ]:
             np.testing.assert_array_equal(
                 object_observations[col].values,
-                results[col].values,
+                matches[col].values,
                 err_msg=f"Column {col} does not match for {orbit_name}.",
             )
 
@@ -143,7 +148,7 @@ def test_precovery(test_db_dir):
             "observatory_code",
             "filter",
         ]:
-            assert (results[col].values == object_observations[col].values).all()
+            assert (matches[col].values == object_observations[col].values).all()
 
         # Test that the predicted location of each object in each exposure is
         # close to the actual location of the object in that exposure (we did
@@ -157,7 +162,7 @@ def test_precovery(test_db_dir):
         # of the orbit within the frame in the cases, which will also introduce some error.
         try:
             np.testing.assert_allclose(
-                results[["pred_ra_deg", "pred_dec_deg"]].values,
+                matches[["pred_ra_deg", "pred_dec_deg"]].values,
                 object_observations[["ra", "dec"]].values,
                 atol=MILLIARCSECOND,
                 rtol=0,
@@ -169,8 +174,8 @@ def test_precovery(test_db_dir):
             # Test that the calculated distance is within 1 millarcsecond (need additional order of magnitude
             # tolerance to account for errors added in quadrature)
             np.testing.assert_allclose(
-                results["distance_arcsec"].values / 3600.0,
-                np.zeros(len(results), dtype=np.float64),
+                matches["distance_arcsec"].values / 3600.0,
+                np.zeros(len(matches), dtype=np.float64),
                 atol=MILLIARCSECOND,
                 rtol=0,
                 err_msg=f"Distance for {orbit_name} is not within tolerance.",
@@ -179,7 +184,7 @@ def test_precovery(test_db_dir):
         except AssertionError as e:
             os.makedirs(RESULTS_DIR, exist_ok=True)
             result_file = os.path.join(RESULTS_DIR, f"results_{orbit_name}.csv")
-            results.to_csv(result_file, float_format="%.16f", index=False)
+            matches.to_csv(result_file, float_format="%.16f", index=False)
 
             object_observations_file = os.path.join(
                 RESULTS_DIR,

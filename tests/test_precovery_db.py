@@ -2,7 +2,7 @@ from precovery.precovery_db import (
     FrameCandidate,
     PrecoveryCandidate,
     PrecoveryDatabase,
-    sort_candidates,
+    sift_candidates,
 )
 from precovery.sourcecatalog import bundle_into_frames
 
@@ -53,8 +53,7 @@ def test_find_observations_in_regions(tmp_path):
     assert len(list(results)) == 1
 
 
-def test_sort_candidates():
-
+def test_sift_candidates():
     cand1 = PrecoveryCandidate(
         mjd=1,
         ra_deg=1,
@@ -164,5 +163,5 @@ def test_sort_candidates():
     )
 
     cands = [cand5, cand3, cand2, cand1, cand4]
-    cands_sorted = sort_candidates(cands)
-    assert cands_sorted == [cand1, cand2, cand3, cand4, cand5]
+    cands_sorted = sift_candidates(cands)
+    assert cands_sorted == ([cand1, cand2, cand3], [cand4, cand5])
