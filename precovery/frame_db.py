@@ -280,6 +280,36 @@ class FrameIndex:
         for r in rows:
             yield HealpixFrame(*r)
 
+    def get_frames_by_id(
+        self,
+        ids: List[int],
+    ) -> Iterator[HealpixFrame]:
+        """
+        Yield all the frames with the given IDs. Frames are returned in the order
+        they are given in the list.
+        """
+        select_stmt = sq.select(
+            self.frames.c.id,
+            self.frames.c.dataset_id,
+            self.frames.c.obscode,
+            self.frames.c.exposure_id,
+            self.frames.c.filter,
+            self.frames.c.exposure_mjd_start,
+            self.frames.c.exposure_mjd_mid,
+            self.frames.c.exposure_duration,
+            self.frames.c.healpixel,
+            self.frames.c.data_uri,
+            self.frames.c.data_offset,
+            self.frames.c.data_length,
+        ).where(
+            self.frames.c.id.in_(ids),
+        )
+
+        result = self.dbconn.execute(select_stmt)
+        rows = list(result)
+        for r in rows:
+            yield HealpixFrame(*r)
+
     def n_frames(self) -> int:
         select_stmt = sq.select(sqlfunc.count(self.frames.c.id))
         row = self.dbconn.execute(select_stmt).fetchone()
