@@ -80,7 +80,7 @@ class FrameIndex:
         self.mode = mode
 
         if self.mode not in {"r", "w"}:
-            raise ValueError(f"mode must be one of {{'r', 'w'}}")
+            raise ValueError(f"mode {self.mode} must be one of {{'r', 'w'}}")
 
         if self.db_uri.startswith("sqlite:///") and (self.mode == "r"):
             if not self.db_uri.endswith("?mode=ro"):
