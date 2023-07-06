@@ -32,7 +32,7 @@ def test_fast_query_warning(test_db):
     )
 
     with pytest.warns(UserWarning):
-        FrameIndex.open("sqlite:///" + test_db, mode="r")
+        FrameIndex("sqlite:///" + test_db, mode="r")
 
     return
 

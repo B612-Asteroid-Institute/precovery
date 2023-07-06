@@ -224,7 +224,7 @@ class PrecoveryDatabase:
                 )
 
         frame_idx_db = "sqlite:///" + os.path.join(directory, "index.db")
-        frame_idx = FrameIndex.open(frame_idx_db, mode=mode)
+        frame_idx = FrameIndex(frame_idx_db, mode=mode)
 
         data_path = os.path.join(directory, "data")
         frame_db = FrameDB(
@@ -245,7 +245,7 @@ class PrecoveryDatabase:
         os.makedirs(directory, exist_ok=True)
 
         frame_idx_db = "sqlite:///" + os.path.join(directory, "index.db")
-        frame_idx = FrameIndex.open(frame_idx_db)
+        frame_idx = FrameIndex(frame_idx_db, mode="w")
 
         config = Config(nside=nside, data_file_max_size=data_file_max_size)
         config.to_json(os.path.join(directory, "config.json"))

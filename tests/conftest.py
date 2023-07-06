@@ -17,8 +17,7 @@ def test_db():
 
 @pytest.fixture
 def frame_index(tmp_path):
-    fidx = FrameIndex.open("sqlite:///" + str(tmp_path) + "/test.db", mode="r")
-    fidx.initialize_tables()
+    fidx = FrameIndex("sqlite:///" + str(tmp_path) + "/test.db", mode="w")
     yield fidx
     fidx.close()
 
