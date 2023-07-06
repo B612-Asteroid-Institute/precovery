@@ -104,7 +104,7 @@ class FrameIndex:
         Reflect the metadata and assign references to table objects
         """
         self._metadata = sq.MetaData()
-        self._metadata.reflect(self.db)
+        self._metadata.reflect(bind=self.db)
         self.frames = self._metadata.tables["frames"]
         self.datasets = self._metadata.tables["datasets"]
 

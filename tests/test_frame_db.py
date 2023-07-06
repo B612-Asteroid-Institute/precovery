@@ -31,6 +31,14 @@ def test_fast_query_warning(test_db):
             );"""
     )
 
+    con.execute(
+        """
+        CREATE TABLE datasets (
+            id INTEGER PRIMARY KEY,
+            name TEXT
+            );"""
+    )
+
     with pytest.warns(UserWarning):
         FrameIndex("sqlite:///" + test_db, mode="r")
 
