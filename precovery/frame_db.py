@@ -75,37 +75,48 @@ class Dataset:
 
 
 class FrameIndex:
-    def __init__(self, db_engine):
-        self.db = db_engine
-        self.dbconn = self.db.connect()
-        self.initialize_tables()
+    def __init__(self, db_uri: str, mode: str = "r"):
+        self.db_uri = db_uri
+        self.mode = mode
 
-    @classmethod
-    def open(cls, db_uri, mode: str = "r"):
-        if (mode != "r") and (mode != "w"):
-            err = "mode should be one of {'r', 'w'}"
-            raise ValueError(err)
+        if self.mode not in {"r", "w"}:
+            raise ValueError(f"mode {self.mode} must be one of {{'r', 'w'}}")
 
-        if db_uri.startswith("sqlite:///") and (mode == "r"):
-            db_uri += "?mode=ro"
+        if self.db_uri.startswith("sqlite:///") and (self.mode == "r"):
+            if not self.db_uri.endswith("?mode=ro"):
+                self.db_uri += "?mode=ro"
 
         # future=True is required here for SQLAlchemy 2.0 API usage
         # while we migrate from 1.x up. Version 2 is incompatible with
         # dagster, so we need to actually pin to 1.x, but future=True
         # lets us use the 2.0 API in this code.
-        engine = sq.create_engine(db_uri, connect_args={"timeout": 60}, future=True)
+        self.db = sq.create_engine(db_uri, connect_args={"timeout": 60}, future=True)
+        self.dbconn = self.db.connect()
 
-        # Check if fast_query index exists (older databases may not have it)
-        # if it doesn't throw a warning with the command to create it
-        con = engine.connect()
-        curs = con.execute(
+        if self.mode == "w":
+            self._create_tables()
+        if self.mode == "r":
+            self._load_tables()
+        self._check_fast_query()
+
+    def _load_tables(self):
+        """
+        Reflect the metadata and assign references to table objects
+        """
+        self._metadata = sq.MetaData()
+        self._metadata.reflect(bind=self.db)
+        self.frames = self._metadata.tables["frames"]
+        self.datasets = self._metadata.tables["datasets"]
+
+    def _check_fast_query(self):
+        curs = self.dbconn.execute(
             sq.text(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='frames';"
             )
         )
         table_names = [row[0] for row in curs.fetchall()]
         if "frames" in table_names:
-            curs = con.execute(
+            curs = self.dbconn.execute(
                 sq.text("SELECT name FROM sqlite_master WHERE type = 'index';")
             )
             index_names = [row[0] for row in curs.fetchall()]
@@ -117,9 +128,6 @@ class FrameIndex:
                     " (exposure_mjd_mid, healpixel, obscode);\n"
                 )
                 warnings.warn(warning, UserWarning)
-        con.close()
-
-        return cls(engine)
 
     def close(self):
         self.dbconn.close()
@@ -475,7 +483,7 @@ class FrameIndex:
         dataset_ids = {dataset_id[0] for dataset_id in dataset_ids}
         return dataset_ids
 
-    def initialize_tables(self):
+    def _create_tables(self):
         self._metadata = sq.MetaData()
         self.frames = sq.Table(
             "frames",

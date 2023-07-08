@@ -17,8 +17,7 @@ def test_db():
 
 @pytest.fixture
 def frame_index(tmp_path):
-    fidx = FrameIndex.open("sqlite:///" + str(tmp_path) + "/test.db", mode="r")
-    fidx.initialize_tables()
+    fidx = FrameIndex("sqlite:///" + str(tmp_path) + "/test.db", mode="w")
     yield fidx
     fidx.close()
 
@@ -34,7 +33,7 @@ def frame_db(tmp_path, frame_index):
 
 @pytest.fixture
 def precovery_db(tmp_path, frame_db):
-    yield PrecoveryDatabase.from_dir(str(tmp_path), create=True)
+    yield PrecoveryDatabase.from_dir(str(tmp_path), mode="w", create=True)
 
 
 @pytest.fixture
