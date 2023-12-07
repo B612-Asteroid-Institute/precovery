@@ -1,9 +1,5 @@
-from precovery.precovery_db import (
-    FrameCandidate,
-    FrameCandidatesQv,
-    PrecoveryCandidate,
-    PrecoveryCandidatesQv,
-)
+from precovery.candidates_qv import FrameCandidatesQv, PrecoveryCandidatesQv
+from precovery.precovery_db import FrameCandidate, PrecoveryCandidate
 
 
 def test_precovery_candidate_table():
