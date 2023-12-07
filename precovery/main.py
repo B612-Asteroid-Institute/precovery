@@ -1,6 +1,8 @@
 import logging
 import multiprocessing
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
+
+from adam_core.orbits import Orbits as AdamOrbits
 
 from .orbit import Orbit
 from .precovery_db import FrameCandidate, PrecoveryCandidate, PrecoveryDatabase
@@ -11,7 +13,7 @@ logger.setLevel(logging.INFO)
 
 
 def precover_many(
-    orbits: List[Orbit],
+    orbits: Union[List[Orbit], AdamOrbits],
     database_directory: str,
     tolerance: float = 1 / 3600,
     start_mjd: Optional[float] = None,
@@ -24,6 +26,14 @@ def precover_many(
     """
     Run a precovery search algorithm against many orbits at once.
     """
+    if isinstance(orbits, AdamOrbits):
+        precovery_orbits = []
+        for i in range(len(orbits)):
+            precovery_orbits.append(
+                Orbit.from_adam_core(orbit_id=orbits[i], ac_orbits=orbits[i])
+            )
+        orbits = precovery_orbits
+        del precovery_orbits
 
     inputs = [
         (
@@ -85,7 +95,7 @@ def precover_worker(
 
 
 def precover(
-    orbit: Orbit,
+    orbit: Union[Orbit, AdamOrbits],
     database_directory: str,
     tolerance: float = 1 / 3600,
     start_mjd: Optional[float] = None,
@@ -137,6 +147,9 @@ def precover(
         mode="r",
         allow_version_mismatch=allow_version_mismatch,
     )
+
+    if isinstance(orbit, AdamOrbits):
+        orbit = Orbit.from_adam_core(orbit_id=1, ac_orbits=orbit)
 
     precovery_candidates, frame_candidates = precovery_db.precover(
         orbit,

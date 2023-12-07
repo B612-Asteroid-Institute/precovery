@@ -5,6 +5,10 @@ from typing import Iterable, List, Optional
 import numpy as np
 import numpy.typing as npt
 import requests as req
+from adam_core.coordinates.cartesian import CartesianCoordinates
+from adam_core.coordinates.origin import Origin
+from adam_core.orbits import Orbits as AdamOrbits
+from adam_core.time import Timestamp
 from astropy.time import Time
 
 from .observation import ObservationArray
@@ -182,6 +186,65 @@ class Orbit:
         )
 
         return cls(orbit_id, state_vector)
+
+    @classmethod
+    def from_adam_core(
+        self,
+        orbit_id: int,
+        ac_orbits: AdamOrbits,
+        absolute_magnitude: float = 20.0,
+        photometric_slope_parameter: float = 0.15,
+    ):
+        """
+        Create an Orbit from a 1-length adam_core Orbits table.
+        """
+
+        if len(ac_orbits) != 1:
+            raise ValueError("expected 1-length orbits table")
+        return self.cartesian(
+            orbit_id,
+            ac_orbits.coordinates.x[0].as_py(),
+            ac_orbits.coordinates.y[0].as_py(),
+            ac_orbits.coordinates.z[0].as_py(),
+            ac_orbits.coordinates.vx[0].as_py(),
+            ac_orbits.coordinates.vy[0].as_py(),
+            ac_orbits.coordinates.vz[0].as_py(),
+            ac_orbits.coordinates.time.rescale("utc").mjd().to_numpy(False)[0],
+            EpochTimescale.UTC,
+            absolute_magnitude,
+            photometric_slope_parameter,
+        )
+
+    def to_adam_core(
+        self,
+        object_id: str = "ObjIdUnset",
+    ):
+        """
+        Create an Orbit from a 1-length adam_core Orbits table.
+        """
+
+        times = Timestamp.from_mjd(
+            [self._epoch], scale=self._epoch_timescale.name.lower()
+        )
+        origin = Origin.from_kwargs(code=["SUN" for i in range(len(times))])
+        frame = "ecliptic"
+        coordinates = CartesianCoordinates.from_kwargs(
+            time=times,
+            x=[self._state_vector[0][1]],
+            y=[self._state_vector[0][2]],
+            z=[self._state_vector[0][3]],
+            vx=[self._state_vector[0][4]],
+            vy=[self._state_vector[0][5]],
+            vz=[self._state_vector[0][6]],
+            covariance=None,
+            origin=origin,
+            frame=frame,
+        )
+        return AdamOrbits.from_kwargs(
+            orbit_id=[str(self.orbit_id)],
+            object_id=[object_id],
+            coordinates=coordinates,
+        )
 
     def propagate(
         self,
