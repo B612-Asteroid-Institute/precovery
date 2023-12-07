@@ -5,7 +5,13 @@ from typing import List, Optional, Tuple, Union
 from adam_core.orbits import Orbits as AdamOrbits
 
 from .orbit import Orbit
-from .precovery_db import FrameCandidate, PrecoveryCandidate, PrecoveryDatabase
+from .precovery_db import (
+    FrameCandidate,
+    FrameCandidatesQv,
+    PrecoveryCandidate,
+    PrecoveryCandidatesQv,
+    PrecoveryDatabase,
+)
 
 logger = logging.getLogger("precovery")
 logging.basicConfig()
@@ -22,7 +28,7 @@ def precover_many(
     allow_version_mismatch: bool = False,
     datasets: Optional[set[str]] = None,
     n_workers: int = multiprocessing.cpu_count(),
-) -> dict[int, Tuple[List[PrecoveryCandidate], List[FrameCandidate]]]:
+) -> dict[int, Tuple[PrecoveryCandidatesQv, FrameCandidatesQv]]:
     """
     Run a precovery search algorithm against many orbits at once.
     """
@@ -62,7 +68,10 @@ def precover_many(
         return {}
 
     for orbit_id, precovery_candidates, frame_candidates in results:
-        result_dict[orbit_id] = (precovery_candidates, frame_candidates)
+        result_dict[orbit_id] = (
+            PrecoveryCandidatesQv.from_dataclass(precovery_candidates),
+            FrameCandidatesQv.from_frame_candidates(frame_candidates),
+        )
 
     return result_dict
 
@@ -91,7 +100,12 @@ def precover_worker(
         allow_version_mismatch,
         datasets,
     )
-    return orbit_id, precovery_candidates, frame_candidates
+
+    return (
+        orbit_id,
+        PrecoveryCandidatesQv.from_dataclass(precovery_candidates),
+        FrameCandidatesQv.from_frame_candidates(frame_candidates),
+    )
 
 
 def precover(

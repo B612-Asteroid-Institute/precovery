@@ -1,5 +1,9 @@
-from precovery.candidates_qv import FrameCandidatesQv, PrecoveryCandidatesQv
-from precovery.precovery_db import FrameCandidate, PrecoveryCandidate
+from precovery.precovery_db import (
+    FrameCandidate,
+    FrameCandidatesQv,
+    PrecoveryCandidate,
+    PrecoveryCandidatesQv,
+)
 
 
 def test_precovery_candidate_table():
@@ -81,12 +85,18 @@ def test_precovery_candidate_table():
         dataset_id="dataset2",
     )
 
-    cand = PrecoveryCandidatesQv.from_precovery_candidates([cand1, cand2, cand3])
+    cand = PrecoveryCandidatesQv.from_dataclass([cand1, cand2, cand3])
     assert len(cand) == 3
     assert len(cand.exposures().id) == 2
     assert cand.point_source_detections()
     assert cand.predicted_ephemeris()
     assert cand.point_source_detections().link_to_exposures(cand.exposures())
+
+    roundtrip = cand.to_dataclass()
+    assert len(roundtrip) == 3
+    assert roundtrip[0] == cand1
+    assert roundtrip[1] == cand2
+    assert roundtrip[2] == cand3
 
 
 def test_precovery_frame_candidate_table():
@@ -124,3 +134,8 @@ def test_precovery_frame_candidate_table():
     assert len(f_cand) == 2
     assert len(f_cand.exposures().id) == 1
     assert f_cand.predicted_ephemeris()
+
+    roundtrip = f_cand.to_frame_candidates()
+    assert len(roundtrip) == 2
+    assert roundtrip[0] == cand4
+    assert roundtrip[1] == cand5

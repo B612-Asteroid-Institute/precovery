@@ -2,10 +2,18 @@ import dataclasses
 import itertools
 import logging
 import os
-from typing import Iterable, Iterator, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
 import numpy as np
+import quivr as qv
+from adam_core.coordinates import CoordinateCovariances
+from adam_core.coordinates.origin import Origin
+from adam_core.coordinates.residuals import Residuals
+from adam_core.coordinates.spherical import SphericalCoordinates
+from adam_core.observations import Exposures, PointSourceDetections
 from adam_core.orbits import Orbits as AdamOrbits
+from adam_core.orbits.ephemeris import Ephemeris as EphemerisQv
+from adam_core.time import Timestamp
 
 from .config import Config, DefaultConfig
 from .frame_db import FrameDB, FrameIndex, HealpixFrame
@@ -13,6 +21,7 @@ from .healpix_geom import radec_to_healpixel
 from .observation import Observation, ObservationArray
 from .orbit import Ephemeris, EpochTimescale, Orbit, PropagationIntegrator
 from .spherical_geom import haversine_distance_deg
+from .utils_qv import drop_duplicates
 from .version import __version__
 
 DEGREE = 1.0
@@ -184,6 +193,287 @@ def sift_candidates(
     return precovery_candidates, frame_candidates
 
 
+class PrecoveryCandidatesQv(qv.Table):
+    # copy all the fields from PrecoveryCandidate
+    time = Timestamp.as_column()
+    ra_deg = qv.Float64Column()
+    dec_deg = qv.Float64Column()
+    ra_sigma_arcsec = qv.Float64Column()
+    dec_sigma_arcsec = qv.Float64Column()
+    mag = qv.Float64Column()
+    mag_sigma = qv.Float64Column()
+    exposure_time_start = Timestamp.as_column()
+    exposure_time_mid = Timestamp.as_column()
+    filter = qv.StringColumn()
+    obscode = qv.StringColumn()
+    exposure_id = qv.StringColumn()
+    exposure_duration = qv.Float64Column()
+    observation_id = qv.StringColumn()
+    healpix_id = qv.Int64Column()
+    pred_ra_deg = qv.Float64Column()
+    pred_dec_deg = qv.Float64Column()
+    pred_vra_degpday = qv.Float64Column()
+    pred_vdec_degpday = qv.Float64Column()
+    delta_ra_arcsec = qv.Float64Column()
+    delta_dec_arcsec = qv.Float64Column()
+    distance_arcsec = qv.Float64Column()
+    dataset_id = qv.StringColumn()
+
+    @classmethod
+    def from_dataclass(
+        cls, precovery_candidates: List[PrecoveryCandidate]
+    ) -> "PrecoveryCandidatesQv":
+        field_dict: Dict[str, Any] = {
+            field.name: [] for field in dataclasses.fields(PrecoveryCandidate)
+        }
+
+        # Iterate over each candidate and convert to dictionary
+        for candidate in precovery_candidates:
+            candidate_dict = dataclasses.asdict(candidate)
+            for key, value in candidate_dict.items():
+                field_dict[key].append(value)
+
+        return cls.from_kwargs(
+            time=Timestamp.from_mjd(field_dict["mjd"], scale="utc"),
+            ra_deg=field_dict["ra_deg"],
+            dec_deg=field_dict["dec_deg"],
+            ra_sigma_arcsec=field_dict["ra_sigma_arcsec"],
+            dec_sigma_arcsec=field_dict["dec_sigma_arcsec"],
+            mag=field_dict["mag"],
+            mag_sigma=field_dict["mag_sigma"],
+            exposure_time_start=Timestamp.from_mjd(
+                field_dict["exposure_mjd_start"], scale="utc"
+            ),
+            exposure_time_mid=Timestamp.from_mjd(
+                field_dict["exposure_mjd_mid"], scale="utc"
+            ),
+            filter=field_dict["filter"],
+            obscode=field_dict["obscode"],
+            exposure_id=field_dict["exposure_id"],
+            exposure_duration=field_dict["exposure_duration"],
+            observation_id=field_dict["observation_id"],
+            healpix_id=field_dict["healpix_id"],
+            pred_ra_deg=field_dict["pred_ra_deg"],
+            pred_dec_deg=field_dict["pred_dec_deg"],
+            pred_vra_degpday=field_dict["pred_vra_degpday"],
+            pred_vdec_degpday=field_dict["pred_vdec_degpday"],
+            delta_ra_arcsec=field_dict["delta_ra_arcsec"],
+            delta_dec_arcsec=field_dict["delta_dec_arcsec"],
+            distance_arcsec=field_dict["distance_arcsec"],
+            dataset_id=field_dict["dataset_id"],
+        )
+
+    def to_dataclass(self) -> List[PrecoveryCandidate]:
+        return [
+            PrecoveryCandidate(
+                mjd=cand.time.mjd()[0].as_py(),
+                ra_deg=cand.ra_deg[0].as_py(),
+                dec_deg=cand.dec_deg[0].as_py(),
+                ra_sigma_arcsec=cand.ra_sigma_arcsec[0].as_py(),
+                dec_sigma_arcsec=cand.dec_sigma_arcsec[0].as_py(),
+                mag=cand.mag[0].as_py(),
+                mag_sigma=cand.mag_sigma[0].as_py(),
+                filter=cand.filter[0].as_py(),
+                obscode=cand.obscode[0].as_py(),
+                exposure_id=cand.exposure_id[0].as_py(),
+                exposure_mjd_start=cand.exposure_time_start.mjd()[0].as_py(),
+                exposure_mjd_mid=cand.exposure_time_mid.mjd()[0].as_py(),
+                exposure_duration=cand.exposure_duration[0].as_py(),
+                observation_id=cand.observation_id[0].as_py(),
+                healpix_id=cand.healpix_id[0].as_py(),
+                pred_ra_deg=cand.pred_ra_deg[0].as_py(),
+                pred_dec_deg=cand.pred_dec_deg[0].as_py(),
+                pred_vra_degpday=cand.pred_vra_degpday[0].as_py(),
+                pred_vdec_degpday=cand.pred_vdec_degpday[0].as_py(),
+                delta_ra_arcsec=cand.delta_ra_arcsec[0].as_py(),
+                delta_dec_arcsec=cand.delta_dec_arcsec[0].as_py(),
+                distance_arcsec=cand.distance_arcsec[0].as_py(),
+                dataset_id=cand.dataset_id[0].as_py(),
+            )
+            for cand in self
+        ]
+
+    def point_source_detections(self) -> PointSourceDetections:
+        return PointSourceDetections.from_kwargs(
+            id=self.observation_id,
+            exposure_id=self.exposure_id,
+            ra=self.ra_deg,
+            dec=self.dec_deg,
+            ra_sigma=self.ra_sigma_arcsec,
+            dec_sigma=self.dec_sigma_arcsec,
+            mag=self.mag,
+            mag_sigma=self.mag_sigma,
+            time=self.time,
+        )
+
+    def exposures(self) -> Exposures:
+        unique = drop_duplicates(self, subset=["exposure_id"])
+
+        return Exposures.from_kwargs(
+            id=unique.exposure_id,
+            start_time=unique.exposure_time_start,
+            observatory_code=unique.obscode,
+            filter=unique.filter.to_pylist(),
+            duration=unique.exposure_duration,
+        )
+
+    def predicted_ephemeris(self, orbit_ids=None) -> EphemerisQv:
+        origin = Origin.from_kwargs(code=["SUN" for i in range(len(self.time))])
+        frame = "ecliptic"
+        if orbit_ids is None:
+            orbit_ids = [str(i) for i in range(len(self.time))]
+        return EphemerisQv.from_kwargs(
+            orbit_id=orbit_ids,
+            coordinates=SphericalCoordinates.from_kwargs(
+                lon=self.pred_ra_deg,
+                lat=self.pred_dec_deg,
+                vlon=self.pred_vra_degpday,
+                vlat=self.pred_vdec_degpday,
+                time=self.time,
+                origin=origin,
+                frame=frame,
+            ),
+        )
+
+    def residuals(self) -> Residuals:
+        origin = Origin.from_kwargs(code=["SUN" for i in range(len(self.time))])
+        frame = "ecliptic"
+
+        # Create a Coordinates object for the observations - we need
+        # these to calculate residuals
+        obs_coords_spherical = SphericalCoordinates.from_kwargs(
+            lon=self.ra_deg,
+            lat=self.dec_deg,
+            covariance=CoordinateCovariances.from_sigmas(
+                np.stack(
+                    [
+                        np.array(
+                            [
+                                np.nan,
+                                sig_lon.as_py(),
+                                sig_lat.as_py(),
+                                np.nan,
+                                np.nan,
+                                np.nan,
+                            ],
+                            np.float64,
+                        )
+                        for sig_lon, sig_lat in zip(
+                            self.ra_sigma_arcsec,
+                            self.dec_sigma_arcsec,
+                        )
+                    ]
+                )
+            ),
+            time=self.time,
+            origin=origin,
+            frame=frame,
+        )
+
+        return Residuals.calculate(
+            obs_coords_spherical, self.predicted_ephemeris().coordinates
+        )
+
+
+class FrameCandidatesQv(qv.Table):
+    # copy all the fields from FrameCandidate
+    exposure_time_start = Timestamp.as_column()
+    exposure_time_mid = Timestamp.as_column()
+    filter = qv.StringColumn()
+    obscode = qv.StringColumn()
+    exposure_id = qv.StringColumn()
+    exposure_duration = qv.Float64Column()
+    healpix_id = qv.Int64Column()
+    pred_ra_deg = qv.Float64Column()
+    pred_dec_deg = qv.Float64Column()
+    pred_vra_degpday = qv.Float64Column()
+    pred_vdec_degpday = qv.Float64Column()
+    dataset_id = qv.StringColumn()
+
+    @classmethod
+    def from_frame_candidates(
+        cls, precovery_candidates: List[FrameCandidate]
+    ) -> "PrecoveryCandidatesQv":
+        field_dict: Dict[str, Any] = {
+            field.name: [] for field in dataclasses.fields(PrecoveryCandidate)
+        }
+
+        # Iterate over each candidate and convert to dictionary
+        for candidate in precovery_candidates:
+            candidate_dict = dataclasses.asdict(candidate)
+            for key, value in candidate_dict.items():
+                field_dict[key].append(value)
+
+        return cls.from_kwargs(
+            exposure_time_start=Timestamp.from_mjd(
+                field_dict["exposure_mjd_start"], scale="utc"
+            ),
+            exposure_time_mid=Timestamp.from_mjd(
+                field_dict["exposure_mjd_mid"], scale="utc"
+            ),
+            filter=field_dict["filter"],
+            obscode=field_dict["obscode"],
+            exposure_id=field_dict["exposure_id"],
+            exposure_duration=field_dict["exposure_duration"],
+            healpix_id=field_dict["healpix_id"],
+            pred_ra_deg=field_dict["pred_ra_deg"],
+            pred_dec_deg=field_dict["pred_dec_deg"],
+            pred_vra_degpday=field_dict["pred_vra_degpday"],
+            pred_vdec_degpday=field_dict["pred_vdec_degpday"],
+            dataset_id=field_dict["dataset_id"],
+        )
+
+    def to_frame_candidates(self) -> List[FrameCandidate]:
+        return [
+            FrameCandidate(
+                filter=cand.filter[0].as_py(),
+                obscode=cand.obscode[0].as_py(),
+                exposure_id=cand.exposure_id[0].as_py(),
+                exposure_mjd_start=cand.exposure_time_start.mjd()[0].as_py(),
+                exposure_mjd_mid=cand.exposure_time_mid.mjd()[0].as_py(),
+                exposure_duration=cand.exposure_duration[0].as_py(),
+                healpix_id=cand.healpix_id[0].as_py(),
+                pred_ra_deg=cand.pred_ra_deg[0].as_py(),
+                pred_dec_deg=cand.pred_dec_deg[0].as_py(),
+                pred_vra_degpday=cand.pred_vra_degpday[0].as_py(),
+                pred_vdec_degpday=cand.pred_vdec_degpday[0].as_py(),
+                dataset_id=cand.dataset_id[0].as_py(),
+            )
+            for cand in self
+        ]
+
+    def exposures(self) -> Exposures:
+        unique = drop_duplicates(self, subset=["exposure_id"])
+
+        return Exposures.from_kwargs(
+            id=unique.exposure_id,
+            start_time=unique.exposure_time_start,
+            observatory_code=unique.obscode,
+            filter=unique.filter.to_pylist(),
+            duration=unique.exposure_duration,
+        )
+
+    def predicted_ephemeris(self, orbit_ids=None) -> EphemerisQv:
+        origin = Origin.from_kwargs(
+            code=["SUN" for i in range(len(self.exposure_time_mid))]
+        )
+        frame = "ecliptic"
+        if orbit_ids is None:
+            orbit_ids = [str(i) for i in range(len(self.exposure_time_mid))]
+        return EphemerisQv.from_kwargs(
+            orbit_id=orbit_ids,
+            coordinates=SphericalCoordinates.from_kwargs(
+                lon=self.pred_ra_deg,
+                lat=self.pred_dec_deg,
+                vlon=self.pred_vra_degpday,
+                vlat=self.pred_vdec_degpday,
+                time=self.exposure_time_mid,
+                origin=origin,
+                frame=frame,
+            ),
+        )
+
+
 class PrecoveryDatabase:
     def __init__(self, frames: FrameDB, config: Config = DefaultConfig):
         self.frames = frames
@@ -346,7 +636,9 @@ class PrecoveryDatabase:
         precovery_candidates, frame_candidates = sift_candidates(matches)
 
         # convert these to our new output formats
-        return precovery_candidates, frame_candidates
+        return PrecoveryCandidatesQv.from_dataclass(
+            precovery_candidates
+        ), FrameCandidatesQv.from_frame_candidates(frame_candidates)
 
     def _check_windows(
         self,

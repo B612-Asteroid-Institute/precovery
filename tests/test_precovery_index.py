@@ -95,6 +95,10 @@ def test_precovery(test_db_dir):
             orbit, test_db_dir, tolerance=1 / 3600, window_size=1
         )
 
+        # convert back to dataclasses
+        matches = matches.to_dataclass()
+        misses = misses.to_frame_candidates()
+
         orbit_name = orbit_name_mapping[orbit.orbit_id]
         object_observations = observations_df[
             observations_df["object_id"] == orbit_name
