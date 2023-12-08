@@ -1,13 +1,85 @@
 [build-system]
-requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.0"]
+requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools_scm]
-write_to = "precovery/version.py"
-write_to_template = "__version__ = '{version}'"
+[project]
+name = "precovery"
+requires-python = ">=3.10"
+version = "0.8.0"
+authors = [
+    { name = "Kathleen Kiker", email = "kathleen@b612foundation.org" },
+    { name = "Alec Koumjian", email = "alec@b612foundation.org" },
+    { name = "Joachim Moeyens", email = "moeyensj@uw.edu" },
+    { name = "Spencer Nelson", email = "spencer@b612foundation.org" },
+    { name = "Nate Tellis", email = "nate@b612foundation.org" },
+]
+description = "Fast asteroid precovery at scale"
+readme = "README.md"
+license = { file = "LICENSE.md", classifier = "BSD License"}
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+dependencies = [
+    "adam_core @ git+https://git@github.com/B612-Asteroid-Institute/adam_core@37ceca7acf8216d46ec1daea7116acec6350a901#egg=adam_core",
+    "numpy",
+    "numba",
+    "sqlalchemy < 2",
+    "regex",
+    "pandas",
+    "healpy",
+    "requests",
+]
+
+[project.optional-dependencies]
+tests = ["pre-commit", "pytest", "pip-tools", "black", "isort", "flake8-pyproject"]
+
+[project.urls]
+"Homepage" = "https://github.com/b612-asteroid-institute/precovery"
+
+[project.scripts]
+precovery-index = "precovery.ingest:index"
+
+[tool.setuptools.packages]
+find = {}
 
 [tool.pytest.ini_options]
 python_functions = "test_*"
 
+
+[tool.black]
+# Comfortable distance, but makes exceptions when appropriate.
+line-length = 88
+
 [tool.isort]
 profile = "black"
+
+[tool.flake8]
+max-line-length = 110
+ignore = ["W503", "E203"]
+exclude = ["build", "precovery/version.py"]
+
+
+[tool.mypy]
+exclude = "virtualenv*"
+plugins = ["numpy.typing.mypy_plugin", "sqlalchemy.ext.mypy.plugin"]
+ignore_missing_imports = true
+
+
+[[tool.mypy.overrides]]
+module = "numba"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "healpy"
+ignore_missing_imports = true
+
+[tool.pytest]
+filterwarnings = "ignore::DeprecationWarning:astropy"
