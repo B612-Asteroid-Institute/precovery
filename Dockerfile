@@ -22,11 +22,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     unzip \
     wget
 
-# set 3.11 as default
+# set 3.10 as default
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
 
-# 3.11 doesn't come with pip automatically
+# Use latest pip
 RUN pip install --upgrade pip
 
 RUN pip install -v cython==0.29.36 setuptools wheel
