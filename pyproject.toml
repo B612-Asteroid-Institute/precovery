@@ -1,11 +1,11 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
+requires = ["setuptools>=64", "wheel", "setuptools_scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "precovery"
 requires-python = ">=3.10"
-version = "0.8.0"
+dynamic = ["version"]
 authors = [
     { name = "Kathleen Kiker", email = "kathleen@b612foundation.org" },
     { name = "Alec Koumjian", email = "alec@b612foundation.org" },
@@ -15,7 +15,7 @@ authors = [
 ]
 description = "Fast asteroid precovery at scale"
 readme = "README.md"
-license = { file = "LICENSE.md", classifier = "BSD License"}
+license = { file = "LICENSE.md", classifier = "BSD License" }
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -39,13 +39,24 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-tests = ["pre-commit", "pytest", "pip-tools", "black", "isort", "flake8-pyproject"]
+tests = [
+    "pre-commit",
+    "pytest",
+    "black",
+    "isort",
+    "pytest-cov",
+    "pytest-benchmark",
+    "astroquery",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/b612-asteroid-institute/precovery"
 
 [project.scripts]
 precovery-index = "precovery.ingest:index"
+
+[tool.setuptools_scm]
+version_file = "precovery/version.py"
 
 [tool.setuptools.packages]
 find = {}
