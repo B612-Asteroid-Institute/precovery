@@ -1,17 +1,11 @@
 import logging
 import multiprocessing
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Tuple
 
+import quivr as qv
 from adam_core.orbits import Orbits as AdamOrbits
 
-from .orbit import Orbit
-from .precovery_db import (
-    FrameCandidate,
-    FrameCandidatesQv,
-    PrecoveryCandidate,
-    PrecoveryCandidatesQv,
-    PrecoveryDatabase,
-)
+from .precovery_db import FrameCandidatesQv, PrecoveryCandidatesQv, PrecoveryDatabase
 
 logger = logging.getLogger("precovery")
 logging.basicConfig()
@@ -19,7 +13,7 @@ logger.setLevel(logging.INFO)
 
 
 def precover_many(
-    orbits: Union[List[Orbit], AdamOrbits],
+    orbits: AdamOrbits,
     database_directory: str,
     tolerance: float = 1 / 3600,
     start_mjd: Optional[float] = None,
@@ -28,19 +22,10 @@ def precover_many(
     allow_version_mismatch: bool = False,
     datasets: Optional[set[str]] = None,
     n_workers: int = multiprocessing.cpu_count(),
-) -> dict[int, Tuple[PrecoveryCandidatesQv, FrameCandidatesQv]]:
+) -> Tuple[PrecoveryCandidatesQv, FrameCandidatesQv]:
     """
     Run a precovery search algorithm against many orbits at once.
     """
-    if isinstance(orbits, AdamOrbits):
-        precovery_orbits = []
-        for i in range(len(orbits)):
-            precovery_orbits.append(
-                Orbit.from_adam_core(orbit_id=orbits[i], ac_orbits=orbits[i])
-            )
-        orbits = precovery_orbits
-        del precovery_orbits
-
     inputs = [
         (
             o,
@@ -63,21 +48,20 @@ def precover_many(
     pool.close()
     pool.join()
 
-    result_dict = {}
-    if len(results) == 0:
-        return {}
+    precovery_candidates = PrecoveryCandidatesQv.empty()
+    frame_candidates = FrameCandidatesQv.empty()
 
-    for orbit_id, precovery_candidates, frame_candidates in results:
-        result_dict[orbit_id] = (
-            PrecoveryCandidatesQv.from_dataclass(precovery_candidates),
-            FrameCandidatesQv.from_frame_candidates(frame_candidates),
+    for orb_precovery_candidate, orb_frame_candidate in results:
+        precovery_candidates = qv.concatenate(
+            [precovery_candidates, orb_precovery_candidate]
         )
+        frame_candidates = qv.concatenate([frame_candidates, orb_frame_candidate])
 
-    return result_dict
+    return precovery_candidates, frame_candidates
 
 
 def precover_worker(
-    orbit: Orbit,
+    orbit: AdamOrbits,
     database_directory: str,
     tolerance: float = 1 / 3600,
     start_mjd: Optional[float] = None,
@@ -85,11 +69,10 @@ def precover_worker(
     window_size: int = 7,
     allow_version_mismatch: bool = False,
     datasets: Optional[set[str]] = None,
-) -> Tuple[int, List[PrecoveryCandidate], List[FrameCandidate]]:
+) -> Tuple[PrecoveryCandidatesQv, FrameCandidatesQv]:
     """
     Wraps the precover function to return the orbit_id for mapping.
     """
-    orbit_id = orbit.orbit_id
     precovery_candidates, frame_candidates = precover(
         orbit,
         database_directory,
@@ -102,14 +85,13 @@ def precover_worker(
     )
 
     return (
-        orbit_id,
-        PrecoveryCandidatesQv.from_dataclass(precovery_candidates),
-        FrameCandidatesQv.from_frame_candidates(frame_candidates),
+        precovery_candidates,
+        frame_candidates,
     )
 
 
 def precover(
-    orbit: Union[Orbit, AdamOrbits],
+    orbit: AdamOrbits,
     database_directory: str,
     tolerance: float = 1 / 3600,
     start_mjd: Optional[float] = None,
@@ -117,7 +99,7 @@ def precover(
     window_size: int = 7,
     allow_version_mismatch: bool = False,
     datasets: Optional[set[str]] = None,
-) -> Tuple[List[PrecoveryCandidate], List[FrameCandidate]]:
+) -> Tuple[PrecoveryCandidatesQv, FrameCandidatesQv]:
     """
     Connect to database directory and run precovery for the input orbit.
 
@@ -161,9 +143,6 @@ def precover(
         mode="r",
         allow_version_mismatch=allow_version_mismatch,
     )
-
-    if isinstance(orbit, AdamOrbits):
-        orbit = Orbit.from_adam_core(orbit_id=1, ac_orbits=orbit)
 
     precovery_candidates, frame_candidates = precovery_db.precover(
         orbit,

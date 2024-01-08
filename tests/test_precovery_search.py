@@ -26,9 +26,10 @@ def test_precover(precovery_db, sample_orbits):
     precovery_db.frames.add_frames(ds_id, frames)
 
     # Do the search. We should find the three observations we inserted.
+    orbit = orbit.to_adam_core()
     matches, misses = list(precovery_db.precover(orbit))
     matches = matches.to_dataclass()
-    misses = misses.to_frame_candidates()
+    misses = misses.to_dataclass()
     assert len(matches) == 3
     assert len(misses) == 0
 
@@ -59,9 +60,10 @@ def test_precover_dataset_filter(precovery_db, sample_orbits):
 
     # Do the search with no dataset filters. We should find all six
     # observations we inserted.
+    orbit = orbit.to_adam_core()
     matches, misses = list(precovery_db.precover(orbit))
     matches = matches.to_dataclass()
-    misses = misses.to_frame_candidates()
+    misses = misses.to_dataclass()
     assert len(matches) == 6
 
     have_ids = set(r.observation_id for r in matches)
@@ -72,7 +74,7 @@ def test_precover_dataset_filter(precovery_db, sample_orbits):
     # only find that dataset's observations.
     matches, misses = list(precovery_db.precover(orbit, datasets={ds1_id}))
     matches = matches.to_dataclass()
-    misses = misses.to_frame_candidates()
+    misses = misses.to_dataclass()
     assert len(matches) == 3
 
     have_ids = set(r.observation_id for r in matches)

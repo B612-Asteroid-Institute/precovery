@@ -85,7 +85,7 @@ def test_precovery_candidate_table():
         dataset_id="dataset2",
     )
 
-    cand = PrecoveryCandidatesQv.from_dataclass([cand1, cand2, cand3])
+    cand = PrecoveryCandidatesQv.from_dataclass([cand1, cand2, cand3], orbit_id="1")
     assert len(cand) == 3
     assert len(cand.exposures().id) == 2
     assert cand.point_source_detections()
@@ -130,12 +130,12 @@ def test_precovery_frame_candidate_table():
         dataset_id="dataset3",
     )
 
-    f_cand = FrameCandidatesQv.from_frame_candidates([cand4, cand5])
+    f_cand = FrameCandidatesQv.from_dataclass([cand4, cand5], orbit_id="1")
     assert len(f_cand) == 2
     assert len(f_cand.exposures().id) == 1
     assert f_cand.predicted_ephemeris()
 
-    roundtrip = f_cand.to_frame_candidates()
+    roundtrip = f_cand.to_dataclass()
     assert len(roundtrip) == 2
     assert roundtrip[0] == cand4
     assert roundtrip[1] == cand5

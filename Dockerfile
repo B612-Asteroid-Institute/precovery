@@ -2,25 +2,9 @@ FROM ubuntu:jammy
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update -y && apt-get install -y \
-    apt-transport-https \
-    build-essential \
-    ca-certificates \
-    curl \
-    gfortran \
-    git \
-    gnupg \
-    libcfitsio-dev \
-    liblapack-dev \
-    libssl-dev \
-    pkg-config \
-    python3-dev=3.10.* \
-    python3-pip \
-    python3-distutils \
-    python3=3.10.* \
-    software-properties-common \
-    unzip \
-    wget
+    apt-get update \
+    && apt-get upgrade -y \
+    && apt-get install libcurl4-openssl-dev libssl-dev git curl unzip python3.11 pip -y
 
 # set 3.10 as default
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
