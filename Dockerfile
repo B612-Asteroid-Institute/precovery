@@ -4,14 +4,31 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update \
     && apt-get upgrade -y \
-    && apt-get install libcurl4-openssl-dev libssl-dev git curl unzip python3.11 pip -y
+    && apt-get install libcurl4-openssl-dev libssl-dev git curl unzip -y
 
-# set 3.10 as default
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
+RUN apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    apt-transport-https \
+    build-essential \
+    ca-certificates \
+    gnupg \
+    gfortran \
+    liblapack-dev \
+    pkg-config \
+    libcfitsio-dev \
+    python3.11 \
+    python3.11-dev \
+    python3.11-distutils \
+    tzdata \
+    unzip \
+    wget \
+    software-properties-common
 
-# Use latest pip
-RUN pip install --upgrade pip
+# # set 3.11 as default
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+
+# 3.11 doesn't come with pip automatically
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python
 
 RUN pip install -v cython==0.29.36 setuptools wheel
 RUN chmod 777 /opt
@@ -43,17 +60,6 @@ RUN cd /opt/oorb/data && ./getBC430
 RUN cd /opt/oorb/data && ./updateOBSCODE
 ENV OORBROOT=/opt/oorb
 ENV OORB_DATA=/opt/oorb/data
-
-# HACK: Install healpy from a release hosted on our fork. This fork
-# has no actual changes from upstream healpy. The only purpose of this
-# is to install an architecture-specific wheel, since as of 1.16.2
-# healpy only produces x86_64 wheels, and M1 Macbooks use aarch64.
-#
-# The 1.16.3 release of healpy is expected to include aarch64 wheels;
-# once that is released and used by precovery this can be removed.
-RUN --mount=type=cache,target=/root/.cache/pip \
-    export WHEEL_NAME="healpy-1.16.2-cp310-cp310-manylinux_2_17_$(uname -m).manylinux2014_$(uname -m).whl" && \
-    pip install "https://github.com/B612-Asteroid-Institute/healpy/releases/download/1.16.2/${WHEEL_NAME}"
 
 # Install precovery
 RUN mkdir -p /code/precovery
