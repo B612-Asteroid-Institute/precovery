@@ -224,7 +224,7 @@ class PrecoveryCandidatesQv(qv.Table):
     def from_dataclass(
         cls,
         precovery_candidates: List[PrecoveryCandidate],
-        orbit_id: str,
+        source_orbit_id: str,
     ) -> "PrecoveryCandidatesQv":
         field_dict: Dict[str, Any] = {
             field.name: [] for field in dataclasses.fields(PrecoveryCandidate)
@@ -235,7 +235,6 @@ class PrecoveryCandidatesQv(qv.Table):
             candidate_dict = dataclasses.asdict(candidate)
             for key, value in candidate_dict.items():
                 field_dict[key].append(value)
-
         return cls.from_kwargs(
             time=Timestamp.from_mjd(field_dict["mjd"], scale="utc"),
             ra_deg=field_dict["ra_deg"],
@@ -264,7 +263,7 @@ class PrecoveryCandidatesQv(qv.Table):
             delta_dec_arcsec=field_dict["delta_dec_arcsec"],
             distance_arcsec=field_dict["distance_arcsec"],
             dataset_id=field_dict["dataset_id"],
-            orbit_id=[orbit_id for i in range(len(field_dict["mjd"]))],
+            orbit_id=[source_orbit_id for i in range(len(field_dict["mjd"]))],
         )
 
     def to_dataclass(self) -> List[PrecoveryCandidate]:
@@ -399,7 +398,7 @@ class FrameCandidatesQv(qv.Table):
     def from_dataclass(
         cls,
         precovery_candidates: List[FrameCandidate],
-        orbit_id: str,
+        source_orbit_id: str,
     ) -> "PrecoveryCandidatesQv":
         field_dict: Dict[str, Any] = {
             field.name: [] for field in dataclasses.fields(PrecoveryCandidate)
@@ -428,7 +427,9 @@ class FrameCandidatesQv(qv.Table):
             pred_vra_degpday=field_dict["pred_vra_degpday"],
             pred_vdec_degpday=field_dict["pred_vdec_degpday"],
             dataset_id=field_dict["dataset_id"],
-            orbit_id=[orbit_id for i in range(len(field_dict["exposure_mjd_start"]))],
+            orbit_id=[
+                source_orbit_id for i in range(len(field_dict["exposure_mjd_start"]))
+            ],
         )
 
     def to_dataclass(self) -> List[FrameCandidate]:
@@ -597,7 +598,7 @@ class PrecoveryDatabase:
                     for each matching observation
                         yield match
         """
-        orbit_id = orbit.orbit_id
+        orbit_id = orbit.orbit_id[0].as_py()
         orbit = Orbit.from_adam_core(orbit_id=1, ac_orbits=orbit)
 
         if datasets is not None:
@@ -645,8 +646,8 @@ class PrecoveryDatabase:
 
         # convert these to our new output formats
         return PrecoveryCandidatesQv.from_dataclass(
-            precovery_candidates, orbit_id=orbit_id
-        ), FrameCandidatesQv.from_dataclass(frame_candidates, orbit_id=orbit_id)
+            precovery_candidates, source_orbit_id=orbit_id
+        ), FrameCandidatesQv.from_dataclass(frame_candidates, source_orbit_id=orbit_id)
 
     def _check_windows(
         self,

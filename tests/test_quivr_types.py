@@ -1,9 +1,58 @@
+import os
+
+import numpy as np
+import pandas as pd
+
+from precovery.orbit import EpochTimescale, Orbit, OrbitElementType
 from precovery.precovery_db import (
     FrameCandidate,
     FrameCandidatesQv,
     PrecoveryCandidate,
     PrecoveryCandidatesQv,
 )
+
+SAMPLE_ORBITS_FILE = os.path.join(
+    os.path.dirname(__file__), "data", "sample_orbits.csv"
+)
+
+
+def test_orbit():
+    orbits_df = pd.read_csv(SAMPLE_ORBITS_FILE)
+    orbit_name_mapping = {}
+    orbits_keplerian = []
+    adam_orbits = []
+    for i in range(len(orbits_df)):
+        orbit_name_mapping[i] = orbits_df["orbit_name"].values[i]
+        orbit = Orbit.keplerian(
+            i,
+            orbits_df["a"].values[i],
+            orbits_df["e"].values[i],
+            orbits_df["i"].values[i],
+            orbits_df["om"].values[i],
+            orbits_df["w"].values[i],
+            orbits_df["ma"].values[i],
+            orbits_df["mjd_tt"].values[i],
+            EpochTimescale.TT,
+            orbits_df["H"].values[i],
+            orbits_df["G"].values[i],
+        )
+        orbits_keplerian.append(orbit)
+        adam_orbits.append(orbit.to_adam_core())
+
+    for orbit, adam_orbit, i in zip(
+        orbits_keplerian, adam_orbits, range(len(orbits_keplerian))
+    ):
+        rt_orbit = Orbit.from_adam_core(
+            i,
+            adam_orbit,
+            timescale=EpochTimescale.TT,
+            orbit_type=OrbitElementType.KEPLERIAN,
+            absolute_magnitude=orbit._state_vector[0][-2],
+            photometric_slope_parameter=orbit._state_vector[0][-1],
+        )
+        assert np.allclose(
+            orbit._state_vector[0], rt_orbit._state_vector[0], rtol=0, atol=1e-12
+        )
 
 
 def test_precovery_candidate_table():
@@ -85,7 +134,9 @@ def test_precovery_candidate_table():
         dataset_id="dataset2",
     )
 
-    cand = PrecoveryCandidatesQv.from_dataclass([cand1, cand2, cand3], orbit_id="1")
+    cand = PrecoveryCandidatesQv.from_dataclass(
+        [cand1, cand2, cand3], source_orbit_id="1"
+    )
     assert len(cand) == 3
     assert len(cand.exposures().id) == 2
     assert cand.point_source_detections()
@@ -130,7 +181,7 @@ def test_precovery_frame_candidate_table():
         dataset_id="dataset3",
     )
 
-    f_cand = FrameCandidatesQv.from_dataclass([cand4, cand5], orbit_id="1")
+    f_cand = FrameCandidatesQv.from_dataclass([cand4, cand5], source_orbit_id="1")
     assert len(f_cand) == 2
     assert len(f_cand.exposures().id) == 1
     assert f_cand.predicted_ephemeris()
