@@ -91,11 +91,17 @@ def test_precovery(test_db_dir):
 
     # For each sample orbit, validate we get all the observations we planted
     for orbit in orbits_keplerian:
+        orbit_id = orbit.orbit_id
+        orbit = orbit.to_adam_core()
         matches, misses = precover(
             orbit, test_db_dir, tolerance=1 / 3600, window_size=1
         )
 
-        orbit_name = orbit_name_mapping[orbit.orbit_id]
+        # convert back to dataclasses
+        matches = matches.to_dataclass()
+        misses = misses.to_dataclass()
+
+        orbit_name = orbit_name_mapping[orbit_id]
         object_observations = observations_df[
             observations_df["object_id"] == orbit_name
         ]

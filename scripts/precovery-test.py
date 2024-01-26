@@ -113,7 +113,7 @@ if __name__ == "__main__":
             0.15,
         )
 
-        matches = [m for m in db.precover(orbit, tolerance=1 / 3600)]
+        matches = [m for m in db.precover(orbit, tolerance=1 / 3600)[0].to_dataclass()]
         matches_df = matches_to_df(matches)
         matches_df.insert(0, "orbit_id", orbit_id)
         matches_dfs.append(matches_df)
