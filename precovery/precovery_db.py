@@ -342,32 +342,18 @@ class PrecoveryCandidatesQv(qv.Table):
         origin = Origin.from_kwargs(code=["SUN" for i in range(len(self.time))])
         frame = "ecliptic"
 
+        # Create a 2D array of sigmas for the observations
+        # Convert arcseconds to degrees
+        sigmas = np.full((len(self.time), 6), np.nan)
+        sigmas[:, 1] = self.ra_sigma_arcsec.to_numpy(zero_copy_only=False) / 3600
+        sigmas[:, 2] = self.dec_sigma_arcsec.to_numpy(zero_copy_only=False) / 3600
+
         # Create a Coordinates object for the observations - we need
         # these to calculate residuals
         obs_coords_spherical = SphericalCoordinates.from_kwargs(
             lon=self.ra_deg,
             lat=self.dec_deg,
-            covariance=CoordinateCovariances.from_sigmas(
-                np.stack(
-                    [
-                        np.array(
-                            [
-                                np.nan,
-                                sig_lon.as_py(),
-                                sig_lat.as_py(),
-                                np.nan,
-                                np.nan,
-                                np.nan,
-                            ],
-                            np.float64,
-                        )
-                        for sig_lon, sig_lat in zip(
-                            self.ra_sigma_arcsec,
-                            self.dec_sigma_arcsec,
-                        )
-                    ]
-                )
-            ),
+            covariance=CoordinateCovariances.from_sigmas(sigmas),
             time=self.time,
             origin=origin,
             frame=frame,
