@@ -14,7 +14,6 @@ logging.basicConfig()
 logger.setLevel(logging.INFO)
 
 
-
 def _collect_precovery_results(futures, precovery_candidates, frame_candidates):
     finished, futures = ray.wait(futures, num_returns=1)
     precovery_candidates_chunk, frame_candidates_chunk = ray.get(finished[0])
@@ -34,11 +33,16 @@ def precover_many(
     window_size: int = 7,
     allow_version_mismatch: bool = False,
     datasets: Optional[set[str]] = None,
-    n_workers: int = multiprocessing.cpu_count(),
+    n_workers: Optional[int] = None,
 ) -> Tuple[PrecoveryCandidatesQv, FrameCandidatesQv]:
     """
     Run a precovery search algorithm against many orbits at once.
     """
+    if n_workers is None:
+        n_workers = multiprocessing.cpu_count()
+
+    logger.info(f"Running precovery with {n_workers} workers")
+
     initialize_use_ray(num_cpus=n_workers)
 
     inputs = [
@@ -55,22 +59,40 @@ def precover_many(
         for o in orbits
     ]
 
-
     precovery_candidates = PrecoveryCandidatesQv.empty()
     frame_candidates = FrameCandidatesQv.empty()
 
     futures = []
-    for input in inputs:
-        futures.append(precover_remote.remote(*input))
-        if len(futures) >= n_workers * 1.5:
-            futures, precovery_candidates, frame_candidates = _collect_precovery_results(
-                futures, precovery_candidates, frame_candidates
+    completed = 0
+    for orbit in orbits:
+        futures.append(
+            precover_remote.remote(
+                orbit,
+                database_directory,
+                tolerance,
+                start_mjd,
+                end_mjd,
+                window_size,
+                allow_version_mismatch,
+                datasets,
             )
-        
+        )
+        if len(futures) >= n_workers * 1.5:
+            futures, precovery_candidates, frame_candidates = (
+                _collect_precovery_results(
+                    futures, precovery_candidates, frame_candidates
+                )
+            )
+            completed += 1
+            logger.info(f"Completed {completed}/{len(orbits)} precovery jobs")
+    logger.info("Finished submitting precovery jobs")
+
     while len(futures) > 0:
         futures, precovery_candidates, frame_candidates = _collect_precovery_results(
             futures, precovery_candidates, frame_candidates
         )
+        completed += 1
+        logger.info(f"Completed {completed}/{len(orbits)} precovery jobs")
 
     return precovery_candidates, frame_candidates
 
@@ -140,4 +162,9 @@ def precover(
 
     return precovery_candidates, frame_candidates
 
+
 precover_remote = ray.remote(precover)
+precover_remote.options(
+    num_returns=1,
+    num_cpus=1,
+)
