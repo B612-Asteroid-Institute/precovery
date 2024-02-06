@@ -15,7 +15,7 @@ logger.setLevel(logging.INFO)
 
 
 
-def _collect_precovery_results(finished, futures, precovery_candidates, frame_candidates):
+def _collect_precovery_results(futures, precovery_candidates, frame_candidates):
     finished, futures = ray.wait(futures, num_returns=1)
     precovery_candidates_chunk, frame_candidates_chunk = ray.get(finished[0])
     precovery_candidates = qv.concatenate(
