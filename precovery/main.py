@@ -3,13 +3,26 @@ import multiprocessing
 from typing import Optional, Tuple
 
 import quivr as qv
+import ray
 from adam_core.orbits import Orbits as AdamOrbits
+from adam_core.ray_cluster import initialize_use_ray
 
 from .precovery_db import FrameCandidatesQv, PrecoveryCandidatesQv, PrecoveryDatabase
 
 logger = logging.getLogger("precovery")
 logging.basicConfig()
 logger.setLevel(logging.INFO)
+
+
+
+def _collect_precovery_results(finished, futures, precovery_candidates, frame_candidates):
+    finished, futures = ray.wait(futures, num_returns=1)
+    precovery_candidates_chunk, frame_candidates_chunk = ray.get(finished[0])
+    precovery_candidates = qv.concatenate(
+        [precovery_candidates, precovery_candidates_chunk]
+    )
+    frame_candidates = qv.concatenate([frame_candidates, frame_candidates_chunk])
+    return futures, precovery_candidates, frame_candidates
 
 
 def precover_many(
@@ -26,6 +39,8 @@ def precover_many(
     """
     Run a precovery search algorithm against many orbits at once.
     """
+    initialize_use_ray(num_cpus=n_workers)
+
     inputs = [
         (
             o,
@@ -40,54 +55,24 @@ def precover_many(
         for o in orbits
     ]
 
-    pool = multiprocessing.Pool(processes=n_workers)
-    results = pool.starmap(
-        precover_worker,
-        inputs,
-    )
-    pool.close()
-    pool.join()
 
     precovery_candidates = PrecoveryCandidatesQv.empty()
     frame_candidates = FrameCandidatesQv.empty()
 
-    for orb_precovery_candidate, orb_frame_candidate in results:
-        precovery_candidates = qv.concatenate(
-            [precovery_candidates, orb_precovery_candidate]
+    futures = []
+    for input in inputs:
+        futures.append(precover_remote.remote(*input))
+        if len(futures) >= n_workers * 1.5:
+            futures, precovery_candidates, frame_candidates = _collect_precovery_results(
+                futures, precovery_candidates, frame_candidates
+            )
+        
+    while len(futures) > 0:
+        futures, precovery_candidates, frame_candidates = _collect_precovery_results(
+            futures, precovery_candidates, frame_candidates
         )
-        frame_candidates = qv.concatenate([frame_candidates, orb_frame_candidate])
 
     return precovery_candidates, frame_candidates
-
-
-def precover_worker(
-    orbit: AdamOrbits,
-    database_directory: str,
-    tolerance: float = 1 / 3600,
-    start_mjd: Optional[float] = None,
-    end_mjd: Optional[float] = None,
-    window_size: int = 7,
-    allow_version_mismatch: bool = False,
-    datasets: Optional[set[str]] = None,
-) -> Tuple[PrecoveryCandidatesQv, FrameCandidatesQv]:
-    """
-    Wraps the precover function to return the orbit_id for mapping.
-    """
-    precovery_candidates, frame_candidates = precover(
-        orbit,
-        database_directory,
-        tolerance,
-        start_mjd,
-        end_mjd,
-        window_size,
-        allow_version_mismatch,
-        datasets,
-    )
-
-    return (
-        precovery_candidates,
-        frame_candidates,
-    )
 
 
 def precover(
@@ -154,3 +139,5 @@ def precover(
     )
 
     return precovery_candidates, frame_candidates
+
+precover_remote = ray.remote(precover)
