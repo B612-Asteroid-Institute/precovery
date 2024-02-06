@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 import quivr as qv
 import ray
 from adam_core.orbits import Orbits as AdamOrbits
+from adam_core.propagator.utils import _iterate_chunks
 from adam_core.ray_cluster import initialize_use_ray
 
 from .precovery_db import FrameCandidatesQv, PrecoveryCandidatesQv, PrecoveryDatabase
@@ -13,88 +14,6 @@ logger = logging.getLogger("precovery")
 logging.basicConfig()
 logger.setLevel(logging.INFO)
 
-
-def _collect_precovery_results(futures, precovery_candidates, frame_candidates):
-    finished, futures = ray.wait(futures, num_returns=1)
-    precovery_candidates_chunk, frame_candidates_chunk = ray.get(finished[0])
-    precovery_candidates = qv.concatenate(
-        [precovery_candidates, precovery_candidates_chunk]
-    )
-    frame_candidates = qv.concatenate([frame_candidates, frame_candidates_chunk])
-    return futures, precovery_candidates, frame_candidates
-
-
-def precover_many(
-    orbits: AdamOrbits,
-    database_directory: str,
-    tolerance: float = 1 / 3600,
-    start_mjd: Optional[float] = None,
-    end_mjd: Optional[float] = None,
-    window_size: int = 7,
-    allow_version_mismatch: bool = False,
-    datasets: Optional[set[str]] = None,
-    n_workers: Optional[int] = None,
-) -> Tuple[PrecoveryCandidatesQv, FrameCandidatesQv]:
-    """
-    Run a precovery search algorithm against many orbits at once.
-    """
-    if n_workers is None:
-        n_workers = multiprocessing.cpu_count()
-
-    logger.info(f"Running precovery with {n_workers} workers")
-
-    initialize_use_ray(num_cpus=n_workers)
-
-    inputs = [
-        (
-            o,
-            database_directory,
-            tolerance,
-            start_mjd,
-            end_mjd,
-            window_size,
-            allow_version_mismatch,
-            datasets,
-        )
-        for o in orbits
-    ]
-
-    precovery_candidates = PrecoveryCandidatesQv.empty()
-    frame_candidates = FrameCandidatesQv.empty()
-
-    futures = []
-    completed = 0
-    for orbit in orbits:
-        futures.append(
-            precover_remote.remote(
-                orbit,
-                database_directory,
-                tolerance,
-                start_mjd,
-                end_mjd,
-                window_size,
-                allow_version_mismatch,
-                datasets,
-            )
-        )
-        if len(futures) >= n_workers * 1.5:
-            futures, precovery_candidates, frame_candidates = (
-                _collect_precovery_results(
-                    futures, precovery_candidates, frame_candidates
-                )
-            )
-            completed += 1
-            logger.info(f"Completed {completed}/{len(orbits)} precovery jobs")
-    logger.info("Finished submitting precovery jobs")
-
-    while len(futures) > 0:
-        futures, precovery_candidates, frame_candidates = _collect_precovery_results(
-            futures, precovery_candidates, frame_candidates
-        )
-        completed += 1
-        logger.info(f"Completed {completed}/{len(orbits)} precovery jobs")
-
-    return precovery_candidates, frame_candidates
 
 
 def precover(
@@ -163,8 +82,106 @@ def precover(
     return precovery_candidates, frame_candidates
 
 
-precover_remote = ray.remote(precover)
-precover_remote.options(
-    num_returns=1,
-    num_cpus=1,
-)
+@ray.remote(num_cpus=1, num_returns=1)
+def precover_worker(
+    orbits: AdamOrbits,
+    database_directory: str,
+    tolerance: float = 1 / 3600,
+    start_mjd: Optional[float] = None,
+    end_mjd: Optional[float] = None,
+    window_size: int = 7,
+    allow_version_mismatch: bool = False,
+    datasets: Optional[set[str]] = None,
+):
+    """
+    Runs a chunk of orbits through precovery and returns the results.
+    """
+    precovery_candidates = PrecoveryCandidatesQv.empty()
+    frame_candidates = FrameCandidatesQv.empty()
+    for orbit in orbits:
+        precovery_candidates_chunk, frame_candidates_chunk = precover(
+            orbit,
+            database_directory,
+            tolerance,
+            start_mjd,
+            end_mjd,
+            window_size,
+            allow_version_mismatch,
+            datasets,
+        )
+        precovery_candidates = qv.concatenate(
+            [precovery_candidates, precovery_candidates_chunk]
+        )
+        frame_candidates = qv.concatenate([frame_candidates, frame_candidates_chunk])
+    return precovery_candidates, frame_candidates
+
+
+def _collect_precovery_results(futures, precovery_candidates, frame_candidates):
+    finished, futures = ray.wait(futures, num_returns=1)
+    precovery_candidates_chunk, frame_candidates_chunk = ray.get(finished[0])
+    precovery_candidates = qv.concatenate(
+        [precovery_candidates, precovery_candidates_chunk]
+    )
+    frame_candidates = qv.concatenate([frame_candidates, frame_candidates_chunk])
+    return futures, precovery_candidates, frame_candidates
+
+
+def precover_many(
+    orbits: AdamOrbits,
+    database_directory: str,
+    tolerance: float = 1 / 3600,
+    start_mjd: Optional[float] = None,
+    end_mjd: Optional[float] = None,
+    window_size: int = 7,
+    allow_version_mismatch: bool = False,
+    datasets: Optional[set[str]] = None,
+    n_workers: Optional[int] = None,
+    chunk_size: int = 1000,
+) -> Tuple[PrecoveryCandidatesQv, FrameCandidatesQv]:
+    """
+    Run a precovery search algorithm against many orbits at once.
+    """
+    if n_workers is None:
+        n_workers = multiprocessing.cpu_count()
+
+    logger.info(f"Running precovery with {n_workers} workers")
+
+    initialize_use_ray(num_cpus=n_workers)
+
+    precovery_candidates = PrecoveryCandidatesQv.empty()
+    frame_candidates = FrameCandidatesQv.empty()
+
+    futures = []
+    completed = 0
+    num_chunks = len(orbits) // chunk_size
+    for orbit_chunk in _iterate_chunks(orbits, chunk_size):
+        futures.append(
+            precover_worker.remote(
+                orbit_chunk,
+                database_directory,
+                tolerance,
+                start_mjd,
+                end_mjd,
+                window_size,
+                allow_version_mismatch,
+                datasets,
+            )
+        )
+        if len(futures) >= n_workers * 1.5:
+            futures, precovery_candidates, frame_candidates = (
+                _collect_precovery_results(
+                    futures, precovery_candidates, frame_candidates
+                )
+            )
+            completed += 1
+            logger.info(f"Completed {completed}/{num_chunks} precovery jobs")
+    logger.info("Finished submitting precovery jobs")
+
+    while len(futures) > 0:
+        futures, precovery_candidates, frame_candidates = _collect_precovery_results(
+            futures, precovery_candidates, frame_candidates
+        )
+        completed += 1
+        logger.info(f"Completed {completed}/{num_chunks} precovery jobs")
+
+    return precovery_candidates, frame_candidates
