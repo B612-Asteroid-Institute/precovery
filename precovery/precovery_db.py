@@ -11,6 +11,7 @@ from adam_core.coordinates.origin import Origin
 from adam_core.coordinates.residuals import Residuals
 from adam_core.coordinates.spherical import SphericalCoordinates
 from adam_core.observations import Exposures, PointSourceDetections
+from adam_core.observers import Observers
 from adam_core.orbits import Orbits as AdamOrbits
 from adam_core.orbits.ephemeris import Ephemeris as EphemerisQv
 from adam_core.time import Timestamp
@@ -320,9 +321,21 @@ class PrecoveryCandidatesQv(qv.Table):
             duration=unique.exposure_duration,
         )
 
-    def predicted_ephemeris(self, orbit_ids=None) -> EphemerisQv:
-        origin = Origin.from_kwargs(code=["SUN" for i in range(len(self.time))])
-        frame = "ecliptic"
+    def to_predicted_ephemeris(self, orbit_ids=None) -> EphemerisQv:
+        """
+        Return the predicted ephemeris for these candidates.
+
+        Parameters
+        ----------
+        orbit_ids : Optional[List[str]], optional
+            Orbit IDs to use for the predicted ephemeris. If None, a unique
+            orbit ID will be generated for each candidate.
+
+        Returns
+        -------
+        EphemerisQv
+            Predicted ephemeris for these candidates.
+        """
         if orbit_ids is None:
             orbit_ids = [str(i) for i in range(len(self.time))]
         return EphemerisQv.from_kwargs(
@@ -333,15 +346,35 @@ class PrecoveryCandidatesQv(qv.Table):
                 vlon=self.pred_vra_degpday,
                 vlat=self.pred_vdec_degpday,
                 time=self.time,
-                origin=origin,
-                frame=frame,
+                origin=Origin.from_kwargs(
+                    code=self.obscode,
+                ),
+                frame="equatorial",
             ),
         )
 
-    def residuals(self) -> Residuals:
-        origin = Origin.from_kwargs(code=["SUN" for i in range(len(self.time))])
-        frame = "ecliptic"
+    def to_residuals(self) -> Residuals:
+        """
+        Compute the residuals between the observations and the predicted ephemeris.
 
+        Returns
+        -------
+        Residuals
+            Residuals between the observations and the predicted ephemeris.
+        """
+        return Residuals.calculate(
+            self.to_spherical_coordinates(), self.to_predicted_ephemeris().coordinates
+        )
+
+    def to_spherical_coordinates(self) -> SphericalCoordinates:
+        """
+        Convert the observations to a SphericalCoordinates object.
+
+        Returns
+        -------
+        SphericalCoordinates
+            Observations represented as a SphericalCoordinates object.
+        """
         # Create a 2D array of sigmas for the observations
         # Convert arcseconds to degrees
         sigmas = np.full((len(self.time), 6), np.nan)
@@ -350,17 +383,44 @@ class PrecoveryCandidatesQv(qv.Table):
 
         # Create a Coordinates object for the observations - we need
         # these to calculate residuals
-        obs_coords_spherical = SphericalCoordinates.from_kwargs(
+        return SphericalCoordinates.from_kwargs(
             lon=self.ra_deg,
             lat=self.dec_deg,
-            covariance=CoordinateCovariances.from_sigmas(sigmas),
             time=self.time,
-            origin=origin,
-            frame=frame,
+            covariance=CoordinateCovariances.from_sigmas(sigmas),
+            origin=Origin.from_kwargs(
+                code=self.obscode,
+            ),
+            frame="equatorial",
         )
 
-        return Residuals.calculate(
-            obs_coords_spherical, self.predicted_ephemeris().coordinates
+    def get_observers(self) -> Observers:
+        """
+        Get the sorted observers for these candidates. Observers
+        can be used with an `~adam_core.propagator.Propagator` to
+        generate predicted ephemerides at the same time as the
+        observations.
+
+        Returns
+        -------
+        Observers (N)
+            Observers for these candidates sorted by time and
+            observatory code.
+        """
+        observers = Observers.empty()
+        for obscode in self.obscode.unique():
+            self_obs = self.select("obscode", obscode)
+            times = self_obs.time
+            observers = qv.concatenate(
+                [observers, Observers.from_code(obscode.as_py(), times)]
+            )
+
+        return observers.sort_by(
+            [
+                "coordinates.time.days",
+                "coordinates.time.nanos",
+                "coordinates.origin.code",
+            ]
         )
 
 
