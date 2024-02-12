@@ -419,7 +419,7 @@ class PrecoveryCandidatesQv(qv.Table):
             [
                 "coordinates.time.days",
                 "coordinates.time.nanos",
-                "coordinates.origin.code",
+                "code",
             ]
         )
 
