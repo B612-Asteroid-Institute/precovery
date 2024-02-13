@@ -348,14 +348,23 @@ class FrameIndex:
         row = self.dbconn.execute(stmt).fetchone()
         return row[0]
 
-    def mjd_bounds(self) -> Tuple[float, float]:
+    def mjd_bounds(self, datasets: Optional[set[str]] = None) -> Tuple[float, float]:
         """
         Returns the minimum and maximum exposure_mjd_mid of all frames in the index.
+
+        Parameters
+        ----------
+        datasets : set[str], optional
+            If provided, only consider frames from the given datasets.
         """
         select_stmt = sq.select(
             sqlfunc.min(self.frames.c.exposure_mjd_mid, type=sq.Float),
             sqlfunc.max(self.frames.c.exposure_mjd_mid, type=sq.Float),
         )
+        if datasets is not None:
+            select_stmt = select_stmt.where(
+                self.frames.c.dataset_id.in_(list(datasets))
+            )
         first, last = self.dbconn.execute(select_stmt).fetchone()
         return first, last
 
