@@ -651,7 +651,7 @@ class PrecoveryDatabase:
             self._warn_for_missing_datasets(datasets)
 
         if start_mjd is None or end_mjd is None:
-            first, last = self.frames.idx.mjd_bounds()
+            first, last = self.frames.idx.mjd_bounds(datasets=datasets)
             if start_mjd is None:
                 start_mjd = first
             if end_mjd is None:
