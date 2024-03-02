@@ -659,7 +659,7 @@ class PrecoveryDatabase:
 
         logger.info(
             "precovering orbit %s from %.5f to %.5f, window=%d, datasets=%s",
-            orbit.orbit_id,
+            orbit_id,
             start_mjd,
             end_mjd,
             window_size,
