@@ -28,7 +28,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "adam_core @ git+https://git@github.com/B612-Asteroid-Institute/adam_core@c8f5aae352308ccd97c512c8d8e0a2e17c86ee18#egg=adam_core",
+    "adam_core @ git+https://git@github.com/B612-Asteroid-Institute/adam_core@058891a2156274d971046bc337cad07c02412c5f#egg=adam_core",
     "numpy",
     "numba",
     "sqlalchemy < 2",
