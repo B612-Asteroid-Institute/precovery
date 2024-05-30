@@ -321,7 +321,7 @@ class PrecoveryCandidatesQv(qv.Table):
             duration=unique.exposure_duration,
         )
 
-    def to_predicted_ephemeris(self, orbit_ids=None) -> EphemerisQv:
+    def predicted_ephemeris(self, orbit_ids=None) -> EphemerisQv:
         """
         Return the predicted ephemeris for these candidates.
 
