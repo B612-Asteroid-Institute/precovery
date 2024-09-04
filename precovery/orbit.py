@@ -200,6 +200,7 @@ class Orbit:
         orbit_type: OrbitElementType = OrbitElementType.CARTESIAN,
         absolute_magnitude: float = 20.0,
         photometric_slope_parameter: float = 0.15,
+        propagator: Union[PropagatorClass, Type["Propagator"]] = PropagatorClass.ASSIST,
     ):
         """
         Create an Orbit from a 1-length adam_core Orbits table.
@@ -223,6 +224,7 @@ class Orbit:
                 timescale,
                 absolute_magnitude,
                 photometric_slope_parameter,
+                propagator=propagator,
             )
         elif orbit_type == OrbitElementType.COMETARY:
             coords = ac_orbits.coordinates.to_cometary()
@@ -238,6 +240,7 @@ class Orbit:
                 timescale,
                 absolute_magnitude,
                 photometric_slope_parameter,
+                propagator=propagator,
             )
         elif orbit_type == OrbitElementType.KEPLERIAN:
             coords = ac_orbits.coordinates.to_keplerian()
@@ -253,6 +256,7 @@ class Orbit:
                 timescale,
                 absolute_magnitude,
                 photometric_slope_parameter,
+                propagator=propagator,
             )
 
     def to_adam_core(
@@ -332,7 +336,9 @@ class Orbit:
         for i in range(len(propagated_orbits)):
             orbits.append(
                 Orbit.from_adam_core(
-                    int(propagated_orbits[i].orbit_id[0].as_py()), propagated_orbits[i]
+                    int(propagated_orbits[i].orbit_id[0].as_py()),
+                    propagated_orbits[i],
+                    propagator=self._propagator,
                 )
             )
         return orbits

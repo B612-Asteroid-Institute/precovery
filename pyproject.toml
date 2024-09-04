@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "precovery"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dynamic = ["version"]
 authors = [
     { name = "Kathleen Kiker", email = "kathleen@b612foundation.org" },
@@ -22,14 +22,14 @@ classifiers = [
     "License :: OSI Approved :: BSD License",
     "Operating System :: OS Independent",
     "Programming Language :: Python",
-    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
     "Topic :: Scientific/Engineering :: Astronomy",
     "Topic :: Scientific/Engineering :: Physics",
 ]
 
 dependencies = [
-    "adam_core>=0.2.0",
-    "adam_assist>=0.1.2",
+    "adam_core[assist]>=0.2.0",
+    "adam_assist",
     "numpy",
     "numba",
     "sqlalchemy < 2",
@@ -40,7 +40,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-tests = [
+test = [
     "pre-commit",
     "pytest",
     "black",
