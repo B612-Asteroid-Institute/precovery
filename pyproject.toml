@@ -29,6 +29,7 @@ classifiers = [
 
 dependencies = [
     "adam_core>=0.2.0",
+    "adam_assist>=0.1.2",
     "numpy",
     "numba",
     "sqlalchemy < 2",

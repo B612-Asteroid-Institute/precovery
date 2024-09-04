@@ -1,5 +1,5 @@
 import enum
-from typing import Iterable, List, Union
+from typing import Iterable, List, Type, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -52,7 +52,7 @@ class Orbit:
         self,
         orbit_id: int,
         state_vector: npt.NDArray[np.float64],
-        propagator: Union[PropagatorClass, Propagator] = PropagatorClass.ASSIST,
+        propagator: Union[PropagatorClass, Type["Propagator"]] = PropagatorClass.ASSIST,
     ):
         """
         Create a new Orbit.
@@ -67,7 +67,7 @@ class Orbit:
         self._epoch = state_vector[0][8]
         if propagator == PropagatorClass.ASSIST:
             self._propagator = ASSISTPropagator()
-        elif propagator is Propagator:
+        elif isinstance(propagator, Propagator):
             self._propagator = propagator
         else:
             raise ValueError("unexpected propagator %r" % propagator)
@@ -86,6 +86,7 @@ class Orbit:
         epoch_timescale: EpochTimescale,
         abs_magnitude: float,
         photometric_slope_parameter: float,
+        propagator: Union[PropagatorClass, Type["Propagator"]] = PropagatorClass.ASSIST,
     ):
         # Orbits class takes in degrees, but state vectors are given in radians
         state_vector = np.array(
@@ -109,7 +110,7 @@ class Orbit:
             order="F",
         )
 
-        return cls(orbit_id, state_vector)
+        return cls(orbit_id, state_vector, propagator=propagator)
 
     @classmethod
     def keplerian(
@@ -125,6 +126,7 @@ class Orbit:
         epoch_timescale: EpochTimescale,
         abs_magnitude: float,
         photometric_slope_parameter: float,
+        propagator: Union[PropagatorClass, Type["Propagator"]] = PropagatorClass.ASSIST,
     ):
         # Orbits class takes in degrees, but state vectors are given in radians
         state_vector = np.array(
@@ -148,7 +150,7 @@ class Orbit:
             order="F",
         )
 
-        return cls(orbit_id, state_vector)
+        return cls(orbit_id, state_vector, propagator=propagator)
 
     @classmethod
     def cartesian(
@@ -164,6 +166,7 @@ class Orbit:
         epoch_timescale: EpochTimescale,
         abs_magnitude: float,
         photometric_slope_parameter: float,
+        propagator: Union[PropagatorClass, Type["Propagator"]] = PropagatorClass.ASSIST,
     ):
         state_vector = np.array(
             [
@@ -186,7 +189,7 @@ class Orbit:
             order="F",
         )
 
-        return cls(orbit_id, state_vector)
+        return cls(orbit_id, state_vector, propagator=propagator)
 
     @classmethod
     def from_adam_core(
