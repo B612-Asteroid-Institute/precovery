@@ -1,5 +1,5 @@
 import enum
-from typing import Iterable, List
+from typing import Iterable, List, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -12,8 +12,8 @@ from adam_core.dynamics.propagation import propagate_2body
 from adam_core.observers import Observers
 from adam_core.orbits import Ephemeris as AdamEphemeris
 from adam_core.orbits import Orbits as AdamOrbits
+from adam_core.propagator import Propagator
 from adam_core.propagator.adam_assist import ASSISTPropagator
-from adam_core.propagator.adam_pyoorb import PYOORBPropagator
 from adam_core.time import Timestamp
 
 from .observation import ObservationArray
@@ -52,13 +52,13 @@ class Orbit:
         self,
         orbit_id: int,
         state_vector: npt.NDArray[np.float64],
-        propagator: PropagatorClass = PropagatorClass.ASSIST,
+        propagator: Union[PropagatorClass, Propagator] = PropagatorClass.ASSIST,
     ):
         """
         Create a new Orbit.
 
-        state_vector is a pretty opaque blob. It should be the structure that
-        pyoorb expects - a 12-element vector of doubles.
+        state_vector is a pretty opaque blob. This is a relic
+        of using pyoorb for propagation.
         """
         self.orbit_id = orbit_id
         self._state_vector = state_vector
@@ -67,8 +67,8 @@ class Orbit:
         self._epoch = state_vector[0][8]
         if propagator == PropagatorClass.ASSIST:
             self._propagator = ASSISTPropagator()
-        elif propagator == PropagatorClass.PYOORB:
-            self._propagator = PYOORBPropagator()
+        elif propagator is Propagator:
+            self._propagator = propagator
         else:
             raise ValueError("unexpected propagator %r" % propagator)
 
