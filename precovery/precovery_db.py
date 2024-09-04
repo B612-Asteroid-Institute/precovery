@@ -20,7 +20,7 @@ from .config import Config, DefaultConfig
 from .frame_db import FrameDB, FrameIndex, HealpixFrame
 from .healpix_geom import radec_to_healpixel
 from .observation import Observation, ObservationArray
-from .orbit import Ephemeris, EpochTimescale, Orbit, PropagationIntegrator
+from .orbit import Ephemeris, EpochTimescale, Orbit, PropagationMethod
 from .spherical_geom import haversine_distance_deg
 from .utils_qv import drop_duplicates
 from .version import __version__
@@ -714,7 +714,7 @@ class PrecoveryDatabase:
         # in the database then they are in the UTC timescale so let's use that
         orbit_propagated = orbit.propagate(
             window_midpoints,
-            PropagationIntegrator.N_BODY,
+            PropagationMethod.N_BODY,
             time_scale=EpochTimescale.UTC,
         )
 
@@ -723,7 +723,7 @@ class PrecoveryDatabase:
         window_ephems = orbit.compute_ephemeris(
             obscode,
             window_midpoints,
-            PropagationIntegrator.N_BODY,
+            PropagationMethod.N_BODY,
             time_scale=EpochTimescale.UTC,
         )
         window_healpixels = radec_to_healpixel(
@@ -794,7 +794,7 @@ class PrecoveryDatabase:
         ephems = orbit.compute_ephemeris(
             obscode,
             timestamps,
-            PropagationIntegrator.TWO_BODY,
+            PropagationMethod.TWO_BODY,
             time_scale=EpochTimescale.UTC,
         )
 
@@ -837,7 +837,7 @@ class PrecoveryDatabase:
         ephem = orbit.compute_ephemeris(
             obscode,
             [mjd],
-            PropagationIntegrator.N_BODY,
+            PropagationMethod.N_BODY,
             time_scale=EpochTimescale.UTC,
         )[0]
 
@@ -912,7 +912,7 @@ class PrecoveryDatabase:
         mean_mjd = observations.values["mjd"].mean()
         mean_orbit_state = orbit.propagate(
             epochs=[mean_mjd],
-            method=PropagationIntegrator.N_BODY,
+            method=PropagationMethod.N_BODY,
             time_scale=EpochTimescale.UTC,
         )[0]
 
@@ -922,7 +922,7 @@ class PrecoveryDatabase:
         ephemerides = mean_orbit_state.compute_ephemeris(
             obscode=frame.obscode,
             epochs=observations.values["mjd"],
-            method=PropagationIntegrator.TWO_BODY,
+            method=PropagationMethod.TWO_BODY,
             time_scale=EpochTimescale.UTC,
         )
 

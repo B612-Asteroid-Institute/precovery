@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from astropy.time import Time
 
-from precovery.orbit import EpochTimescale, Orbit, PropagationIntegrator
+from precovery.orbit import EpochTimescale, Orbit, PropagationMethod
 
 SAMPLE_ORBITS_FILE = os.path.join(
     os.path.dirname(__file__), "data", "sample_orbits.csv"
@@ -186,7 +186,7 @@ def make_observations(
             ephemeris_list = orbit.compute_ephemeris(
                 observatory_code,
                 observation_times,
-                method=PropagationIntegrator.N_BODY,
+                method=PropagationMethod.N_BODY,
                 time_scale=EpochTimescale.UTC,
             )
 

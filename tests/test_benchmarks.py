@@ -1,7 +1,7 @@
 import pytest
 
 from precovery.observation import Observation
-from precovery.orbit import PropagationIntegrator
+from precovery.orbit import PropagationMethod
 
 from .testutils import make_sourceframe_with_observations
 
@@ -53,7 +53,7 @@ def test_benchmark_propagate_orbit_nbody(benchmark, sample_orbits, propagate_dis
 
     def benchmark_case():
         orbit.propagate(
-            [orbit._epoch + propagate_distance], method=PropagationIntegrator.N_BODY
+            [orbit._epoch + propagate_distance], method=PropagationMethod.N_BODY
         )
 
     benchmark(benchmark_case)
@@ -66,7 +66,7 @@ def test_benchmark_propagate_orbit_2body(benchmark, sample_orbits, propagate_dis
 
     def benchmark_case():
         orbit.propagate(
-            [orbit._epoch + propagate_distance], method=PropagationIntegrator.TWO_BODY
+            [orbit._epoch + propagate_distance], method=PropagationMethod.TWO_BODY
         )
 
     benchmark(benchmark_case)
