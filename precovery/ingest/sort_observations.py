@@ -5,6 +5,7 @@ We want to do this so that we can run multiple indexing jobs in parallel.
 Each worker can be assigned one or more calendar files without fear of collisions in writing to
 output files (sorted by dataset/yyyy-mm/*.dat)
 """
+
 import argparse
 import glob
 import os

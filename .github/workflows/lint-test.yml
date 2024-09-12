@@ -2,9 +2,9 @@ name: Lint and Test
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, "v*"]
   pull_request:
-    branches: [ main ]
+    branches: [ main, "v*"]
 
 jobs:
   build-lint-test:
@@ -27,11 +27,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install ".[test]"
+          pip install ".[dev]"
       # Run linter
       - name: Run linter
         run: |
-          pre-commit run --all-files
+          pdm run check
       # Get JPL ephemeris files
       - name: Get JPL ephemeris files
         run: |
@@ -39,7 +39,7 @@ jobs:
       # Run tests
       - name: Run tests
         run: |
-          pytest --cov=precovery --cov-report=xml --exitfirst .
+          pdm run coverage
       - name: Coveralls
         uses: coverallsapp/github-action@v2.0.0
         with:

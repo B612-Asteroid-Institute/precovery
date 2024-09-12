@@ -363,7 +363,7 @@ class PrecoveryCandidatesQv(qv.Table):
             Residuals between the observations and the predicted ephemeris.
         """
         return Residuals.calculate(
-            self.to_spherical_coordinates(), self.to_predicted_ephemeris().coordinates
+            self.to_spherical_coordinates(), self.predicted_ephemeris().coordinates
         )
 
     def to_spherical_coordinates(self) -> SphericalCoordinates:
@@ -445,7 +445,7 @@ class FrameCandidatesQv(qv.Table):
         cls,
         precovery_candidates: List[FrameCandidate],
         source_orbit_id: str,
-    ) -> "PrecoveryCandidatesQv":
+    ) -> "FrameCandidatesQv":
         field_dict: Dict[str, Any] = {
             field.name: [] for field in dataclasses.fields(PrecoveryCandidate)
         }
@@ -611,7 +611,7 @@ class PrecoveryDatabase:
         end_mjd: Optional[float] = None,
         window_size: int = 7,
         datasets: Optional[set[str]] = None,
-    ) -> Tuple[List[PrecoveryCandidate], List[FrameCandidate]]:
+    ) -> Tuple[PrecoveryCandidatesQv, FrameCandidatesQv]:
         """
         Find observations which match orbit in the database. Observations are
         searched in descending order by mjd.
