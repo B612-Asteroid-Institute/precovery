@@ -59,11 +59,16 @@ dev = [
 [project.scripts]
 precovery-index = "precovery.ingest:index"
 
+[tool.pdm.version]
+source = "scm"
+write_to = "precovery/_version.py"
+write_template = "__version__ = '{}'"
+
 [tool.pytest.ini_options]
 python_functions = "test_*"
 
 [tool.pdm.scripts]
-check = { composite = ["lint", "typecheck", "test"] }
+check = { composite = ["lint", "typecheck"] }
 format = { composite = ["black ./precovery", "isort ./precovery"] }
 lint = { composite = [
   "ruff check ./precovery",

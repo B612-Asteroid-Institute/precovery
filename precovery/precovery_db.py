@@ -16,6 +16,7 @@ from adam_core.orbits import Orbits as AdamOrbits
 from adam_core.orbits.ephemeris import Ephemeris as EphemerisQv
 from adam_core.time import Timestamp
 
+from ._version import __version__
 from .config import Config, DefaultConfig
 from .frame_db import FrameDB, FrameIndex, HealpixFrame
 from .healpix_geom import radec_to_healpixel
@@ -23,7 +24,6 @@ from .observation import Observation, ObservationArray
 from .orbit import Ephemeris, EpochTimescale, Orbit, PropagationMethod
 from .spherical_geom import haversine_distance_deg
 from .utils_qv import drop_duplicates
-from .version import __version__
 
 DEGREE = 1.0
 ARCMIN = DEGREE / 60

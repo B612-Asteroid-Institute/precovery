@@ -118,5 +118,4 @@ volume/
 ^data/
 out/
 database/
-precovery/version.py
 .docker_bash_history.txt
