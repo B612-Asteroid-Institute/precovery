@@ -285,8 +285,9 @@ class FrameIndex:
                 f" {int(healpixel)}, obscode: {obscode}."
             )
 
-        for r in rows:
-            yield HealpixFrame(*r)
+        return [HealpixFrame(*r) for r in rows]
+        # for r in rows:
+        #     yield HealpixFrame(*r)
 
     def get_frames_by_id(
         self,
