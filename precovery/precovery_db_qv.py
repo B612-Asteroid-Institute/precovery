@@ -1,18 +1,14 @@
 import dataclasses
-import itertools
 import logging
 import os
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
+from typing import Iterator, List, Optional, Tuple
 
 import numpy as np
+import pyarrow as pa
 import quivr as qv
 from adam_core.coordinates import CoordinateCovariances
-from adam_core.coordinates.origin import Origin
-from adam_core.coordinates.residuals import Residuals
-from adam_core.coordinates.spherical import SphericalCoordinates
 from adam_core.dynamics.ephemeris import generate_ephemeris_2body
 from adam_core.dynamics.propagation import propagate_2body
-from adam_core.observations import Exposures, PointSourceDetections
 from adam_core.observers import Observers
 from adam_core.orbits import Orbits as AdamOrbits
 from adam_core.orbits.ephemeris import Ephemeris as AdamEphemeris
@@ -24,10 +20,8 @@ from .config import Config, DefaultConfig
 from .frame_db import FrameDB, FrameIndex, HealpixFrame
 from .healpix_geom import radec_to_healpixel
 from .observation import Observation, ObservationArray
-from .orbit import Ephemeris, EpochTimescale, Orbit, PropagationMethod
 from .precovery_db import FrameCandidatesQv, PrecoveryCandidatesQv
 from .spherical_geom import haversine_distance_deg
-from .utils_qv import drop_duplicates
 
 DEGREE = 1.0
 ARCMIN = DEGREE / 60
@@ -98,7 +92,7 @@ def to_dict(self):
     return dataclasses.asdict(self)
 
 
-def frame_candidates_from_frame(frame: HealpixFrame, ephem: Ephemeris):
+def frame_candidates_from_frame(frame: HealpixFrame, ephem: AdamEphemeris):
     # Calculate the HEALpixel ID for the predicted ephemeris of
     # the orbit with a high nside value (k=15, nside=2**15) The
     # indexed observations are indexed to a much lower nside but
@@ -270,18 +264,15 @@ class PrecoveryDatabaseQv:
             datasets or "all",
         )
 
-        windows = self.frames.idx.window_centers(
+        windows = self.frames.idx.window_centers_grouped(
             start_mjd, end_mjd, window_size, datasets=datasets
         )
-
         # group windows by obscodes so that many windows can be searched at once
         candidates = []
         frame_candidates = []
-        for obscode, obs_windows in itertools.groupby(
-            windows, key=lambda pair: pair[1]
-        ):
+        for obscode, mjds in windows:
+            logger.info("searching windows for obscode %s", obscode)
             # create our Timestamp ghere
-            mjds = [window[0] for window in obs_windows]
             times = Timestamp.from_mjd(mjds, scale="utc")
 
             candidates_obscode, frame_candidates_obscode = self._check_windows(
@@ -298,11 +289,8 @@ class PrecoveryDatabaseQv:
             candidates.append(candidates_obscode)
             frame_candidates.append(frame_candidates_obscode)
 
-        precovery_candidates = qv.concatenate(candidates)
-        frame_candidates = qv.concatenate(frame_candidates)
-
         # convert these to our new output formats
-        return precovery_candidates, frame_candidates
+        return qv.concatenate(candidates), qv.concatenate(frame_candidates)
 
     def _check_windows(
         self,
@@ -321,6 +309,10 @@ class PrecoveryDatabaseQv:
         """
         # Propagate the orbit with n-body to every window center
         orbit_propagated = propagator.propagate_orbits(orbit, window_midpoints)
+        cov = CoordinateCovariances.from_kwargs(
+            values=pa.repeat(None, len(orbit_propagated)),
+        )
+        orbit_propagated = orbit_propagated.set_column("coordinates.covariance", cov)
 
         # Using the propagated orbits, check each window. Propagate the orbit from the center of
         # window using 2-body to find any HealpixFrames where a detection could have occured
@@ -369,7 +361,7 @@ class PrecoveryDatabaseQv:
         self,
         window_start: float,
         window_end: float,
-        orbit: Orbit,
+        orbit: AdamOrbits,
         obscode: str,
         tolerance: float,
         propagator: Propagator,
@@ -407,32 +399,35 @@ class PrecoveryDatabaseQv:
 
         # Check which ephemerides land within data
 
-        precovery_candidates = [PrecoveryCandidatesQv.empty()]
-        frame_candidates = [FrameCandidatesQv.empty()]
+        mjds_to_check = []
+        healpixels_to_check = []
         for timestamp, observation_healpixel_set, ephem_healpixel in zip(
             timestamps, observation_healpixels, ephem_healpixels
         ):
             if ephem_healpixel in observation_healpixel_set:
-                # We have a match! Check the frame.
-                precovery_candidates_frame, frame_candidates_frame = self._check_frame(
-                    orbit=orbit,
-                    healpixel=ephem_healpixel,
-                    obscode=obscode,
-                    mjd=timestamp,
-                    tolerance=tolerance,
-                    datasets=datasets,
-                    propagator=propagator,
-                )
-                precovery_candidates.append(precovery_candidates_frame)
-                frame_candidates.append(frame_candidates_frame)
-        return qv.concatenate(precovery_candidates), qv.concatenate(frame_candidates)
+                # We have a match! add mjds to list to check
+                # these are coming in reverse order so we need to reverse them
+                mjds_to_check.append(timestamp)
+                healpixels_to_check.append(ephem_healpixel)
+        if len(mjds_to_check) != 0:
+            return self._check_frames(
+                orbit=orbit,
+                healpixels=list(reversed(healpixels_to_check)),
+                obscode=obscode,
+                mjds=list(reversed(mjds_to_check)),
+                tolerance=tolerance,
+                datasets=datasets,
+                propagator=propagator,
+            )
+        else:
+            return PrecoveryCandidatesQv.empty(), FrameCandidatesQv.empty()
 
-    def _check_frame(
+    def _check_frames(
         self,
-        orbit: Orbit,
-        healpixel: int,
+        orbit: AdamOrbits,
+        healpixels: list[int],
         obscode: str,
-        mjd: float,
+        mjds: List[float],
         tolerance: float,
         datasets: Optional[set[str]],
         propagator: Propagator,
@@ -441,36 +436,38 @@ class PrecoveryDatabaseQv:
         Deeply inspect all frames that match the given obscode, mjd, and healpix to
         see if they contain observations which match the ephemeris.
         """
-        times = Timestamp.from_mjd([mjd], scale="utc")
+        times = Timestamp.from_mjd(mjds, scale="utc")
         # create observers
         observers = Observers.from_code(obscode, times)
         # Compute the position of the ephem carefully.
         ephemeris = propagator.generate_ephemeris(orbit, observers)
-
-        frames = self.frames.idx.get_frames(obscode, mjd, healpixel, datasets)
-        logger.debug(
-            "checking frames for healpix=%d obscode=%s mjd=%f",
-            healpixel,
-            obscode,
-            mjd,
-        )
+        frames = []
+        for mjd, healpixel in zip(mjds, healpixels):
+            frames.append(self.frames.idx.get_frames(obscode, mjd, healpixel, datasets))
+        # logger.debug(
+        #     "checking frames for healpix=%d obscode=%s mjd=%f",
+        #     healpixel,
+        #     obscode,
+        #     mjd,
+        # )
         precovery_candidates = [PrecoveryCandidatesQv.empty()]
         frame_candidates = [FrameCandidatesQv.empty()]
-        for f in frames:
-            matches = self._find_matches_in_frame(
-                f, orbit, ephemeris, tolerance, propagator
-            )
-            # If no observations were found in this frame then we
-            # return frame candidates
-            # Note that for the frame candidate we report the predicted
-            # ephemeris at the exposure midpoint not at the observation
-            # times which may differ from the exposure midpoint time
-            if len(matches) == 0:
-                logger.debug("no observations found in this frame")
-                frame_candidate = frame_candidates_from_frame(f, ephemeris)
-                frame_candidates.append(frame_candidate)
-            else:
-                precovery_candidates.append(matches)
+        for i, frames_i in enumerate(frames):
+            for f in frames_i:
+                matches = self._find_matches_in_frame(
+                    f, orbit, ephemeris[i], tolerance, propagator
+                )
+                # If no observations were found in this frame then we
+                # return frame candidates
+                # Note that for the frame candidate we report the predicted
+                # ephemeris at the exposure midpoint not at the observation
+                # times which may differ from the exposure midpoint time
+                if len(matches) == 0:
+                    logger.debug("no observations found in this frame")
+                    frame_candidate = frame_candidates_from_frame(f, ephemeris[i])
+                    frame_candidates.append(frame_candidate)
+                else:
+                    precovery_candidates.append(matches)
         return qv.concatenate(precovery_candidates), qv.concatenate(frame_candidates)
 
     def _find_matches_in_frame(
@@ -491,7 +488,6 @@ class PrecoveryDatabaseQv:
         n_obs = len(observations)
 
         mjd = ephem.coordinates.time[0].mjd().to_numpy(False)[0]
-
         if not np.all(observations.values["mjd"] == mjd):
             # Data has per-observation MJDs. We'll need propagate to every observation's time.
             matches = self._find_matches_using_per_obs_timestamps(
@@ -525,7 +521,7 @@ class PrecoveryDatabaseQv:
     def _find_matches_using_per_obs_timestamps(
         self,
         frame: HealpixFrame,
-        orbit: Orbit,
+        orbit: AdamOrbits,
         observations: ObservationArray,
         tolerance: float,
         propagator: Propagator,
@@ -537,7 +533,9 @@ class PrecoveryDatabaseQv:
         # First, propagate to the mean MJD using N-body propagation.
         mean_mjd = observations.values["mjd"].mean()
 
-        mean_orbit_state = propagator.propagate_orbits(orbit, [mean_mjd])
+        times = Timestamp.from_mjd([mean_mjd], scale="utc")
+
+        mean_orbit_state = propagator.propagate_orbits(orbit, times)
 
         # Next, compute an ephemeris for every observation in the
         # frame. Use 2-body propagation from the mean position to the

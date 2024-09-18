@@ -31,6 +31,8 @@ dependencies = [
     "adam_assist",
     "numpy",
     "numba",
+    "jaxlib==0.4.17",
+    "jax==0.4.17",
     "sqlalchemy < 2",
     "regex",
     "pandas",
