@@ -5,8 +5,11 @@ from typing import Optional, Tuple
 
 import healpy
 import pytest
+from adam_core.observers import Observers
+from adam_core.orbits import Orbits
+from adam_core.propagator.adam_assist import ASSISTPropagator
+from adam_core.time import Timestamp
 
-from precovery.orbit import Orbit
 from precovery.sourcecatalog import SourceFrame, SourceObservation
 
 
@@ -52,13 +55,22 @@ def make_sourceobs(
 
 
 def make_sourceobs_of_orbit(
-    orbit: Orbit,
+    orbit: Orbits,
     obscode: str,
     mjd: float = 50000.0,
 ):
-    ephem = orbit.compute_ephemeris(obscode=obscode, epochs=[mjd])[0]
+    propagator = ASSISTPropagator()
+
+    times = Timestamp.from_mjd([mjd], scale="utc")
+    # create observers
+    observers = Observers.from_code(obscode, times)
+    ephem = propagator.generate_ephemeris(orbit, observers)
     obs = make_sourceobs(
-        mjd=mjd, exposure_mjd_mid=mjd, obscode=obscode, ra=ephem.ra, dec=ephem.dec
+        mjd=mjd,
+        exposure_mjd_mid=mjd,
+        obscode=obscode,
+        ra=ephem.coordinates.lon[0].as_py(),
+        dec=ephem.coordinates.lat[0].as_py(),
     )
     return obs
 
@@ -111,7 +123,8 @@ def random_string(length: int):
     return "".join(random.choice(string.ascii_lowercase) for i in range(length))
 
 
-requires_openorb_data = pytest.mark.skipif(
-    "OORB_DATA" not in os.environ,
-    reason="test requires propagation, so OORB_DATA environment variable must be set",
+# maybe replace this with a check that we have downloaded jpl ephemeris files?
+requires_jpl_ephem_data = pytest.mark.skipif(
+    "ASSIST_DATA_DIR" not in os.environ,
+    reason="test requires propagation, so ASSIST_DATA_DIR environment variable must be set",
 )

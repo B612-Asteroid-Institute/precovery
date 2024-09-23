@@ -119,3 +119,4 @@ volume/
 out/
 database/
 .docker_bash_history.txt
+*.DS_Store

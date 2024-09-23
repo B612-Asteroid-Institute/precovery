@@ -138,55 +138,6 @@ class FrameIndex:
         end_mjd: float,
         window_size_days: int,
         datasets: Optional[set[str]] = None,
-    ) -> Iterator[Tuple[float, str]]:
-        """Return the midpoint and obscode of all time windows with data in them.
-
-        If datasets is provided, it will be applied as a filter on the
-        datasets used to find data.
-
-        """
-        offset = -start_mjd + window_size_days / 2
-
-        # select distinct
-        #     (cast(mjd - first + (window_size_days / 2) as int) / windows_size_days)
-        #     * window_size_days + first as common_epoch
-        # from frames;
-        stmt = (
-            sq.select(
-                sq.cast(
-                    (
-                        sq.cast(
-                            self.frames.c.exposure_mjd_mid + offset,
-                            sq.Integer,
-                        )
-                        / window_size_days
-                    )
-                    * window_size_days
-                    + start_mjd,
-                    sq.Float,
-                ).label("common_epoch"),
-                self.frames.c.obscode,
-            )
-            .distinct()
-            .where(
-                self.frames.c.exposure_mjd_mid >= start_mjd,
-                self.frames.c.exposure_mjd_mid <= end_mjd,
-            )
-            .order_by("common_epoch")
-        )
-        if datasets is not None:
-            stmt = stmt.where(self.frames.c.dataset_id.in_(list(datasets)))
-
-        rows = self.dbconn.execute(stmt)
-        for mjd, obscode in rows:
-            yield (mjd, obscode)
-
-    def window_centers_grouped(
-        self,
-        start_mjd: float,
-        end_mjd: float,
-        window_size_days: int,
-        datasets: Optional[set[str]] = None,
     ) -> list[Tuple[str, list[float]]]:
         """Return the midpoint and obscode of all time windows with data in them.
 

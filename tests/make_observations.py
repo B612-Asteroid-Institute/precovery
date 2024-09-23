@@ -1,12 +1,12 @@
 import argparse
 import os
-from typing import Dict, List
 
 import numpy as np
 import pandas as pd
-from astropy.time import Time
-
-from precovery.orbit import EpochTimescale, Orbit, PropagationMethod
+from adam_core.observers import Observers
+from adam_core.orbits import Orbits
+from adam_core.propagator.adam_assist import ASSISTPropagator
+from adam_core.time import Timestamp
 
 SAMPLE_ORBITS_FILE = os.path.join(
     os.path.dirname(__file__), "data", "sample_orbits.csv"
@@ -14,84 +14,12 @@ SAMPLE_ORBITS_FILE = os.path.join(
 TEST_OBSERVATIONS_DIR = os.path.join(os.path.dirname(__file__), "data/index")
 
 
-def dataframe_to_orbit(
-    orbits_df: pd.DataFrame,
-    orbit_type: str = "keplerian",
-) -> list[Orbit]:
-    """
-    Initialize list of Orbit objects from a pandas DataFrame.
-
-    TODO: Add support for cartesian orbits.
-
-    Parameters
-    ----------
-    orbits_df : `~pd.DataFrame`
-        DataFrame containing orbital elements for each orbit.
-    orbit_type : str, optional
-        Type of orbit to initialize. Must be either "keplerian" or "cometary".
-
-    Returns
-    -------
-    orbits : list[Orbit]
-        List of Orbit objects.
-    """
-    orbits = []
-    for i in range(len(orbits_df)):
-
-        if orbit_type == "keplerian":
-
-            orbit_i = Orbit.keplerian(
-                i,
-                orbits_df["a"].values[i],
-                orbits_df["e"].values[i],
-                orbits_df["i"].values[i],
-                orbits_df["om"].values[i],
-                orbits_df["w"].values[i],
-                orbits_df["ma"].values[i],
-                orbits_df["mjd_tt"].values[i],
-                EpochTimescale.TT,
-                orbits_df["H"].values[i],
-                orbits_df["G"].values[i],
-            )
-
-        elif orbit_type == "cometary":
-
-            # Extract time of perihelion passage
-            tp = Time(
-                orbits_df["tp"].values[i],
-                format="jd",
-                scale="tdb",
-            )
-            orbit_i = Orbit.cometary(
-                i,
-                orbits_df["q"].values[i],
-                orbits_df["e"].values[i],
-                orbits_df["i"].values[i],
-                orbits_df["om"].values[i],
-                orbits_df["w"].values[i],
-                tp.tt.mjd,
-                orbits_df["mjd_tt"].values[i],
-                EpochTimescale.TT,
-                orbits_df["H"].values[i],
-                orbits_df["G"].values[i],
-            )
-
-        else:
-            raise ValueError("orbit_type must be either 'keplerian' or 'cometary'")
-
-        orbits.append(orbit_i)
-
-    return orbits
-
-
 def make_observations(
-    orbits_df: pd.DataFrame,
-    orbit_type: str = "keplerian",
+    orbits: Orbits,
 ) -> pd.DataFrame:
     """
-    Makes 3 synthetic observations files to use for testing. Orbits are read from the input dataframe
-    into the Orbit class. Setting orbit_type will determine which representation of the orbit
-    should be used to generate the observations.
+    Makes 3 synthetic observations files to use for testing. Orbits are an instance
+    of the adam_core Orbits class
 
     Observations are created with the following cadence: 4 observations per day for 2 weeks per observatory.
     Each observatory will be offset by 10 days from the previous observatory so that we have overlapping
@@ -112,9 +40,8 @@ def make_observations(
     observations : `~pandas.DataFrame`
         DataFrame containing observations.
     """
-    # Extract orbit names and read orbits into Orbit class
-    orbit_ids = orbits_df["orbit_name"].values
-    orbits = dataframe_to_orbit(orbits_df, orbit_type=orbit_type)
+    # Initialize an assist propagator for ephemeris generation
+    propagator = ASSISTPropagator()
 
     # Create list of observatory codes, each observatory code will be placed into
     # its own dataset, with the exception of the last two which will be combined into one
@@ -159,10 +86,9 @@ def make_observations(
     rng = np.random.default_rng(seed=2023)
 
     ephemeris_dfs = []
-    for i, orbit in enumerate(orbits):
-        initial_epoch = Time(orbit._epoch, scale="tt", format="mjd")
-
-        ephemeris_list = []
+    for i in range(len(orbits)):
+        # initial_epoch = Time(orbit._epoch, scale="tt", format="mjd")
+        print(f"Generating observations for object {orbits[i].object_id[0].as_py()}")
         for (
             observatory_code,
             observatory_nightly_offset,
@@ -173,7 +99,7 @@ def make_observations(
             # Calculate a random offset from the start of the exposure
             # to give each observation a unique obervation time
             exposure_start_times = (
-                initial_epoch.utc.mjd
+                orbits[i].coordinates.time.rescale("utc").mjd()[0].as_py()
                 + dts
                 + observatory_nightly_offset
                 + observatory_window_offset
@@ -183,39 +109,22 @@ def make_observations(
                 0, exposure_duration / 86400
             )
 
-            ephemeris_list = orbit.compute_ephemeris(
-                observatory_code,
-                observation_times,
-                method=PropagationMethod.N_BODY,
-                time_scale=EpochTimescale.UTC,
+            times = Timestamp.from_mjd(observation_times, scale="utc")
+            # create observers
+            observers = Observers.from_code(observatory_code, times)
+            ephemeris = propagator.generate_ephemeris(orbits[i], observers)
+
+            ephemeris_df = pd.DataFrame(
+                {
+                    "mjd": ephemeris.coordinates.time.mjd().to_pylist(),
+                    "ra": ephemeris.coordinates.lon.to_pylist(),
+                    "dec": ephemeris.coordinates.lat.to_pylist(),
+                }
             )
 
-            ephemeris_dict: Dict[str, List[float]] = {
-                "mjd": [],
-                "ra": [],
-                "dec": [],
-                "mag": [],
-            }
-            for eph_i in ephemeris_list:
-                # PYOORB basic ephemeris
-                # modified julian date
-                # right ascension (deg)
-                # declination (deg)
-                # dra/dt sky-motion (deg/day, including cos(dec) factor)
-                # ddec/dt sky-motion (deg/day)
-                # solar phasae angle (deg)
-                # solar elongation angle (deg)
-                # heliocentric distance (au)
-                # geocentric distance (au)
-                # predicted apparent V-band magnitude
-                # true anomaly (deg)
-                ephemeris_dict["mjd"].append(eph_i.mjd)
-                ephemeris_dict["ra"].append(eph_i.ra)
-                ephemeris_dict["dec"].append(eph_i.dec)
-                ephemeris_dict["mag"].append(eph_i.mag)
-
-            ephemeris_df = pd.DataFrame(ephemeris_dict)
-            ephemeris_df.insert(0, "object_id", orbit_ids[orbit.orbit_id])
+            ephemeris_df.insert(0, "object_id", orbits[i].object_id[0].as_py())
+            # We don't use magnitudes anywhere in our tests right now
+            ephemeris_df.insert(3, "mag", 18.0)
             ephemeris_df.insert(
                 4, "ra_sigma", astrometric_uncertainties[observatory_code]
             )
@@ -276,16 +185,9 @@ if __name__ == "__main__":
             "Each dataset is saved into a unique directory within the passed directory."
         ),
     )
-    parser.add_argument(
-        "--orbit_type",
-        type=str,
-        default="keplerian",
-        help="Type of orbit to initialize. Must be either 'keplerian' or 'cometary'.",
-    )
-
     args = parser.parse_args()
-    orbits_df = pd.read_csv(args.in_file)
-    observations = make_observations(orbits_df, orbit_type=args.orbit_type)
+    orbits = Orbits.from_parquet(args.in_file)
+    observations = make_observations(orbits)
     for dataset_id in observations["dataset_id"].unique():
         dataset_observations = observations[observations["dataset_id"] == dataset_id]
         dataset_dir = os.path.join(args.out_dir, dataset_id)

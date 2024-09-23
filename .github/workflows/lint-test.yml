@@ -36,6 +36,9 @@ jobs:
       - name: Get JPL ephemeris files
         run: |
           python scripts/set_up_assist.py
+      - name: Set JPL ephemeris environment variable
+        run: |
+          export ASSIST_DATA_DIR=~/.adam_assist_data
       # Run tests
       - name: Run tests
         run: |
