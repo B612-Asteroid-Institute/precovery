@@ -1,6 +1,6 @@
 import logging
 import multiprocessing
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Type
 
 import quivr as qv
 from adam_core.orbits import Orbits
@@ -23,9 +23,7 @@ def precover_many(
     allow_version_mismatch: bool = False,
     datasets: Optional[set[str]] = None,
     n_workers: int = multiprocessing.cpu_count(),
-    propagator: Optional[
-        Propagator
-    ] = None,  # should we initialize an assist propagator?
+    propagator: Optional[Type[Propagator]] = None,
 ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
     """
     Run a precovery search algorithm against many orbits at once.
@@ -74,10 +72,14 @@ def precover_worker(
     window_size: int = 7,
     allow_version_mismatch: bool = False,
     datasets: Optional[set[str]] = None,
+    propagator: Optional[Type[Propagator]] = None,
 ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
     """
     Wraps the precover function to return the orbit_id for mapping.
     """
+
+    # initialize our propagator
+    propagator_instance = propagator() if propagator is not None else None
     precovery_candidates, frame_candidates = precover(
         orbit,
         database_directory,
@@ -87,6 +89,7 @@ def precover_worker(
         window_size,
         allow_version_mismatch,
         datasets,
+        propagator=propagator_instance,
     )
 
     return (
@@ -104,9 +107,7 @@ def precover(
     window_size: int = 7,
     allow_version_mismatch: bool = False,
     datasets: Optional[set[str]] = None,
-    propagator: Optional[
-        Propagator
-    ] = None,  # should we initialize an assist propagator?
+    propagator: Optional[Type[Propagator]] = None,
 ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
     """
     Connect to database directory and run precovery for the input orbit.
@@ -137,6 +138,8 @@ def precover(
         Allows using a precovery db version that does not match the library version.
     datasets : set[str], optional
         Filter down searches to only scan selected datasets
+    propagator : Type[Propagator], optional
+        An adam_core.propagator.Propagator subclass to use for propagating the orbit.
 
     Returns
     -------
@@ -145,6 +148,7 @@ def precover(
         that intersected the orbit's trajectory but did not have any observations (PrecoveryCandidates)
         found within the angular tolerance.
     """
+
     precovery_db = PrecoveryDatabase.from_dir(
         database_directory,
         create=False,

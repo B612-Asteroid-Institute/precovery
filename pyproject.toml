@@ -27,8 +27,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "adam_core[assist]>=0.2.0",
-    "adam_assist",
+    "adam_core>=0.2.3",
     "numpy",
     "numba",
     "jaxlib==0.4.17",
@@ -42,6 +41,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "adam_assist",
     "pre-commit",
     "pytest",
     "black",

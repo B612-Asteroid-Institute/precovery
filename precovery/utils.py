@@ -14,7 +14,6 @@ def drop_duplicates(
     Drop duplicate rows from a `~quivr.Table`. This function is similar to
     `~pandas.DataFrame.drop_duplicates` but it supports nested columns (representing
     nested tables).
-
     Parameters
     ----------
     table : `~quivr.Table`
@@ -24,7 +23,6 @@ def drop_duplicates(
         all columns are used.
     keep : {'first', 'last'}, default 'first'
         If there are duplicate rows then keep the first or last row.
-
     Returns
     -------
     table : `~quivr.Table`

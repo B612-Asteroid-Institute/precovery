@@ -5,29 +5,10 @@
 groups = ["default"]
 strategy = ["inherit_metadata"]
 lock_version = "4.5.0"
-content_hash = "sha256:8faf4055ca7bb3a27eff64024b08afc23553876a451cca3235df9da1892daa70"
+content_hash = "sha256:866100e102d8405d5e2d4cfacfefd6b4980a37fb4ac0427da9788220ac6862a9"
 
 [[metadata.targets]]
 requires_python = ">=3.11"
-
-[[package]]
-name = "adam-assist"
-version = "0.1.2"
-requires_python = "<4.0,>=3.11"
-summary = "ADAM Core Propagator class using ASSIST"
-groups = ["default"]
-dependencies = [
-    "adam-core>=0.2.3",
-    "assist",
-    "naif-de440",
-    "numpy",
-    "ray",
-    "spiceypy>=6.0.0",
-]
-files = [
-    {file = "adam_assist-0.1.2-py3-none-any.whl", hash = "sha256:b9c0c0af898b6642efb082b6f011ef4dee794896e54094e02548318201c7deac"},
-    {file = "adam_assist-0.1.2.tar.gz", hash = "sha256:2698fa3948eb292753562eb0c16486c687b855c27a46f27383964cd20cdeb82e"},
-]
 
 [[package]]
 name = "adam-core"
@@ -63,22 +44,6 @@ files = [
 ]
 
 [[package]]
-name = "adam-core"
-version = "0.2.3"
-extras = ["assist"]
-requires_python = ">=3.10"
-summary = "Core libraries for the ADAM platform"
-groups = ["default"]
-dependencies = [
-    "adam-assist>=0.1.1a1",
-    "adam-core==0.2.3",
-]
-files = [
-    {file = "adam_core-0.2.3-py3-none-any.whl", hash = "sha256:357645c530ab1c1f631a585c23c2ec0fd054f0eedb3e8be951442644589577ab"},
-    {file = "adam_core-0.2.3.tar.gz", hash = "sha256:58e4519378ff10b64471d9e02e211db2f293f9f9497daf3f6dc1559e8e0a9071"},
-]
-
-[[package]]
 name = "aiosignal"
 version = "1.3.1"
 requires_python = ">=3.7"
@@ -90,19 +55,6 @@ dependencies = [
 files = [
     {file = "aiosignal-1.3.1-py3-none-any.whl", hash = "sha256:f8376fb07dd1e86a584e4fcdec80b36b7f81aac666ebc724e2c090300dd83b17"},
     {file = "aiosignal-1.3.1.tar.gz", hash = "sha256:54cd96e15e1649b75d6c87526a6ff0b6c1b0dd3459f43d9ca11d48c339b68cfc"},
-]
-
-[[package]]
-name = "assist"
-version = "1.1.9"
-summary = "A library high accuracy ephemeris in REBOUND"
-groups = ["default"]
-dependencies = [
-    "numpy",
-    "rebound>=4.0.1",
-]
-files = [
-    {file = "assist-1.1.9.tar.gz", hash = "sha256:b7a0d9bbf905b6e29707a2d1507819d8400bad9f534cd5949420c8f1d8514725"},
 ]
 
 [[package]]
@@ -1185,31 +1137,6 @@ files = [
     {file = "ray-2.35.0-cp312-cp312-manylinux2014_aarch64.whl", hash = "sha256:e2ccfd144180f03d38b02a81afdac2b437f27e46736bf2653a1f0e8d67ea56cd"},
     {file = "ray-2.35.0-cp312-cp312-manylinux2014_x86_64.whl", hash = "sha256:2ca1a0de41d4462fd764598a5981cf55fc955599f38f9a1ae10868e94c6dd80d"},
     {file = "ray-2.35.0-cp312-cp312-win_amd64.whl", hash = "sha256:c5600f745bb0e4df840a5cd51e82b1acf517f73505df9869fe3e369966956129"},
-]
-
-[[package]]
-name = "rebound"
-version = "4.4.3"
-summary = "An open-source multi-purpose N-body code"
-groups = ["default"]
-files = [
-    {file = "rebound-4.4.3-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:02829a3c79d6388182e3ab028735bd0e45217afbd8a3b3e6213d57a30cf9e28a"},
-    {file = "rebound-4.4.3-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:b9510f1bd27605bb58b2cdcc1f3e5c29f057a53079681f17a672c9374da12c33"},
-    {file = "rebound-4.4.3-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:214b5757b7ffac057744bad861f397ab54733ecb4d7e4cca1c7ed955a03730f1"},
-    {file = "rebound-4.4.3-cp311-cp311-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:eebd57945dd8eb382c5172ae8327b962dfe9d9d3f0878bfc62bf32a169094bad"},
-    {file = "rebound-4.4.3-cp311-cp311-musllinux_1_1_i686.whl", hash = "sha256:b4ec26c662dae9eab8b0f25cf7ec48faef297dd1410b544ffb2144830d6166bc"},
-    {file = "rebound-4.4.3-cp311-cp311-musllinux_1_1_x86_64.whl", hash = "sha256:9da8adee3869beef36322f1084096900e335c99398147340be95089574422a83"},
-    {file = "rebound-4.4.3-cp311-cp311-win32.whl", hash = "sha256:95b19c3b593a0c8feed6f352d9cc839f52c58183451f1dfb498eda77def68726"},
-    {file = "rebound-4.4.3-cp311-cp311-win_amd64.whl", hash = "sha256:e9c886d5c2bdb60f66b27c007b9e758ba9a8561b47fa2687c1cb7df99822d40e"},
-    {file = "rebound-4.4.3-cp312-cp312-macosx_10_9_x86_64.whl", hash = "sha256:5b9952f7a211561686c0cbfe97e20442d71ffb58a54158a1a57d6d56021c4444"},
-    {file = "rebound-4.4.3-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:819d8948251c5bc990974c08913c98416c02efa331f131257d8a376b71f06003"},
-    {file = "rebound-4.4.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:b5eadd064d7de0b91bd0c6a26b6e814b42f287bb01f79425d33ea473ef26e9e8"},
-    {file = "rebound-4.4.3-cp312-cp312-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:2a9e98becc8b3b0a01e8273723ab7216f3ec1ae09493bf9114ba5681a0c543fd"},
-    {file = "rebound-4.4.3-cp312-cp312-musllinux_1_1_i686.whl", hash = "sha256:2db38b7c2b8cabce70c2e85379f5ef0e186750b71dc8e8b9a3d2d9cfee428a03"},
-    {file = "rebound-4.4.3-cp312-cp312-musllinux_1_1_x86_64.whl", hash = "sha256:69138cbacd9a97e0a893cace4ee141aaff113db2b4a5c91b91e5c967ad3ba78f"},
-    {file = "rebound-4.4.3-cp312-cp312-win32.whl", hash = "sha256:d6180aed5284e6185e103dcfca0fa7631f0a6bc797f68bfff8b673eb232e3b74"},
-    {file = "rebound-4.4.3-cp312-cp312-win_amd64.whl", hash = "sha256:34b6ef6e6494526b66bb22a647e6eb963ce948894d4fa696511211b3fd41013e"},
-    {file = "rebound-4.4.3.tar.gz", hash = "sha256:8dd2fc69f4db4609abeb50048583d0428c716cd3eab11df868358f5384d826cf"},
 ]
 
 [[package]]

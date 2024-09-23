@@ -1,10 +1,9 @@
 import dataclasses
 import logging
 import os
-from typing import Iterator, List, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple, Type
 
 import numpy as np
-import pyarrow as pa
 import quivr as qv
 from adam_core.coordinates import CoordinateCovariances
 from adam_core.coordinates.origin import Origin
@@ -412,9 +411,7 @@ class PrecoveryDatabase:
         end_mjd: Optional[float] = None,
         window_size: int = 7,
         datasets: Optional[set[str]] = None,
-        propagator: Optional[
-            Propagator
-        ] = None,  # should we initialize an assist propagator?
+        propagator: Optional[Type[Propagator]] = None,
     ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
         """
         Find observations which match orbit in the database. Observations are
@@ -448,6 +445,11 @@ class PrecoveryDatabase:
                     for each matching observation
                         yield match
         """
+
+        if propagator is None:
+            raise ValueError("A propagator must be provided to run precovery")
+
+        propagator_instance = propagator()
         orbit_id = orbit.orbit_id[0].as_py()
 
         if datasets is not None:
@@ -485,7 +487,7 @@ class PrecoveryDatabase:
                 obscode,
                 orbit,
                 tolerance,
-                propagator,
+                propagator_instance,
                 start_mjd=start_mjd,
                 end_mjd=end_mjd,
                 window_size=window_size,
@@ -514,10 +516,6 @@ class PrecoveryDatabase:
         """
         # Propagate the orbit with n-body to every window center
         orbit_propagated = propagator.propagate_orbits(orbit, window_midpoints)
-        cov = CoordinateCovariances.from_kwargs(
-            values=pa.repeat(None, len(orbit_propagated)),
-        )
-        orbit_propagated = orbit_propagated.set_column("coordinates.covariance", cov)
 
         # Using the propagated orbits, check each window. Propagate the orbit from the center of
         # window using 2-body to find any HealpixFrames where a detection could have occured
@@ -649,12 +647,6 @@ class PrecoveryDatabase:
         frames = []
         for mjd, healpixel in zip(mjds, healpixels):
             frames.append(self.frames.idx.get_frames(obscode, mjd, healpixel, datasets))
-        # logger.debug(
-        #     "checking frames for healpix=%d obscode=%s mjd=%f",
-        #     healpixel,
-        #     obscode,
-        #     mjd,
-        # )
         precovery_candidates = [PrecoveryCandidates.empty()]
         frame_candidates = [FrameCandidates.empty()]
         for i, frames_i in enumerate(frames):
