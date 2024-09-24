@@ -79,7 +79,7 @@ def test_precovery(test_db_dir):
             test_db_dir,
             tolerance=1 / 3600,
             window_size=1,
-            propagator=ASSISTPropagator(),
+            propagator_class=ASSISTPropagator,
         )
 
         object_observations = observations_df[

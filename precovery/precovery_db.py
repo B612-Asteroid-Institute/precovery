@@ -411,7 +411,7 @@ class PrecoveryDatabase:
         end_mjd: Optional[float] = None,
         window_size: int = 7,
         datasets: Optional[set[str]] = None,
-        propagator: Optional[Type[Propagator]] = None,
+        propagator_class: Optional[Type[Propagator]] = None,
     ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
         """
         Find observations which match orbit in the database. Observations are
@@ -446,10 +446,10 @@ class PrecoveryDatabase:
                         yield match
         """
 
-        if propagator is None:
+        if propagator_class is None:
             raise ValueError("A propagator must be provided to run precovery")
 
-        propagator_instance = propagator()
+        propagator_instance = propagator_class()
         orbit_id = orbit.orbit_id[0].as_py()
 
         if datasets is not None:

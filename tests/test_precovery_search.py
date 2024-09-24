@@ -29,7 +29,7 @@ def test_precover(precovery_db, sample_orbits):
     precovery_db.frames.add_frames(ds_id, frames)
 
     # Do the search. We should find the three observations we inserted.
-    matches, misses = precovery_db.precover(orbit, propagator=ASSISTPropagator())
+    matches, misses = precovery_db.precover(orbit, propagator_class=ASSISTPropagator)
     assert len(matches) == 3
     assert len(misses) == 0
 
@@ -41,7 +41,6 @@ def test_precover(precovery_db, sample_orbits):
 @requires_jpl_ephem_data
 def test_precover_dataset_filter(precovery_db, sample_orbits):
     # Make two datasets which contain something we're looking for.
-    propagator = ASSISTPropagator()
 
     orbit = sample_orbits[0]
     timestamps = [50000.0, 50001.0, 50002.0]
@@ -62,7 +61,7 @@ def test_precover_dataset_filter(precovery_db, sample_orbits):
 
     # Do the search with no dataset filters. We should find all six
     # observations we inserted.
-    matches, misses = precovery_db.precover(orbit, propagator=propagator)
+    matches, misses = precovery_db.precover(orbit, propagator_class=ASSISTPropagator)
     assert len(matches) == 6
 
     have_ids = set(matches.observation_id.to_pylist())
@@ -72,7 +71,9 @@ def test_precover_dataset_filter(precovery_db, sample_orbits):
     # Now repeat the search, but filter to just one dataset. We should
     # only find that dataset's observations.
     matches, misses = list(
-        precovery_db.precover(orbit, datasets={ds1_id}, propagator=propagator)
+        precovery_db.precover(
+            orbit, datasets={ds1_id}, propagator_class=ASSISTPropagator
+        )
     )
     assert len(matches) == 3
 

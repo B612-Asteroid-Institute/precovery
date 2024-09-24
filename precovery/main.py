@@ -23,7 +23,7 @@ def precover_many(
     allow_version_mismatch: bool = False,
     datasets: Optional[set[str]] = None,
     n_workers: int = multiprocessing.cpu_count(),
-    propagator: Optional[Type[Propagator]] = None,
+    propagator_class: Optional[Type[Propagator]] = None,
 ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
     """
     Run a precovery search algorithm against many orbits at once.
@@ -38,7 +38,7 @@ def precover_many(
             window_size,
             allow_version_mismatch,
             datasets,
-            propagator,
+            propagator_class,
         )
         for o in orbits
     ]
@@ -72,14 +72,13 @@ def precover_worker(
     window_size: int = 7,
     allow_version_mismatch: bool = False,
     datasets: Optional[set[str]] = None,
-    propagator: Optional[Type[Propagator]] = None,
+    propagator_class: Optional[Type[Propagator]] = None,
 ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
     """
     Wraps the precover function to return the orbit_id for mapping.
     """
 
     # initialize our propagator
-    propagator_instance = propagator() if propagator is not None else None
     precovery_candidates, frame_candidates = precover(
         orbit,
         database_directory,
@@ -89,7 +88,7 @@ def precover_worker(
         window_size,
         allow_version_mismatch,
         datasets,
-        propagator=propagator_instance,
+        propagator_class=propagator_class,
     )
 
     return (
@@ -107,7 +106,7 @@ def precover(
     window_size: int = 7,
     allow_version_mismatch: bool = False,
     datasets: Optional[set[str]] = None,
-    propagator: Optional[Type[Propagator]] = None,
+    propagator_class: Optional[Type[Propagator]] = None,
 ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
     """
     Connect to database directory and run precovery for the input orbit.
@@ -138,7 +137,7 @@ def precover(
         Allows using a precovery db version that does not match the library version.
     datasets : set[str], optional
         Filter down searches to only scan selected datasets
-    propagator : Type[Propagator], optional
+    propagator_class : Type[Propagator], optional
         An adam_core.propagator.Propagator subclass to use for propagating the orbit.
 
     Returns
@@ -163,7 +162,7 @@ def precover(
         end_mjd=end_mjd,
         window_size=window_size,
         datasets=datasets,
-        propagator=propagator,
+        propagator_class=propagator_class,
     )
 
     return precovery_candidates, frame_candidates

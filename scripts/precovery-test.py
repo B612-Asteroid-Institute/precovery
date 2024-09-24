@@ -22,8 +22,6 @@ OUTPUT_FILE = "test_orbits_matches.csv"
 
 if __name__ == "__main__":
 
-    propagator = ASSISTPropagator()
-
     parser = argparse.ArgumentParser(
         description="Run precovery using test_orbits.csv in this directory"
     )
@@ -57,7 +55,9 @@ if __name__ == "__main__":
         # Select a single orbit
         orbit = orbits[i]
 
-        candidates, frame_candidates = db.precover(orbit, tolerance=1 / 3600)
+        candidates, frame_candidates = db.precover(
+            orbit, tolerance=1 / 3600, propagator_class=ASSISTPropagator
+        )
 
         print(
             f"Found {len(candidates)} potential matches for orbit ID: {orbit.object_id[0].as_py()}"
