@@ -138,7 +138,7 @@ class FrameIndex:
         end_mjd: float,
         window_size_days: int,
         datasets: Optional[set[str]] = None,
-    ) -> Iterator[Tuple[float, str]]:
+    ) -> list[Tuple[str, list[float]]]:
         """Return the midpoint and obscode of all time windows with data in them.
 
         If datasets is provided, it will be applied as a filter on the
@@ -147,12 +147,10 @@ class FrameIndex:
         """
         offset = -start_mjd + window_size_days / 2
 
-        # select distinct
-        #     (cast(mjd - first + (window_size_days / 2) as int) / windows_size_days)
-        #     * window_size_days + first as common_epoch
-        # from frames;
-        stmt = (
+        # Subquery to calculate common_epoch and order them
+        subquery = (
             sq.select(
+                self.frames.c.obscode,
                 sq.cast(
                     (
                         sq.cast(
@@ -165,21 +163,35 @@ class FrameIndex:
                     + start_mjd,
                     sq.Float,
                 ).label("common_epoch"),
-                self.frames.c.obscode,
             )
-            .distinct()
             .where(
                 self.frames.c.exposure_mjd_mid >= start_mjd,
                 self.frames.c.exposure_mjd_mid <= end_mjd,
             )
+            .distinct()
             .order_by("common_epoch")
         )
-        if datasets is not None:
-            stmt = stmt.where(self.frames.c.dataset_id.in_(list(datasets)))
 
-        rows = self.dbconn.execute(stmt)
-        for mjd, obscode in rows:
-            yield (mjd, obscode)
+        if datasets is not None:
+            subquery = subquery.where(self.frames.c.dataset_id.in_(list(datasets)))
+
+        subquery = subquery.alias("subquery")
+
+        # Main query to concatenate common_epoch values into a comma-separated string
+        stmt = sq.select(
+            subquery.c.obscode,
+            sqlfunc.group_concat(subquery.c.common_epoch, ",").label(
+                "common_epoch_times"
+            ),
+        ).group_by(subquery.c.obscode)
+
+        windows_by_obscode = []
+        rows = self.dbconn.execute(stmt).fetchall()
+        for row in rows:
+            common_epochs = list(map(float, row.common_epoch_times.split(",")))
+            windows_by_obscode.append((row.obscode, common_epochs))
+
+        return windows_by_obscode
 
     def propagation_targets(
         self,
@@ -230,7 +242,7 @@ class FrameIndex:
         mjd: float,
         healpixel: int,
         datasets: Optional[set[str]] = None,
-    ) -> Iterator[HealpixFrame]:
+    ) -> list[HealpixFrame]:
         """
         Yield all the frames which are for given obscode, MJD, healpix.
 
@@ -285,8 +297,7 @@ class FrameIndex:
                 f" {int(healpixel)}, obscode: {obscode}."
             )
 
-        for r in rows:
-            yield HealpixFrame(*r)
+        return [HealpixFrame(*r) for r in rows]
 
     def get_frames_by_id(
         self,

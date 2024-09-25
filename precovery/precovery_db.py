@@ -1,8 +1,7 @@
 import dataclasses
-import itertools
 import logging
 import os
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
+from typing import Iterator, List, Optional, Tuple, Type
 
 import numpy as np
 import quivr as qv
@@ -10,20 +9,22 @@ from adam_core.coordinates import CoordinateCovariances
 from adam_core.coordinates.origin import Origin
 from adam_core.coordinates.residuals import Residuals
 from adam_core.coordinates.spherical import SphericalCoordinates
+from adam_core.dynamics.ephemeris import generate_ephemeris_2body
+from adam_core.dynamics.propagation import propagate_2body
 from adam_core.observations import Exposures, PointSourceDetections
 from adam_core.observers import Observers
-from adam_core.orbits import Orbits as AdamOrbits
-from adam_core.orbits.ephemeris import Ephemeris as EphemerisQv
+from adam_core.orbits import Orbits
+from adam_core.orbits.ephemeris import Ephemeris
+from adam_core.propagator import Propagator
 from adam_core.time import Timestamp
 
+from ._version import __version__
 from .config import Config, DefaultConfig
 from .frame_db import FrameDB, FrameIndex, HealpixFrame
 from .healpix_geom import radec_to_healpixel
 from .observation import Observation, ObservationArray
-from .orbit import Ephemeris, EpochTimescale, Orbit, PropagationIntegrator
 from .spherical_geom import haversine_distance_deg
-from .utils_qv import drop_duplicates
-from .version import __version__
+from .utils import drop_duplicates
 
 DEGREE = 1.0
 ARCMIN = DEGREE / 60
@@ -36,166 +37,8 @@ logging.basicConfig()
 logger = logging.getLogger("precovery")
 
 
-@dataclasses.dataclass
-class PrecoveryCandidate:
-    mjd: float
-    ra_deg: float
-    dec_deg: float
-    ra_sigma_arcsec: float
-    dec_sigma_arcsec: float
-    mag: float
-    mag_sigma: float
-    exposure_mjd_start: float
-    exposure_mjd_mid: float
-    filter: str
-    obscode: str
-    exposure_id: str
-    exposure_duration: float
-    observation_id: str
-    healpix_id: int
-    pred_ra_deg: float
-    pred_dec_deg: float
-    pred_vra_degpday: float
-    pred_vdec_degpday: float
-    delta_ra_arcsec: float
-    delta_dec_arcsec: float
-    distance_arcsec: float
-    dataset_id: str
+class PrecoveryCandidates(qv.Table):
 
-    @classmethod
-    def from_observed_ephem(
-        cls, obs: Observation, frame: HealpixFrame, ephem: Ephemeris
-    ):
-        # Calculate the HEALpixel ID for the predicted ephemeris of
-        # the orbit with a high nside value (k=15, nside=2**15) The
-        # indexed observations are indexed to a much lower nside but
-        # we may decide in the future to re-index the database using
-        # different values for that parameter. As long as we return a
-        # Healpix ID generated with nside greater than the indexed
-        # database then we can always down-sample the ID to a lower
-        # nside value
-        healpix_id = int(radec_to_healpixel(ephem.ra, ephem.dec, nside=CANDIDATE_NSIDE))
-
-        return cls(
-            # Observation data:
-            observation_id=obs.id.decode(),
-            mjd=obs.mjd,
-            ra_deg=obs.ra,
-            dec_deg=obs.dec,
-            ra_sigma_arcsec=obs.ra_sigma / ARCSEC,
-            dec_sigma_arcsec=obs.dec_sigma / ARCSEC,
-            mag=obs.mag,
-            mag_sigma=obs.mag_sigma,
-            # Exposure data:
-            exposure_mjd_start=frame.exposure_mjd_start,
-            exposure_mjd_mid=frame.exposure_mjd_mid,
-            filter=frame.filter,
-            obscode=frame.obscode,
-            exposure_id=frame.exposure_id,
-            exposure_duration=frame.exposure_duration,
-            dataset_id=frame.dataset_id,
-            # Ephemeris data:
-            healpix_id=healpix_id,
-            pred_ra_deg=ephem.ra,
-            pred_dec_deg=ephem.dec,
-            pred_vra_degpday=ephem.ra_velocity,
-            pred_vdec_degpday=ephem.dec_velocity,
-            # Data on the distance between the observation and ephemeris:
-            delta_ra_arcsec=(obs.ra - ephem.ra) / ARCSEC,
-            delta_dec_arcsec=(obs.dec - ephem.dec) / ARCSEC,
-            distance_arcsec=haversine_distance_deg(obs.ra, ephem.ra, obs.dec, ephem.dec)
-            / ARCSEC,
-        )
-
-    def to_dict(self):
-        return dataclasses.asdict(self)
-
-
-@dataclasses.dataclass
-class FrameCandidate:
-    exposure_mjd_start: float
-    exposure_mjd_mid: float
-    filter: str
-    obscode: str
-    exposure_id: str
-    exposure_duration: float
-    healpix_id: int
-    pred_ra_deg: float
-    pred_dec_deg: float
-    pred_vra_degpday: float
-    pred_vdec_degpday: float
-    dataset_id: str
-
-    @classmethod
-    def from_frame(cls, frame: HealpixFrame, ephem: Ephemeris):
-        # Calculate the HEALpixel ID for the predicted ephemeris of
-        # the orbit with a high nside value (k=15, nside=2**15) The
-        # indexed observations are indexed to a much lower nside but
-        # we may decide in the future to re-index the database using
-        # different values for that parameter. As long as we return a
-        # Healpix ID generated with nside greater than the indexed
-        # database then we can always down-sample the ID to a lower
-        # nside value
-        healpix_id = int(radec_to_healpixel(ephem.ra, ephem.dec, nside=CANDIDATE_NSIDE))
-        return cls(
-            # Exposure data:
-            exposure_mjd_start=frame.exposure_mjd_start,
-            exposure_mjd_mid=frame.exposure_mjd_mid,
-            filter=frame.filter,
-            obscode=frame.obscode,
-            exposure_id=frame.exposure_id,
-            exposure_duration=frame.exposure_duration,
-            dataset_id=frame.dataset_id,
-            healpix_id=healpix_id,
-            # Ephemeris data:
-            pred_ra_deg=ephem.ra,
-            pred_dec_deg=ephem.dec,
-            pred_vra_degpday=ephem.ra_velocity,
-            pred_vdec_degpday=ephem.dec_velocity,
-        )
-
-    def to_dict(self):
-        return dataclasses.asdict(self)
-
-
-def sift_candidates(
-    candidates: List[Union[PrecoveryCandidate, FrameCandidate]]
-) -> Tuple[List[PrecoveryCandidate], List[FrameCandidate]]:
-    """
-    Separates candidates into precovery and frame candidates and sorts them.
-
-    Sort candidates by ascending MJD. For precovery candidates, use the MJD of the observation.
-    For frame candidates, use the MJD at the midpoint of the exposure.
-
-    Parameters
-    ----------
-    candidates : List[Union[PrecoveryCandidate, FrameCandidate]]
-        List of candidates to sort.
-
-    Returns
-    -------
-    Tuple[List[PrecoveryCandidate], List[FrameCandidate]]
-    """
-    precovery_candidates = []
-    frame_candidates = []
-    for candidate in candidates:
-        if isinstance(candidate, PrecoveryCandidate):
-            precovery_candidates.append(candidate)
-        elif isinstance(candidate, FrameCandidate):
-            frame_candidates.append(candidate)
-        else:
-            raise TypeError(f"Unexpected candidate type: {type(candidate)}")
-
-    precovery_candidates = sorted(
-        precovery_candidates, key=lambda c: (c.mjd, c.observation_id)
-    )
-    frame_candidates = sorted(frame_candidates, key=lambda c: c.exposure_mjd_mid)
-
-    return precovery_candidates, frame_candidates
-
-
-class PrecoveryCandidatesQv(qv.Table):
-    # copy all the fields from PrecoveryCandidate
     time = Timestamp.as_column()
     ra_deg = qv.Float64Column()
     dec_deg = qv.Float64Column()
@@ -221,82 +64,6 @@ class PrecoveryCandidatesQv(qv.Table):
     dataset_id = qv.LargeStringColumn()
     orbit_id = qv.LargeStringColumn()
 
-    @classmethod
-    def from_dataclass(
-        cls,
-        precovery_candidates: List[PrecoveryCandidate],
-        source_orbit_id: str,
-    ) -> "PrecoveryCandidatesQv":
-        field_dict: Dict[str, Any] = {
-            field.name: [] for field in dataclasses.fields(PrecoveryCandidate)
-        }
-
-        # Iterate over each candidate and convert to dictionary
-        for candidate in precovery_candidates:
-            candidate_dict = dataclasses.asdict(candidate)
-            for key, value in candidate_dict.items():
-                field_dict[key].append(value)
-        return cls.from_kwargs(
-            time=Timestamp.from_mjd(field_dict["mjd"], scale="utc"),
-            ra_deg=field_dict["ra_deg"],
-            dec_deg=field_dict["dec_deg"],
-            ra_sigma_arcsec=field_dict["ra_sigma_arcsec"],
-            dec_sigma_arcsec=field_dict["dec_sigma_arcsec"],
-            mag=field_dict["mag"],
-            mag_sigma=field_dict["mag_sigma"],
-            exposure_time_start=Timestamp.from_mjd(
-                field_dict["exposure_mjd_start"], scale="utc"
-            ),
-            exposure_time_mid=Timestamp.from_mjd(
-                field_dict["exposure_mjd_mid"], scale="utc"
-            ),
-            filter=field_dict["filter"],
-            obscode=field_dict["obscode"],
-            exposure_id=field_dict["exposure_id"],
-            exposure_duration=field_dict["exposure_duration"],
-            observation_id=field_dict["observation_id"],
-            healpix_id=field_dict["healpix_id"],
-            pred_ra_deg=field_dict["pred_ra_deg"],
-            pred_dec_deg=field_dict["pred_dec_deg"],
-            pred_vra_degpday=field_dict["pred_vra_degpday"],
-            pred_vdec_degpday=field_dict["pred_vdec_degpday"],
-            delta_ra_arcsec=field_dict["delta_ra_arcsec"],
-            delta_dec_arcsec=field_dict["delta_dec_arcsec"],
-            distance_arcsec=field_dict["distance_arcsec"],
-            dataset_id=field_dict["dataset_id"],
-            orbit_id=[source_orbit_id for i in range(len(field_dict["mjd"]))],
-        )
-
-    def to_dataclass(self) -> List[PrecoveryCandidate]:
-        return [
-            PrecoveryCandidate(
-                mjd=cand.time.mjd()[0].as_py(),
-                ra_deg=cand.ra_deg[0].as_py(),
-                dec_deg=cand.dec_deg[0].as_py(),
-                ra_sigma_arcsec=cand.ra_sigma_arcsec[0].as_py(),
-                dec_sigma_arcsec=cand.dec_sigma_arcsec[0].as_py(),
-                mag=cand.mag[0].as_py(),
-                mag_sigma=cand.mag_sigma[0].as_py(),
-                filter=cand.filter[0].as_py(),
-                obscode=cand.obscode[0].as_py(),
-                exposure_id=cand.exposure_id[0].as_py(),
-                exposure_mjd_start=cand.exposure_time_start.mjd()[0].as_py(),
-                exposure_mjd_mid=cand.exposure_time_mid.mjd()[0].as_py(),
-                exposure_duration=cand.exposure_duration[0].as_py(),
-                observation_id=cand.observation_id[0].as_py(),
-                healpix_id=cand.healpix_id[0].as_py(),
-                pred_ra_deg=cand.pred_ra_deg[0].as_py(),
-                pred_dec_deg=cand.pred_dec_deg[0].as_py(),
-                pred_vra_degpday=cand.pred_vra_degpday[0].as_py(),
-                pred_vdec_degpday=cand.pred_vdec_degpday[0].as_py(),
-                delta_ra_arcsec=cand.delta_ra_arcsec[0].as_py(),
-                delta_dec_arcsec=cand.delta_dec_arcsec[0].as_py(),
-                distance_arcsec=cand.distance_arcsec[0].as_py(),
-                dataset_id=cand.dataset_id[0].as_py(),
-            )
-            for cand in self
-        ]
-
     def point_source_detections(self) -> PointSourceDetections:
         return PointSourceDetections.from_kwargs(
             id=self.observation_id,
@@ -321,7 +88,7 @@ class PrecoveryCandidatesQv(qv.Table):
             duration=unique.exposure_duration,
         )
 
-    def predicted_ephemeris(self, orbit_ids=None) -> EphemerisQv:
+    def predicted_ephemeris(self, orbit_ids=None) -> Ephemeris:
         """
         Return the predicted ephemeris for these candidates.
 
@@ -333,12 +100,12 @@ class PrecoveryCandidatesQv(qv.Table):
 
         Returns
         -------
-        EphemerisQv
+        Ephemeris
             Predicted ephemeris for these candidates.
         """
         if orbit_ids is None:
             orbit_ids = [str(i) for i in range(len(self.time))]
-        return EphemerisQv.from_kwargs(
+        return Ephemeris.from_kwargs(
             orbit_id=orbit_ids,
             coordinates=SphericalCoordinates.from_kwargs(
                 lon=self.pred_ra_deg,
@@ -363,7 +130,7 @@ class PrecoveryCandidatesQv(qv.Table):
             Residuals between the observations and the predicted ephemeris.
         """
         return Residuals.calculate(
-            self.to_spherical_coordinates(), self.to_predicted_ephemeris().coordinates
+            self.to_spherical_coordinates(), self.predicted_ephemeris().coordinates
         )
 
     def to_spherical_coordinates(self) -> SphericalCoordinates:
@@ -424,8 +191,8 @@ class PrecoveryCandidatesQv(qv.Table):
         )
 
 
-class FrameCandidatesQv(qv.Table):
-    # copy all the fields from FrameCandidate
+class FrameCandidates(qv.Table):
+
     exposure_time_start = Timestamp.as_column()
     exposure_time_mid = Timestamp.as_column()
     filter = qv.LargeStringColumn()
@@ -440,63 +207,6 @@ class FrameCandidatesQv(qv.Table):
     dataset_id = qv.LargeStringColumn()
     orbit_id = qv.LargeStringColumn()
 
-    @classmethod
-    def from_dataclass(
-        cls,
-        precovery_candidates: List[FrameCandidate],
-        source_orbit_id: str,
-    ) -> "PrecoveryCandidatesQv":
-        field_dict: Dict[str, Any] = {
-            field.name: [] for field in dataclasses.fields(PrecoveryCandidate)
-        }
-
-        # Iterate over each candidate and convert to dictionary
-        for candidate in precovery_candidates:
-            candidate_dict = dataclasses.asdict(candidate)
-            for key, value in candidate_dict.items():
-                field_dict[key].append(value)
-
-        return cls.from_kwargs(
-            exposure_time_start=Timestamp.from_mjd(
-                field_dict["exposure_mjd_start"], scale="utc"
-            ),
-            exposure_time_mid=Timestamp.from_mjd(
-                field_dict["exposure_mjd_mid"], scale="utc"
-            ),
-            filter=field_dict["filter"],
-            obscode=field_dict["obscode"],
-            exposure_id=field_dict["exposure_id"],
-            exposure_duration=field_dict["exposure_duration"],
-            healpix_id=field_dict["healpix_id"],
-            pred_ra_deg=field_dict["pred_ra_deg"],
-            pred_dec_deg=field_dict["pred_dec_deg"],
-            pred_vra_degpday=field_dict["pred_vra_degpday"],
-            pred_vdec_degpday=field_dict["pred_vdec_degpday"],
-            dataset_id=field_dict["dataset_id"],
-            orbit_id=[
-                source_orbit_id for i in range(len(field_dict["exposure_mjd_start"]))
-            ],
-        )
-
-    def to_dataclass(self) -> List[FrameCandidate]:
-        return [
-            FrameCandidate(
-                filter=cand.filter[0].as_py(),
-                obscode=cand.obscode[0].as_py(),
-                exposure_id=cand.exposure_id[0].as_py(),
-                exposure_mjd_start=cand.exposure_time_start.mjd()[0].as_py(),
-                exposure_mjd_mid=cand.exposure_time_mid.mjd()[0].as_py(),
-                exposure_duration=cand.exposure_duration[0].as_py(),
-                healpix_id=cand.healpix_id[0].as_py(),
-                pred_ra_deg=cand.pred_ra_deg[0].as_py(),
-                pred_dec_deg=cand.pred_dec_deg[0].as_py(),
-                pred_vra_degpday=cand.pred_vra_degpday[0].as_py(),
-                pred_vdec_degpday=cand.pred_vdec_degpday[0].as_py(),
-                dataset_id=cand.dataset_id[0].as_py(),
-            )
-            for cand in self
-        ]
-
     def exposures(self) -> Exposures:
         unique = drop_duplicates(self, subset=["exposure_id"])
 
@@ -508,14 +218,14 @@ class FrameCandidatesQv(qv.Table):
             duration=unique.exposure_duration,
         )
 
-    def predicted_ephemeris(self, orbit_ids=None) -> EphemerisQv:
+    def predicted_ephemeris(self, orbit_ids=None) -> Ephemeris:
         origin = Origin.from_kwargs(
             code=["SUN" for i in range(len(self.exposure_time_mid))]
         )
         frame = "ecliptic"
         if orbit_ids is None:
             orbit_ids = [str(i) for i in range(len(self.exposure_time_mid))]
-        return EphemerisQv.from_kwargs(
+        return Ephemeris.from_kwargs(
             orbit_id=orbit_ids,
             coordinates=SphericalCoordinates.from_kwargs(
                 lon=self.pred_ra_deg,
@@ -527,6 +237,96 @@ class FrameCandidatesQv(qv.Table):
                 frame=frame,
             ),
         )
+
+
+def candidates_from_ephem(obs: Observation, frame: HealpixFrame, ephem: Ephemeris):
+    # Calculate the HEALpixel ID for the predicted ephemeris of
+    # the orbit with a high nside value (k=15, nside=2**15) The
+    # indexed observations are indexed to a much lower nside but
+    # we may decide in the future to re-index the database using
+    # different values for that parameter. As long as we return a
+    # Healpix ID generated with nside greater than the indexed
+    # database then we can always down-sample the ID to a lower
+    # nside value
+    healpix_id = int(
+        radec_to_healpixel(
+            ephem.coordinates.lon[0].as_py(),
+            ephem.coordinates.lat[0].as_py(),
+            nside=CANDIDATE_NSIDE,
+        )
+    )
+
+    return PrecoveryCandidates.from_kwargs(
+        time=Timestamp.from_mjd([obs.mjd], scale="utc"),
+        ra_deg=[obs.ra],
+        dec_deg=[obs.dec],
+        ra_sigma_arcsec=[obs.ra_sigma / ARCSEC],
+        dec_sigma_arcsec=[obs.dec_sigma / ARCSEC],
+        mag=[obs.mag],
+        mag_sigma=[obs.mag_sigma],
+        exposure_time_start=Timestamp.from_mjd([frame.exposure_mjd_start], scale="utc"),
+        exposure_time_mid=Timestamp.from_mjd([frame.exposure_mjd_mid], scale="utc"),
+        filter=[frame.filter],
+        obscode=[frame.obscode],
+        exposure_id=[frame.exposure_id],
+        exposure_duration=[frame.exposure_duration],
+        observation_id=[obs.id.decode()],
+        healpix_id=[healpix_id],
+        pred_ra_deg=ephem.coordinates.lon,
+        pred_dec_deg=ephem.coordinates.lat,
+        pred_vra_degpday=ephem.coordinates.vlon,
+        pred_vdec_degpday=ephem.coordinates.vlat,
+        delta_ra_arcsec=[(obs.ra - ephem.coordinates.lon[0].as_py()) / ARCSEC],
+        delta_dec_arcsec=[(obs.dec - ephem.coordinates.lat[0].as_py()) / ARCSEC],
+        distance_arcsec=[
+            haversine_distance_deg(
+                obs.ra,
+                ephem.coordinates.lon[0].as_py(),
+                obs.dec,
+                ephem.coordinates.lat[0].as_py(),
+            )
+            / ARCSEC
+        ],
+        dataset_id=[frame.dataset_id],
+        orbit_id=ephem.orbit_id,
+    )
+
+
+def to_dict(self):
+    return dataclasses.asdict(self)
+
+
+def frame_candidates_from_frame(frame: HealpixFrame, ephem: Ephemeris):
+    # Calculate the HEALpixel ID for the predicted ephemeris of
+    # the orbit with a high nside value (k=15, nside=2**15) The
+    # indexed observations are indexed to a much lower nside but
+    # we may decide in the future to re-index the database using
+    # different values for that parameter. As long as we return a
+    # Healpix ID generated with nside greater than the indexed
+    # database then we can always down-sample the ID to a lower
+    # nside value
+    healpix_id = int(
+        radec_to_healpixel(
+            ephem.coordinates.lon[0].as_py(),
+            ephem.coordinates.lat[0].as_py(),
+            nside=CANDIDATE_NSIDE,
+        )
+    )
+    return FrameCandidates.from_kwargs(
+        exposure_time_start=Timestamp.from_mjd([frame.exposure_mjd_start], scale="utc"),
+        exposure_time_mid=Timestamp.from_mjd([frame.exposure_mjd_mid], scale="utc"),
+        filter=[frame.filter],
+        obscode=[frame.obscode],
+        exposure_id=[frame.exposure_id],
+        exposure_duration=[frame.exposure_duration],
+        dataset_id=[frame.dataset_id],
+        healpix_id=[healpix_id],
+        pred_ra_deg=ephem.coordinates.lon,
+        pred_dec_deg=ephem.coordinates.lat,
+        pred_vra_degpday=ephem.coordinates.vlon,
+        pred_vdec_degpday=ephem.coordinates.vlat,
+        orbit_id=ephem.orbit_id,
+    )
 
 
 class PrecoveryDatabase:
@@ -605,13 +405,14 @@ class PrecoveryDatabase:
 
     def precover(
         self,
-        orbit: AdamOrbits,
+        orbit: Orbits,
         tolerance: float = 30 * ARCSEC,
         start_mjd: Optional[float] = None,
         end_mjd: Optional[float] = None,
         window_size: int = 7,
         datasets: Optional[set[str]] = None,
-    ) -> Tuple[List[PrecoveryCandidate], List[FrameCandidate]]:
+        propagator_class: Optional[Type[Propagator]] = None,
+    ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
         """
         Find observations which match orbit in the database. Observations are
         searched in descending order by mjd.
@@ -628,7 +429,7 @@ class PrecoveryDatabase:
 
         Returns
         -------
-        Tuple[List[PrecoveryCandidate], List[FrameCandidate]]
+        Tuple[PrecoveryCandidates, FrameCandidates]
             Precovery candidate observations and frame candidates.
         """
         # basically:
@@ -644,8 +445,12 @@ class PrecoveryDatabase:
                     for each matching observation
                         yield match
         """
+
+        if propagator_class is None:
+            raise ValueError("A propagator must be provided to run precovery")
+
+        propagator_instance = propagator_class()
         orbit_id = orbit.orbit_id[0].as_py()
-        orbit = Orbit.from_adam_core(orbit_id=1, ac_orbits=orbit)
 
         if datasets is not None:
             self._warn_for_missing_datasets(datasets)
@@ -669,74 +474,58 @@ class PrecoveryDatabase:
         windows = self.frames.idx.window_centers(
             start_mjd, end_mjd, window_size, datasets=datasets
         )
-
         # group windows by obscodes so that many windows can be searched at once
-        matches = []
-        for obscode, obs_windows in itertools.groupby(
-            windows, key=lambda pair: pair[1]
-        ):
-            mjds = [window[0] for window in obs_windows]
-            matches_window = self._check_windows(
-                mjds,
+        candidates = []
+        frame_candidates = []
+        for obscode, mjds in windows:
+            logger.info("searching windows for obscode %s", obscode)
+            # create our Timestamp ghere
+            times = Timestamp.from_mjd(mjds, scale="utc")
+
+            candidates_obscode, frame_candidates_obscode = self._check_windows(
+                times,
                 obscode,
                 orbit,
                 tolerance,
+                propagator_instance,
                 start_mjd=start_mjd,
                 end_mjd=end_mjd,
                 window_size=window_size,
                 datasets=datasets,
             )
-            matches += list(matches_window)
-
-        precovery_candidates, frame_candidates = sift_candidates(matches)
+            candidates.append(candidates_obscode)
+            frame_candidates.append(frame_candidates_obscode)
 
         # convert these to our new output formats
-        return PrecoveryCandidatesQv.from_dataclass(
-            precovery_candidates, source_orbit_id=orbit_id
-        ), FrameCandidatesQv.from_dataclass(frame_candidates, source_orbit_id=orbit_id)
+        return qv.concatenate(candidates), qv.concatenate(frame_candidates)
 
     def _check_windows(
         self,
-        window_midpoints: Iterable[float],
+        window_midpoints: Timestamp,
         obscode: str,
-        orbit: Orbit,
+        orbit: Orbits,
         tolerance: float,
+        propagator: Propagator,
         start_mjd: Optional[float] = None,
         end_mjd: Optional[float] = None,
         window_size: int = 7,
         datasets: Optional[set[str]] = None,
-    ) -> Iterable[Union[PrecoveryCandidate, FrameCandidate]]:
+    ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
         """
         Find all observations that match orbit within a list of windows
         """
         # Propagate the orbit with n-body to every window center
-        # Since the window midpoints are calculated from the observations
-        # in the database then they are in the UTC timescale so let's use that
-        orbit_propagated = orbit.propagate(
-            window_midpoints,
-            PropagationIntegrator.N_BODY,
-            time_scale=EpochTimescale.UTC,
-        )
-
-        # Calculate the location of the orbit on the sky with n-body propagation
-        # Again, we do this in the UTC timescale to match the observations in the database
-        window_ephems = orbit.compute_ephemeris(
-            obscode,
-            window_midpoints,
-            PropagationIntegrator.N_BODY,
-            time_scale=EpochTimescale.UTC,
-        )
-        window_healpixels = radec_to_healpixel(
-            np.array([w.ra for w in window_ephems]),
-            np.array([w.dec for w in window_ephems]),
-            self.frames.healpix_nside,
-        ).astype(int)
+        orbit_propagated = propagator.propagate_orbits(orbit, window_midpoints)
 
         # Using the propagated orbits, check each window. Propagate the orbit from the center of
         # window using 2-body to find any HealpixFrames where a detection could have occured
-        for window_midpoint, window_ephem, window_healpixel, orbit_window in zip(
-            window_midpoints, window_ephems, window_healpixels, orbit_propagated
-        ):
+        precovery_candidates = [PrecoveryCandidates.empty()]
+        frame_candidates = [FrameCandidates.empty()]
+        for orbit_window in orbit_propagated:
+            # fmt: off
+            window_midpoint = orbit_window.coordinates.time[0].rescale("utc").mjd().to_numpy(False)[0]
+            # fmt: on
+
             start_mjd_window = window_midpoint - (window_size / 2)
             end_mjd_window = window_midpoint + (window_size / 2)
 
@@ -758,22 +547,27 @@ class PrecoveryDatabase:
                 )
                 end_mjd_window = end_mjd
 
-            yield from self._check_window(
+            candidates_window, frame_candidates_window = self._check_window(
                 window_start=start_mjd_window,
                 window_end=end_mjd_window,
                 orbit=orbit_window,
                 obscode=obscode,
                 tolerance=tolerance,
+                propagator=propagator,
                 datasets=datasets,
             )
+            precovery_candidates.append(candidates_window)
+            frame_candidates.append(frame_candidates_window)
+        return qv.concatenate(precovery_candidates), qv.concatenate(frame_candidates)
 
     def _check_window(
         self,
         window_start: float,
         window_end: float,
-        orbit: Orbit,
+        orbit: Orbits,
         obscode: str,
         tolerance: float,
+        propagator: Propagator,
         datasets: Optional[set[str]],
     ):
         # Gather all MJDs and their associated healpixels in the window.
@@ -791,81 +585,96 @@ class PrecoveryDatabase:
 
         # Propagate the orbit with 2-body dynamics to every timestamp in the
         # window.
-        ephems = orbit.compute_ephemeris(
-            obscode,
-            timestamps,
-            PropagationIntegrator.TWO_BODY,
-            time_scale=EpochTimescale.UTC,
-        )
+        times = Timestamp.from_mjd(timestamps, scale="utc")
+        # create our observers
+        observers = Observers.from_code(obscode, times)
+        # first propagate with 2_body
+        propagated_orbits = propagate_2body(orbit, times)
+        # generate ephemeris
+        ephems = generate_ephemeris_2body(propagated_orbits, observers)
 
         # Convert those ephemerides to healpixels.
         ephem_healpixels = radec_to_healpixel(
-            ra=np.array([w.ra for w in ephems]),
-            dec=np.array([w.dec for w in ephems]),
+            ra=ephems.coordinates.lon.to_numpy(),
+            dec=ephems.coordinates.lat.to_numpy(),
             nside=self.frames.healpix_nside,
         ).astype(int)
 
         # Check which ephemerides land within data
+
+        mjds_to_check = []
+        healpixels_to_check = []
         for timestamp, observation_healpixel_set, ephem_healpixel in zip(
             timestamps, observation_healpixels, ephem_healpixels
         ):
             if ephem_healpixel in observation_healpixel_set:
-                # We have a match! Check the frame.
-                yield from self._check_frame(
-                    orbit=orbit,
-                    healpixel=ephem_healpixel,
-                    obscode=obscode,
-                    mjd=timestamp,
-                    tolerance=tolerance,
-                    datasets=datasets,
-                )
+                # We have a match! add mjds to list to check
+                # these are coming in reverse order so we need to reverse them
+                mjds_to_check.append(timestamp)
+                healpixels_to_check.append(ephem_healpixel)
+        if len(mjds_to_check) != 0:
+            return self._check_frames(
+                orbit=orbit,
+                healpixels=list(reversed(healpixels_to_check)),
+                obscode=obscode,
+                mjds=list(reversed(mjds_to_check)),
+                tolerance=tolerance,
+                datasets=datasets,
+                propagator=propagator,
+            )
+        else:
+            return PrecoveryCandidates.empty(), FrameCandidates.empty()
 
-    def _check_frame(
+    def _check_frames(
         self,
-        orbit: Orbit,
-        healpixel: int,
+        orbit: Orbits,
+        healpixels: list[int],
         obscode: str,
-        mjd: float,
+        mjds: List[float],
         tolerance: float,
         datasets: Optional[set[str]],
-    ) -> Iterator[Union[PrecoveryCandidate, FrameCandidate]]:
+        propagator: Propagator,
+    ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
         """
         Deeply inspect all frames that match the given obscode, mjd, and healpix to
         see if they contain observations which match the ephemeris.
         """
+        times = Timestamp.from_mjd(mjds, scale="utc")
+        # create observers
+        observers = Observers.from_code(obscode, times)
         # Compute the position of the ephem carefully.
-        ephem = orbit.compute_ephemeris(
-            obscode,
-            [mjd],
-            PropagationIntegrator.N_BODY,
-            time_scale=EpochTimescale.UTC,
-        )[0]
-
-        frames = self.frames.idx.get_frames(obscode, mjd, healpixel, datasets)
-        logger.debug(
-            "checking frames for healpix=%d obscode=%s mjd=%f",
-            healpixel,
-            obscode,
-            mjd,
-        )
-        for f in frames:
-            any_matches = False
-            for match in self._find_matches_in_frame(f, orbit, ephem, tolerance):
-                any_matches = True
-                yield match
-            # If no observations were found in this frame then we
-            # yield a frame candidate if desired
-            # Note that for the frame candidate we report the predicted
-            # ephemeris at the exposure midpoint not at the observation
-            # times which may differ from the exposure midpoint time
-            if not any_matches:
-                logger.debug("no observations found in this frame")
-                frame_candidate = FrameCandidate.from_frame(f, ephem)
-                yield frame_candidate
+        ephemeris = propagator.generate_ephemeris(orbit, observers)
+        frames = []
+        for mjd, healpixel in zip(mjds, healpixels):
+            frames.append(self.frames.idx.get_frames(obscode, mjd, healpixel, datasets))
+        precovery_candidates = [PrecoveryCandidates.empty()]
+        frame_candidates = [FrameCandidates.empty()]
+        for i, frames_i in enumerate(frames):
+            for f in frames_i:
+                matches = self._find_matches_in_frame(
+                    f, orbit, ephemeris[i], tolerance, propagator
+                )
+                # If no observations were found in this frame then we
+                # return frame candidates
+                # Note that for the frame candidate we report the predicted
+                # ephemeris at the exposure midpoint not at the observation
+                # times which may differ from the exposure midpoint time
+                if len(matches) == 0:
+                    logger.debug("no observations found in this frame")
+                    frame_candidate = frame_candidates_from_frame(f, ephemeris[i])
+                    frame_candidates.append(frame_candidate)
+                else:
+                    precovery_candidates.append(matches)
+        return qv.concatenate(precovery_candidates), qv.concatenate(frame_candidates)
 
     def _find_matches_in_frame(
-        self, frame: HealpixFrame, orbit: Orbit, ephem: Ephemeris, tolerance: float
-    ) -> Iterator[PrecoveryCandidate]:
+        self,
+        frame: HealpixFrame,
+        orbit: Orbits,
+        ephem: Ephemeris,
+        tolerance: float,
+        propagator: Propagator,
+    ) -> PrecoveryCandidates:
         """
         Find all sources in a single frame which match ephem.
         """
@@ -875,16 +684,22 @@ class PrecoveryDatabase:
         observations = ObservationArray(list(self.frames.iterate_observations(frame)))
         n_obs = len(observations)
 
-        if not np.all(observations.values["mjd"] == ephem.mjd):
+        mjd = ephem.coordinates.time[0].mjd().to_numpy(False)[0]
+        if not np.all(observations.values["mjd"] == mjd):
             # Data has per-observation MJDs. We'll need propagate to every observation's time.
-            for match in self._find_matches_using_per_obs_timestamps(
-                frame, orbit, observations, tolerance
-            ):
-                yield (match)
-            return
+            matches = self._find_matches_using_per_obs_timestamps(
+                frame, orbit, observations, tolerance, propagator
+            )
+            return matches
 
         # Compute distance between our single ephemeris and all observations
-        distances = ephem.distance(observations)
+        # We need to do this in quivr
+        distances = haversine_distance_deg(
+            ephem.coordinates.lon[0].as_py(),
+            observations.values["ra"],
+            ephem.coordinates.lat[0].as_py(),
+            observations.values["dec"],
+        )
 
         # Gather ones within the tolerance
         observations.values = observations.values[distances < tolerance]
@@ -894,41 +709,41 @@ class PrecoveryDatabase:
             f"checked {n_obs} observations in frame {frame} and found {len(matching_observations)}"
         )
 
+        # We can probably do without this loop
+        candidates = [PrecoveryCandidates.empty()]
         for obs in matching_observations:
-            yield PrecoveryCandidate.from_observed_ephem(obs, frame, ephem)
+            candidates.append(candidates_from_ephem(obs, frame, ephem))
+        return qv.concatenate(candidates)
 
     def _find_matches_using_per_obs_timestamps(
         self,
         frame: HealpixFrame,
-        orbit: Orbit,
+        orbit: Orbits,
         observations: ObservationArray,
         tolerance: float,
-    ) -> Iterator[PrecoveryCandidate]:
+        propagator: Propagator,
+    ) -> PrecoveryCandidates:
         """If a frame has per-source observation times, we need to
         propagate to every time in the frame, so
 
         """
         # First, propagate to the mean MJD using N-body propagation.
         mean_mjd = observations.values["mjd"].mean()
-        mean_orbit_state = orbit.propagate(
-            epochs=[mean_mjd],
-            method=PropagationIntegrator.N_BODY,
-            time_scale=EpochTimescale.UTC,
-        )[0]
+
+        times = Timestamp.from_mjd([mean_mjd], scale="utc")
+
+        mean_orbit_state = propagator.propagate_orbits(orbit, times)
 
         # Next, compute an ephemeris for every observation in the
         # frame. Use 2-body propagation from the mean position to the
         # individual timestamps.
-        ephemerides = mean_orbit_state.compute_ephemeris(
-            obscode=frame.obscode,
-            epochs=observations.values["mjd"],
-            method=PropagationIntegrator.TWO_BODY,
-            time_scale=EpochTimescale.UTC,
-        )
+        times = Timestamp.from_mjd(observations.values["mjd"], scale="utc")
+        observers = Observers.from_code(frame.obscode, times)
+        ephemeris = generate_ephemeris_2body(mean_orbit_state, observers)
 
         # Now check distances.
-        ephem_position_ra = np.array([e.ra for e in ephemerides])
-        ephem_position_dec = np.array([e.dec for e in ephemerides])
+        ephem_position_ra = ephemeris.coordinates.lon.to_numpy()
+        ephem_position_dec = ephemeris.coordinates.lat.to_numpy()
 
         distances = haversine_distance_deg(
             ephem_position_ra,
@@ -938,10 +753,12 @@ class PrecoveryDatabase:
         )
 
         # Gather any matches.
+        candidates = [PrecoveryCandidates.empty()]
         for index in np.where(distances < tolerance)[0]:
             obs = Observation(*observations.values[index])
-            ephem = ephemerides[index]
-            yield PrecoveryCandidate.from_observed_ephem(obs, frame, ephem)
+            ephem = ephemeris[int(index)]
+            candidates.append(candidates_from_ephem(obs, frame, ephem))
+        return qv.concatenate(candidates)
 
     def find_observations_in_region(
         self, ra: float, dec: float, obscode: str

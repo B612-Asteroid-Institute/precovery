@@ -1,12 +1,11 @@
 import argparse
 import os
 
-import pandas as pd
-from astropy.time import Time
-from astroquery.jplsbdb import SBDB
+from adam_core.orbits import Orbits
+from adam_core.orbits.query import query_sbdb
 
 SAMPLE_ORBITS_FILE = os.path.join(
-    os.path.dirname(__file__), "data", "sample_orbits.csv"
+    os.path.dirname(__file__), "data", "sample_orbits.parquet"
 )
 
 TARGETS = [
@@ -17,7 +16,8 @@ TARGETS = [
     "2010 TK7",
     "3753",
     # Apollo
-    "54509",
+    # Excluding YORP due to nongravs
+    # "54509",
     "2063",
     # Amor
     "1221",
@@ -50,7 +50,7 @@ TARGETS = [
 ]
 
 
-def get_sample_orbits(targets: list[str]) -> pd.DataFrame:
+def get_sample_orbits(targets: list[str]) -> Orbits:
     """
     Query JPL Small-Body Database for orbits of targets.
 
@@ -64,40 +64,8 @@ def get_sample_orbits(targets: list[str]) -> pd.DataFrame:
     orbits: `~pandas.DataFrame`
         DataFrame of containing Keplerian and Cometary elements of each target.
     """
-    orbit_dfs = []
-    for i, target in enumerate(targets):
-        result = SBDB.query(target, full_precision=True, phys=True)
-
-        # Extract the epoch at which the elements are defined
-        # and convert it to MJD in TT time scale
-        tdb_jd = Time(result["orbit"]["epoch"], scale="tdb", format="jd")
-        epoch_df = pd.DataFrame({"mjd_tt": tdb_jd.tt.mjd}, index=[i])
-
-        # Extract the orbital elements and their errors
-        elements_df = pd.DataFrame(result["orbit"]["elements"], index=[i])
-
-        # Extract the physical parameters and their errors
-        if "G" not in result["phys_par"].keys():
-            G = 0.15
-        else:
-            G = result["phys_par"]["G"]
-        phys_df = pd.DataFrame(
-            {
-                "H": result["phys_par"]["H"],
-                "G": G,
-            },
-            index=[i],
-        )
-
-        # Combine into a single DataFrame and insert orbit ID
-        orbit_i_df = epoch_df.join(elements_df).join(phys_df)
-        orbit_i_df.insert(0, "orbit_id", result["object"]["des"])
-        orbit_i_df.insert(1, "orbit_name", result["object"]["fullname"])
-
-        orbit_dfs.append(orbit_i_df)
-
-    orbits_df = pd.concat(orbit_dfs)
-    return orbits_df
+    orbits = query_sbdb(targets)
+    return orbits
 
 
 if __name__ == "__main__":
@@ -115,4 +83,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     orbits = get_sample_orbits(TARGETS)
-    orbits.to_csv(args.out_file, index=False)
+    orbits.to_parquet(args.out_file)

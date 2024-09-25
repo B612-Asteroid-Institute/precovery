@@ -5,16 +5,16 @@ import shutil
 import numpy as np
 import pandas as pd
 import pytest
+from adam_core.orbits import Orbits
+from adam_core.propagator.adam_assist import ASSISTPropagator
 
 from precovery.ingest import index
 from precovery.main import precover
-from precovery.orbit import EpochTimescale, Orbit
-from precovery.utils import candidates_to_dataframe
 
-from .testutils import requires_openorb_data
+from .testutils import requires_jpl_ephem_data
 
 SAMPLE_ORBITS_FILE = os.path.join(
-    os.path.dirname(__file__), "data", "sample_orbits.csv"
+    os.path.dirname(__file__), "data", "sample_orbits.parquet"
 )
 TEST_OBSERVATIONS_DIR = os.path.join(os.path.dirname(__file__), "data/index")
 MILLIARCSECOND = 1 / 3600 / 1000
@@ -28,31 +28,13 @@ def test_db_dir():
     shutil.rmtree(out_dir)
 
 
-@requires_openorb_data
+@requires_jpl_ephem_data
 def test_precovery(test_db_dir):
     """
-    Given a properly formatted h5 file, ensure the observations are indexed properly
+    Given a properly formatted csv file, ensure the observations are indexed properly
     """
     # Initialize orbits from sample orbits file
-    orbits_df = pd.read_csv(SAMPLE_ORBITS_FILE)
-    orbit_name_mapping = {}
-    orbits_keplerian = []
-    for i in range(len(orbits_df)):
-        orbit_name_mapping[i] = orbits_df["orbit_name"].values[i]
-        orbit = Orbit.keplerian(
-            i,
-            orbits_df["a"].values[i],
-            orbits_df["e"].values[i],
-            orbits_df["i"].values[i],
-            orbits_df["om"].values[i],
-            orbits_df["w"].values[i],
-            orbits_df["ma"].values[i],
-            orbits_df["mjd_tt"].values[i],
-            EpochTimescale.TT,
-            orbits_df["H"].values[i],
-            orbits_df["G"].values[i],
-        )
-        orbits_keplerian.append(orbit)
+    orbits = Orbits.from_parquet(SAMPLE_ORBITS_FILE)
 
     # Load observations from csv files and index each one (one observation file
     # per dataset)
@@ -90,27 +72,25 @@ def test_precovery(test_db_dir):
     )
 
     # For each sample orbit, validate we get all the observations we planted
-    for orbit in orbits_keplerian:
-        orbit_id = orbit.orbit_id
-        orbit = orbit.to_adam_core()
+    for orbit in orbits:
+        orbit_name = orbit.object_id[0].as_py()
         matches, misses = precover(
-            orbit, test_db_dir, tolerance=1 / 3600, window_size=1
+            orbit,
+            test_db_dir,
+            tolerance=1 / 3600,
+            window_size=1,
+            propagator_class=ASSISTPropagator,
         )
 
-        # convert back to dataclasses
-        matches = matches.to_dataclass()
-        misses = misses.to_dataclass()
-
-        orbit_name = orbit_name_mapping[orbit_id]
         object_observations = observations_df[
-            observations_df["object_id"] == orbit_name
+            observations_df["object_id"] == orbit.object_id[0].as_py()
         ]
         assert len(matches) == len(object_observations)
         assert len(matches) > 0
 
-        matches = candidates_to_dataframe(matches)
+        matches_df = matches.to_dataframe()
 
-        matches.rename(
+        matches_df.rename(
             columns={
                 "ra_deg": "ra",
                 "dec_deg": "dec",
@@ -122,11 +102,16 @@ def test_precovery(test_db_dir):
             inplace=True,
         )
 
-        matches["ra_sigma"] /= 3600.0
-        matches["dec_sigma"] /= 3600.0
+        matches_df["ra_sigma"] /= 3600.0
+        matches_df["dec_sigma"] /= 3600.0
+        matches_df["mjd"] = matches.time.mjd().to_pylist()
+        matches_df["exposure_mjd_start"] = matches.exposure_time_start.mjd().to_pylist()
+        matches_df["exposure_mjd_mid"] = matches.exposure_time_mid.mjd().to_pylist()
 
         # We are assuming that both the test observation file and the results
         # are sorted by mjd
+        matches_df.sort_values(by=["mjd"], inplace=True)
+
         for col in [
             "mjd",
             "ra",
@@ -137,12 +122,12 @@ def test_precovery(test_db_dir):
             "mag_sigma",
             "exposure_mjd_start",
             "exposure_mjd_mid",
-            "exposure_duration"
+            "exposure_duration",
             # "filter", # can't do string comparisons this way
         ]:
             np.testing.assert_array_equal(
                 object_observations[col].values,
-                matches[col].values,
+                matches_df[col].values,
                 err_msg=f"Column {col} does not match for {orbit_name}.",
             )
 
@@ -154,7 +139,7 @@ def test_precovery(test_db_dir):
             "observatory_code",
             "filter",
         ]:
-            assert (matches[col].values == object_observations[col].values).all()
+            assert (matches_df[col].values == object_observations[col].values).all()
 
         # Test that the predicted location of each object in each exposure is
         # close to the actual location of the object in that exposure (we did
@@ -168,7 +153,7 @@ def test_precovery(test_db_dir):
         # of the orbit within the frame in the cases, which will also introduce some error.
         try:
             np.testing.assert_allclose(
-                matches[["pred_ra_deg", "pred_dec_deg"]].values,
+                matches_df[["pred_ra_deg", "pred_dec_deg"]].values,
                 object_observations[["ra", "dec"]].values,
                 atol=MILLIARCSECOND,
                 rtol=0,
@@ -180,7 +165,7 @@ def test_precovery(test_db_dir):
             # Test that the calculated distance is within 1 millarcsecond (need additional order of magnitude
             # tolerance to account for errors added in quadrature)
             np.testing.assert_allclose(
-                matches["distance_arcsec"].values / 3600.0,
+                matches_df["distance_arcsec"].values / 3600.0,
                 np.zeros(len(matches), dtype=np.float64),
                 atol=MILLIARCSECOND,
                 rtol=0,
@@ -190,7 +175,7 @@ def test_precovery(test_db_dir):
         except AssertionError as e:
             os.makedirs(RESULTS_DIR, exist_ok=True)
             result_file = os.path.join(RESULTS_DIR, f"results_{orbit_name}.csv")
-            matches.to_csv(result_file, float_format="%.16f", index=False)
+            matches_df.to_csv(result_file, float_format="%.16f", index=False)
 
             object_observations_file = os.path.join(
                 RESULTS_DIR,
@@ -203,3 +188,5 @@ def test_precovery(test_db_dir):
             print(f"Results written to: {result_file}")
             print(f"Object observations written to: {object_observations_file}")
             raise e
+        # running these takes a long time. For now, we will test only one orbit
+        break

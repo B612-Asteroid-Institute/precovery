@@ -18,7 +18,7 @@ def allow_nan(x: str) -> float:
     x : str
     """
     if x == "":
-        return np.NaN
+        return np.nan
     else:
         return float(x)
 

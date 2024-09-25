@@ -1,10 +1,13 @@
+from adam_core.propagator.adam_assist import ASSISTPropagator
+
 from precovery.sourcecatalog import bundle_into_frames
 
-from .testutils import make_sourceobs, make_sourceobs_of_orbit, requires_openorb_data
+from .testutils import make_sourceobs, make_sourceobs_of_orbit, requires_jpl_ephem_data
 
 
-@requires_openorb_data
+@requires_jpl_ephem_data
 def test_precover(precovery_db, sample_orbits):
+
     # Make dataset which contains something we're looking for.
     orbit = sample_orbits[0]
     timestamps = [50000.0, 50001.0, 50002.0]
@@ -26,21 +29,19 @@ def test_precover(precovery_db, sample_orbits):
     precovery_db.frames.add_frames(ds_id, frames)
 
     # Do the search. We should find the three observations we inserted.
-    orbit = orbit.to_adam_core()
-    matches, misses = precovery_db.precover(orbit)
-    matches = matches.to_dataclass()
-    misses = misses.to_dataclass()
+    matches, misses = precovery_db.precover(orbit, propagator_class=ASSISTPropagator)
     assert len(matches) == 3
     assert len(misses) == 0
 
-    have_ids = set(r.observation_id for r in matches)
+    have_ids = set(matches.observation_id.to_pylist())
     want_ids = set(o.id.decode("utf8") for o in object_observations)
     assert have_ids == want_ids
 
 
-@requires_openorb_data
+@requires_jpl_ephem_data
 def test_precover_dataset_filter(precovery_db, sample_orbits):
     # Make two datasets which contain something we're looking for.
+
     orbit = sample_orbits[0]
     timestamps = [50000.0, 50001.0, 50002.0]
 
@@ -60,23 +61,22 @@ def test_precover_dataset_filter(precovery_db, sample_orbits):
 
     # Do the search with no dataset filters. We should find all six
     # observations we inserted.
-    orbit = orbit.to_adam_core()
-    matches, misses = precovery_db.precover(orbit)
-    matches = matches.to_dataclass()
-    misses = misses.to_dataclass()
+    matches, misses = precovery_db.precover(orbit, propagator_class=ASSISTPropagator)
     assert len(matches) == 6
 
-    have_ids = set(r.observation_id for r in matches)
+    have_ids = set(matches.observation_id.to_pylist())
     want_ids = set(o.id.decode("utf8") for o in (ds1_observations + ds2_observations))
     assert have_ids == want_ids
 
     # Now repeat the search, but filter to just one dataset. We should
     # only find that dataset's observations.
-    matches, misses = list(precovery_db.precover(orbit, datasets={ds1_id}))
-    matches = matches.to_dataclass()
-    misses = misses.to_dataclass()
+    matches, misses = list(
+        precovery_db.precover(
+            orbit, datasets={ds1_id}, propagator_class=ASSISTPropagator
+        )
+    )
     assert len(matches) == 3
 
-    have_ids = set(r.observation_id for r in matches)
+    have_ids = set(matches.observation_id.to_pylist())
     want_ids = set(o.id.decode("utf8") for o in ds1_observations)
     assert have_ids == want_ids

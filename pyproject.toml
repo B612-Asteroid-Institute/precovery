@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=64", "wheel", "setuptools_scm>=8"]
-build-backend = "setuptools.build_meta"
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
 
 [project]
 name = "precovery"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dynamic = ["version"]
 authors = [
     { name = "Kathleen Kiker", email = "kathleen@b612foundation.org" },
@@ -15,22 +15,23 @@ authors = [
 ]
 description = "Fast asteroid precovery at scale"
 readme = "README.md"
-license = { file = "LICENSE.md", classifier = "BSD License" }
+license = { file = "LICENSE.md"}
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: BSD License",
     "Operating System :: OS Independent",
-    "Programming Language :: Python",
     "Programming Language :: Python :: 3.10",
     "Topic :: Scientific/Engineering :: Astronomy",
     "Topic :: Scientific/Engineering :: Physics",
 ]
 
 dependencies = [
-    "adam_core>=0.2.0",
+    "adam_core>=0.2.3",
     "numpy",
     "numba",
+    "jaxlib==0.4.17",
+    "jax==0.4.17",
     "sqlalchemy < 2",
     "regex",
     "pandas",
@@ -39,13 +40,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-tests = [
+dev = [
+    "adam_assist",
     "pre-commit",
     "pytest",
     "black",
     "isort",
+    "pdm",
+    "mypy",
     "pytest-cov",
     "pytest-benchmark",
+    "pytest-doctestplus",
+    "ruff",
     "astroquery",
 ]
 
@@ -55,29 +61,41 @@ tests = [
 [project.scripts]
 precovery-index = "precovery.ingest:index"
 
-[tool.setuptools_scm]
-version_file = "precovery/version.py"
-
-[tool.setuptools.packages]
-find = {}
+[tool.pdm.version]
+source = "scm"
+write_to = "precovery/_version.py"
+write_template = "__version__ = '{}'"
 
 [tool.pytest.ini_options]
 python_functions = "test_*"
 
+[tool.pdm.scripts]
+check = { composite = ["lint", "typecheck"] }
+format = { composite = ["black ./precovery", "isort ./precovery"] }
+lint = { composite = [
+  "ruff check ./precovery",
+  "black --check ./precovery",
+  "isort --check-only ./precovery",
+] }
+fix = "ruff ./precovery --fix"
+typecheck = "mypy ./precovery"
+
+test = "pytest --benchmark-disable {args}"
+doctest = "pytest --doctest-plus --doctest-only"
+benchmark = "pytest --benchmark-only"
+coverage = "pytest --cov=precovery --cov-report=xml"
+
+[tool.pdm]
+distribution = true
 
 [tool.black]
-# Comfortable distance, but makes exceptions when appropriate.
+line-length = 88
+
+[tool.flake8]
 line-length = 88
 
 [tool.isort]
 profile = "black"
-
-[tool.flake8]
-max-line-length = 110
-ignore = ["W503", "E203"]
-exclude = ["build", "precovery/version.py"]
-
-
 [tool.mypy]
 exclude = "virtualenv*"
 plugins = ["numpy.typing.mypy_plugin", "sqlalchemy.ext.mypy.plugin"]
@@ -94,3 +112,9 @@ ignore_missing_imports = true
 
 [tool.pytest]
 filterwarnings = "ignore::DeprecationWarning:astropy"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+lint.ignore = []
+exclude = ["build"]

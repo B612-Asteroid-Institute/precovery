@@ -395,33 +395,30 @@ def test_window_centers_dataset_filter(frame_db):
     frame_db.add_frames(dataset_2, frames_2)
 
     # When using no dataset filter, we should return windows for all datasets
-    centers = list(
-        frame_db.idx.window_centers(
-            start_mjd=mjd - 1, end_mjd=mjd + 1, window_size_days=1
-        )
+    centers = frame_db.idx.window_centers(
+        start_mjd=mjd - 1, end_mjd=mjd + 1, window_size_days=1
     )
+    print(centers)
 
     assert len(centers) == 2
     seen_obscodes = set()
-    for _, obscode in centers:
+    for obscode, _ in centers:
         seen_obscodes.add(obscode)
 
     assert seen_obscodes == {"obs1", "obs2"}
 
     # When using a dataset filter, we should return windows for only
     # the specified datasets
-    centers = list(
-        frame_db.idx.window_centers(
-            start_mjd=mjd - 1,
-            end_mjd=mjd + 1,
-            window_size_days=1,
-            datasets={dataset_1},
-        )
+    centers = frame_db.idx.window_centers(
+        start_mjd=mjd - 1,
+        end_mjd=mjd + 1,
+        window_size_days=1,
+        datasets={dataset_1},
     )
 
     assert len(centers) == 1
     seen_obscodes = set()
-    for _, obscode in centers:
+    for obscode, _ in centers:
         seen_obscodes.add(obscode)
 
     assert seen_obscodes == {"obs1"}

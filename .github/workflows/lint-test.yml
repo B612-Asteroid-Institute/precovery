@@ -2,28 +2,48 @@ name: Lint and Test
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, "v*"]
   pull_request:
-    branches: [ main ]
+    branches: [ main, "v*"]
 
 jobs:
   build-lint-test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11"]
     env:
       IMAGE_TAG: ${{ github.sha }}
     steps:
       - name: Checkout git repo
-        uses: actions/checkout@v2
-      - uses: jpribyl/action-docker-layer-caching@v0.1.0
-        # Ignore the failure of a step and avoid terminating the job.
-        continue-on-error: true
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: actions/checkout@v3
+      - name: Get git tags
+        run:  git fetch --prune --unshallow --tags
+      - uses: actions/setup-python@v4
         with:
-          install: true
-      - name: Build Precovery in Docker
-        run: docker build --load -t precovery:$IMAGE_TAG .
-      - name: lint
-        run: docker run -i precovery:$IMAGE_TAG pre-commit run --all-files
-      - name: lint tests
-        run: docker run -i precovery:$IMAGE_TAG pytest --exitfirst .
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+      # Use pip to install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[dev]"
+      # Run linter
+      - name: Run linter
+        run: |
+          pdm run check
+      # Get JPL ephemeris files
+      - name: Get JPL ephemeris files
+        run: |
+          python scripts/set_up_assist.py
+      - name: Set JPL ephemeris environment variable
+        run: |
+          export ASSIST_DATA_DIR=~/.adam_assist_data
+      # Run tests
+      - name: Run tests
+        run: |
+          pdm run coverage
+      - name: Coveralls
+        uses: coverallsapp/github-action@v2.0.0
+        with:
+          path-to-lcov: coverage.xml

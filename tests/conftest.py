@@ -1,10 +1,9 @@
 import os
 
-import pandas as pd
 import pytest
+from adam_core.orbits import Orbits
 
 from precovery.frame_db import FrameDB, FrameIndex
-from precovery.orbit import EpochTimescale, Orbit
 from precovery.precovery_db import PrecoveryDatabase
 
 
@@ -39,23 +38,8 @@ def precovery_db(tmp_path, frame_db):
 @pytest.fixture
 def sample_orbits():
     sample_orbits_file = os.path.join(
-        os.path.dirname(__file__), "data", "sample_orbits.csv"
+        os.path.dirname(__file__), "data", "sample_orbits.parquet"
     )
-    df = pd.read_csv(sample_orbits_file)
-    orbits = []
-    for i in range(len(df)):
-        orbit = Orbit.keplerian(
-            i,
-            df["a"].values[i],
-            df["e"].values[i],
-            df["i"].values[i],
-            df["om"].values[i],
-            df["w"].values[i],
-            df["ma"].values[i],
-            df["mjd_tt"].values[i],
-            EpochTimescale.TT,
-            df["H"].values[i],
-            df["G"].values[i],
-        )
-        orbits.append(orbit)
+    orbits = Orbits.from_parquet(sample_orbits_file)
+
     return orbits

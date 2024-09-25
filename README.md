@@ -11,11 +11,6 @@
 
 ## Installation
 
-### Docker
-You can build and use precovery using the Dockerfile and docker-compose.yml
-`docker compose build`
-`docker compose run -it precovery bash`
-
 ### Conda
 
 To get the latest released version and install it into a conda environment:  
@@ -26,13 +21,6 @@ To get the latest released version and install it into a conda environment:
 To install the bleeding edge source code, clone this repository and then:  
 
 `pip install .`  
-
-
-#### openorb
-
-Note that, `openorb` is not available on the Python Package Index and so you wil need
-to install it via source or conda. See the `Dockerfile` for example of how to build on Ubuntu linux.
-
 
 #### healpy
 

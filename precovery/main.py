@@ -1,11 +1,12 @@
 import logging
 import multiprocessing
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Type
 
 import quivr as qv
-from adam_core.orbits import Orbits as AdamOrbits
+from adam_core.orbits import Orbits
+from adam_core.propagator import Propagator
 
-from .precovery_db import FrameCandidatesQv, PrecoveryCandidatesQv, PrecoveryDatabase
+from .precovery_db import FrameCandidates, PrecoveryCandidates, PrecoveryDatabase
 
 logger = logging.getLogger("precovery")
 logging.basicConfig()
@@ -13,7 +14,7 @@ logger.setLevel(logging.INFO)
 
 
 def precover_many(
-    orbits: AdamOrbits,
+    orbits: Orbits,
     database_directory: str,
     tolerance: float = 1 / 3600,
     start_mjd: Optional[float] = None,
@@ -22,7 +23,8 @@ def precover_many(
     allow_version_mismatch: bool = False,
     datasets: Optional[set[str]] = None,
     n_workers: int = multiprocessing.cpu_count(),
-) -> Tuple[PrecoveryCandidatesQv, FrameCandidatesQv]:
+    propagator_class: Optional[Type[Propagator]] = None,
+) -> Tuple[PrecoveryCandidates, FrameCandidates]:
     """
     Run a precovery search algorithm against many orbits at once.
     """
@@ -36,6 +38,7 @@ def precover_many(
             window_size,
             allow_version_mismatch,
             datasets,
+            propagator_class,
         )
         for o in orbits
     ]
@@ -48,8 +51,8 @@ def precover_many(
     pool.close()
     pool.join()
 
-    precovery_candidates = PrecoveryCandidatesQv.empty()
-    frame_candidates = FrameCandidatesQv.empty()
+    precovery_candidates = PrecoveryCandidates.empty()
+    frame_candidates = FrameCandidates.empty()
 
     for orb_precovery_candidate, orb_frame_candidate in results:
         precovery_candidates = qv.concatenate(
@@ -61,7 +64,7 @@ def precover_many(
 
 
 def precover_worker(
-    orbit: AdamOrbits,
+    orbit: Orbits,
     database_directory: str,
     tolerance: float = 1 / 3600,
     start_mjd: Optional[float] = None,
@@ -69,10 +72,13 @@ def precover_worker(
     window_size: int = 7,
     allow_version_mismatch: bool = False,
     datasets: Optional[set[str]] = None,
-) -> Tuple[PrecoveryCandidatesQv, FrameCandidatesQv]:
+    propagator_class: Optional[Type[Propagator]] = None,
+) -> Tuple[PrecoveryCandidates, FrameCandidates]:
     """
     Wraps the precover function to return the orbit_id for mapping.
     """
+
+    # initialize our propagator
     precovery_candidates, frame_candidates = precover(
         orbit,
         database_directory,
@@ -82,6 +88,7 @@ def precover_worker(
         window_size,
         allow_version_mismatch,
         datasets,
+        propagator_class=propagator_class,
     )
 
     return (
@@ -91,7 +98,7 @@ def precover_worker(
 
 
 def precover(
-    orbit: AdamOrbits,
+    orbit: Orbits,
     database_directory: str,
     tolerance: float = 1 / 3600,
     start_mjd: Optional[float] = None,
@@ -99,13 +106,14 @@ def precover(
     window_size: int = 7,
     allow_version_mismatch: bool = False,
     datasets: Optional[set[str]] = None,
-) -> Tuple[PrecoveryCandidatesQv, FrameCandidatesQv]:
+    propagator_class: Optional[Type[Propagator]] = None,
+) -> Tuple[PrecoveryCandidates, FrameCandidates]:
     """
     Connect to database directory and run precovery for the input orbit.
 
     Parameters
     ----------
-    orbit : `precovery.Orbit`
+    orbit : `adam_core.orbits.Orbits`
         Orbit to propagate through indexed observations.
     database_directory : str
         Path to database directory. Assumes the index database has already been created
@@ -129,14 +137,17 @@ def precover(
         Allows using a precovery db version that does not match the library version.
     datasets : set[str], optional
         Filter down searches to only scan selected datasets
+    propagator_class : Type[Propagator], optional
+        An adam_core.propagator.Propagator subclass to use for propagating the orbit.
 
     Returns
     -------
-    candidates : Tuple[List[PrecoveryCandidate], List[FrameCandidate]]
+    candidates : Tuple[PrecoveryCandidates, FrameCandidates]
         PrecoveryCandidate observations that may belong to this orbit. FrameCandidates of any frames
         that intersected the orbit's trajectory but did not have any observations (PrecoveryCandidates)
         found within the angular tolerance.
     """
+
     precovery_db = PrecoveryDatabase.from_dir(
         database_directory,
         create=False,
@@ -151,6 +162,7 @@ def precover(
         end_mjd=end_mjd,
         window_size=window_size,
         datasets=datasets,
+        propagator_class=propagator_class,
     )
 
     return precovery_candidates, frame_candidates
