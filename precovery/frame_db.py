@@ -1,38 +1,47 @@
 import dataclasses
 import glob
-import itertools
 import logging
 import os
 import struct
 import warnings
-from typing import Iterable, Iterator, List, Optional, Set, Tuple
+from typing import Iterator, List, Optional, Tuple
 
+import pyarrow as pa
+import pyarrow.compute as pc
+import quivr as qv
 import sqlalchemy as sq
+from adam_core.time import Timestamp
 from astropy.time import Time
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.sql import func as sqlfunc
 from sqlalchemy.sql.expression import ColumnClause
 
 from . import healpix_geom, sourcecatalog
-from .observation import DATA_LAYOUT, Observation
+from .observation import DATA_LAYOUT, ObservationsTable
 
 logger = logging.getLogger("frame_db")
 
 
-@dataclasses.dataclass
-class HealpixFrame:
-    id: Optional[int]
-    dataset_id: str
-    obscode: str
-    exposure_id: str
-    filter: str
-    exposure_mjd_start: float
-    exposure_mjd_mid: float
-    exposure_duration: float
-    healpixel: int
-    data_uri: str
-    data_offset: int
-    data_length: int
+class HealpixFrame(qv.Table):
+    """
+    Represents a HealpixFrame in a Quivr table.
+    """
+
+    id = qv.Int64Column(nullable=True)
+    dataset_id = qv.LargeStringColumn()
+    obscode = qv.LargeStringColumn()
+    exposure_id = qv.LargeStringColumn()
+    filter = qv.LargeStringColumn()
+    exposure_mjd_start = qv.Float64Column()
+    exposure_mjd_mid = qv.Float64Column()
+    exposure_duration = qv.Float64Column()
+    healpixel = qv.Int64Column()
+    data_uri = qv.LargeStringColumn()
+    data_offset = qv.Int64Column()
+    data_length = qv.Int64Column()
+
+    def exposure_mid_timestamp(self) -> Timestamp:
+        return Timestamp.from_mjd(self.exposure_mjd_mid, scale="utc")
 
 
 @dataclasses.dataclass
@@ -74,6 +83,44 @@ class Dataset:
     sia_url: Optional[str]
 
 
+class GenericFrame(qv.Table):
+    """
+    Represents combinations of healpixels and times.
+
+    Real frames refer to intersections of exposure data and healpixels.
+    Generic frames represents the idea of a healpixel at a particular time
+    Used for representing propagation targets and querying the frames table.
+
+    The real frames table may have multiple frames for a single time/healpixel
+    combination, especially since these aren't limited by obscode.
+    """
+
+    time = Timestamp.as_column()
+    healpixel = qv.Int64Column()
+
+
+class WindowCenters(qv.Table):
+    """
+    Represents the centers of time windows with data in them.
+
+    This is used for propagating to the centers of time windows with data in them.
+    """
+
+    obscode = qv.LargeStringColumn()
+    time = Timestamp.as_column()
+    window_size_days = qv.Int16Column()
+
+    def window_start(self):
+        return self.time.add_fractional_days(
+            pc.negate(pc.divide(pc.cast(self.window_size_days, pa.float64()), 2.0))
+        )
+
+    def window_end(self):
+        return self.time.add_fractional_days(
+            pc.divide(pc.cast(self.window_size_days, pa.float64()), 2)
+        )
+
+
 class FrameIndex:
     def __init__(self, db_uri: str, mode: str = "r"):
         self.db_uri = db_uri
@@ -86,10 +133,6 @@ class FrameIndex:
             if not self.db_uri.endswith("?mode=ro"):
                 self.db_uri += "?mode=ro"
 
-        # future=True is required here for SQLAlchemy 2.0 API usage
-        # while we migrate from 1.x up. Version 2 is incompatible with
-        # dagster, so we need to actually pin to 1.x, but future=True
-        # lets us use the 2.0 API in this code.
         self.db = sq.create_engine(db_uri, connect_args={"timeout": 60}, future=True)
         self.dbconn = self.db.connect()
 
@@ -138,78 +181,86 @@ class FrameIndex:
         end_mjd: float,
         window_size_days: int,
         datasets: Optional[set[str]] = None,
-    ) -> list[Tuple[str, list[float]]]:
-        """Return the midpoint and obscode of all time windows with data in them.
-
-        If datasets is provided, it will be applied as a filter on the
-        datasets used to find data.
-
-        """
-        offset = -start_mjd + window_size_days / 2
-
-        # Subquery to calculate common_epoch and order them
-        subquery = (
+    ) -> WindowCenters:
+        """Return the midpoint and obscode of all time windows with data in them."""
+        # Query for frames that overlap the entire range
+        query = (
             sq.select(
                 self.frames.c.obscode,
-                sq.cast(
-                    (
-                        sq.cast(
-                            self.frames.c.exposure_mjd_mid + offset,
-                            sq.Integer,
-                        )
-                        / window_size_days
-                    )
-                    * window_size_days
-                    + start_mjd,
-                    sq.Float,
-                ).label("common_epoch"),
+                sq.func.floor(
+                    (self.frames.c.exposure_mjd_mid - start_mjd) / window_size_days
+                ).label("window_id"),
+                sq.func.min(self.frames.c.exposure_mjd_start).label("min_start"),
+                sq.func.max(
+                    self.frames.c.exposure_mjd_start
+                    + self.frames.c.exposure_duration / 86400
+                ).label("max_end"),
             )
             .where(
-                self.frames.c.exposure_mjd_mid >= start_mjd,
-                self.frames.c.exposure_mjd_mid <= end_mjd,
+                # Single condition for frames overlapping the full range
+                (self.frames.c.exposure_mjd_start < end_mjd)
+                & (
+                    self.frames.c.exposure_mjd_start
+                    + self.frames.c.exposure_duration / 86400
+                    >= start_mjd
+                )
             )
-            .distinct()
-            .order_by("common_epoch")
+            .group_by(
+                sq.func.floor(
+                    (self.frames.c.exposure_mjd_mid - start_mjd) / window_size_days
+                ),
+                self.frames.c.obscode,
+            )
         )
 
         if datasets is not None:
-            subquery = subquery.where(self.frames.c.dataset_id.in_(list(datasets)))
+            query = query.where(self.frames.c.dataset_id.in_(list(datasets)))
 
-        subquery = subquery.alias("subquery")
+        # Execute the query
+        rows = self.dbconn.execute(query).fetchall()
 
-        # Main query to concatenate common_epoch values into a comma-separated string
-        stmt = sq.select(
-            subquery.c.obscode,
-            sqlfunc.group_concat(subquery.c.common_epoch, ",").label(
-                "common_epoch_times"
-            ),
-        ).group_by(subquery.c.obscode)
+        # Process the results
+        (obscodes, window_ids, min_starts, max_ends) = zip(*rows)
+        window_starts = [
+            start_mjd + window_id * window_size_days for window_id in window_ids
+        ]
+        window_centers = [
+            window_start + window_size_days / 2 for window_start in window_starts
+        ]
 
-        windows_by_obscode = []
-        rows = self.dbconn.execute(stmt).fetchall()
-        for row in rows:
-            common_epochs = list(map(float, row.common_epoch_times.split(",")))
-            windows_by_obscode.append((row.obscode, common_epochs))
-
-        return windows_by_obscode
+        # Return as WindowCenters
+        return WindowCenters.from_kwargs(
+            obscode=obscodes,
+            time=Timestamp.from_mjd(window_centers, scale="utc"),
+            window_size_days=pa.repeat(window_size_days, len(window_centers)),
+        )
 
     def propagation_targets(
         self,
-        start_mjd: float,
-        end_mjd: float,
-        obscode: str,
+        window: WindowCenters,
         datasets: Optional[set[str]] = None,
-    ) -> Iterator[Tuple[float, Set[int]]]:
-        """Yields (mjd, {healpixels}) pairs for the given obscode in the given range
-        of MJDs.
+    ) -> GenericFrame:
+        """
+        Return the healpixels that were observed at least once by the given
+        observatory in the given time window.
 
-        The yielded mjd is a float MJD epoch timestamp to propagate to, and
-        {healpixels} is a set of integer healpixel IDs.
+        Parameters
+        ----------
+        window : WindowCenters
+            The time window and observatory to consider.
+        datasets: set[str], optional
+            If provided, only consider frames from the given datasets.
 
-        An optional set of dataset IDs can be provided to filter the
-        data that gets scanned.
+        Returns
+        -------
+        GenericFrame
+            A table of healpixels and times.
 
         """
+        assert len(window) == 1
+        obscode = window.obscode[0].as_py()
+        start_mjd = window.window_start().mjd()[0].as_py()
+        end_mjd = window.window_end().mjd()[0].as_py()
         select_stmt = (
             sq.select(
                 self.frames.c.exposure_mjd_mid,
@@ -217,8 +268,10 @@ class FrameIndex:
             )
             .where(
                 self.frames.c.obscode == obscode,
-                self.frames.c.exposure_mjd_mid >= start_mjd,
-                self.frames.c.exposure_mjd_mid <= end_mjd,
+                self.frames.c.exposure_mjd_start
+                + self.frames.c.exposure_duration / 86400
+                >= start_mjd,
+                self.frames.c.exposure_mjd_start <= end_mjd,
             )
             .distinct()
             .order_by(
@@ -226,15 +279,20 @@ class FrameIndex:
                 self.frames.c.healpixel,
             )
         )
-        if datasets is not None:
+        if datasets is not None and len(datasets) > 0:
             select_stmt = select_stmt.where(
                 self.frames.c.dataset_id.in_(list(datasets))
             )
 
-        rows = self.dbconn.execute(select_stmt)
-        for mjd, group in itertools.groupby(rows, key=lambda pair: pair[0]):
-            healpixels = set(pixel for mjd, pixel in group)
-            yield (mjd, healpixels)
+        rows = self.dbconn.execute(select_stmt).fetchall()
+        if len(rows) == 0:
+            return GenericFrame.empty()
+        # turn rows into columns
+        times, healpixels = zip(*rows)
+        return GenericFrame.from_kwargs(
+            time=Timestamp.from_mjd(times, scale="utc"),
+            healpixel=healpixels,
+        )
 
     def get_frames(
         self,
@@ -242,7 +300,7 @@ class FrameIndex:
         mjd: float,
         healpixel: int,
         datasets: Optional[set[str]] = None,
-    ) -> list[HealpixFrame]:
+    ) -> HealpixFrame:
         """
         Yield all the frames which are for given obscode, MJD, healpix.
 
@@ -279,30 +337,50 @@ class FrameIndex:
             )
 
         result = self.dbconn.execute(select_stmt)
-        # Turn result into a list so we can iterate over it twice: once
-        # to check the MJDs for uniqueness and a second time to actually
-        # yield the individual rows
-        rows = list(result)
 
-        # Loop through rows and track midpoint MJDs
-        mjds_mid = set()
-        for r in rows:
-            # id, dataset_id, obscode, exposure_id, filter, exposure_mjd_start, exposure_mjd_mid,
-            # exposure_duration, healpixel, data uri, data offset, data length
-            mjds_mid.add(r[6])
+        (
+            ids,
+            dataset_ids,
+            obscodes,
+            exposure_ids,
+            filters,
+            exposure_mjd_starts,
+            exposure_mjd_mids,
+            exposure_durations,
+            healpixels,
+            data_uris,
+            data_offsets,
+            data_lengths,
+        ) = zip(*result)
 
-        if len(mjds_mid) > 1:
-            logger.warn(
+        healpixel_frames = HealpixFrame.from_kwargs(
+            id=ids,
+            dataset_id=dataset_ids,
+            obscode=obscodes,
+            exposure_id=exposure_ids,
+            filter=filters,
+            exposure_mjd_start=exposure_mjd_starts,
+            exposure_mjd_mid=exposure_mjd_mids,
+            exposure_duration=exposure_durations,
+            healpixel=healpixels,
+            data_uri=data_uris,
+            data_offset=data_offsets,
+            data_length=data_lengths,
+        )
+
+        if len(pc.unique(healpixel_frames.exposure_mjd_mid)) > 1:
+
+            logger.warning(
                 f"Query returned non-unique MJDs for mjd: {mjd}, healpix:"
                 f" {int(healpixel)}, obscode: {obscode}."
             )
 
-        return [HealpixFrame(*r) for r in rows]
+        return healpixel_frames
 
     def get_frames_by_id(
         self,
         ids: List[int],
-    ) -> Iterator[HealpixFrame]:
+    ) -> HealpixFrame:
         """
         Yield all the frames with the given IDs. Frames are returned in the order
         they are given in the list.
@@ -325,18 +403,49 @@ class FrameIndex:
         )
 
         result = self.dbconn.execute(select_stmt)
-        rows = list(result)
-        for r in rows:
-            yield HealpixFrame(*r)
+
+        (
+            frame_ids,
+            dataset_ids,
+            obscodes,
+            exposure_ids,
+            filters,
+            exposure_mjd_starts,
+            exposure_mjd_mids,
+            exposure_durations,
+            healpixels,
+            data_uris,
+            data_offsets,
+            data_lengths,
+        ) = zip(*result)
+
+        return HealpixFrame.from_kwargs(
+            id=frame_ids,
+            dataset_id=dataset_ids,
+            obscode=obscodes,
+            exposure_id=exposure_ids,
+            filter=filters,
+            exposure_mjd_start=exposure_mjd_starts,
+            exposure_mjd_mid=exposure_mjd_mids,
+            exposure_duration=exposure_durations,
+            healpixel=healpixels,
+            data_uri=data_uris,
+            data_offset=data_offsets,
+            data_length=data_lengths,
+        )
 
     def n_frames(self) -> int:
         select_stmt = sq.select(sqlfunc.count(self.frames.c.id))
         row = self.dbconn.execute(select_stmt).fetchone()
+        if row is None or row[0] is None:
+            return 0
         return row[0]
 
     def n_bytes(self) -> int:
         select_stmt = sq.select(sqlfunc.sum(self.frames.c.data_length))
         row = self.dbconn.execute(select_stmt).fetchone()
+        if row is None or row[0] is None:
+            return 0
         return row[0]
 
     def n_unique_frames(self) -> int:
@@ -357,6 +466,8 @@ class FrameIndex:
         )
         stmt = sq.select(sqlfunc.count(subq.c.obscode))
         row = self.dbconn.execute(stmt).fetchone()
+        if row is None or row[0] is None:
+            return 0
         return row[0]
 
     def mjd_bounds(self, datasets: Optional[set[str]] = None) -> Tuple[float, float]:
@@ -376,15 +487,15 @@ class FrameIndex:
             select_stmt = select_stmt.where(
                 self.frames.c.dataset_id.in_(list(datasets))
             )
-        first, last = self.dbconn.execute(select_stmt).fetchone()
+        bounds = self.dbconn.execute(select_stmt).fetchone()
+        if bounds is None:
+            raise Exception("No frames in the index")
+        first, last = bounds
         return first, last
 
-    def all_frames_by_key(self) -> Iterator[Tuple[HealpixFrameKey, List[HealpixFrame]]]:
-        """Returns all frames in the index, sorted according to the
-        HealpixFrameKey class's instructions.
-
-        Returned frames are grouped by HealpixFrameKey.
-
+    def all_frames(self) -> HealpixFrame:
+        """
+        Yields all the frames in the index.
         """
         stmt = sq.select(
             self.frames.c.id,
@@ -399,78 +510,45 @@ class FrameIndex:
             self.frames.c.data_uri,
             self.frames.c.data_offset,
             self.frames.c.data_length,
-        ).order_by(
-            *HealpixFrameKey._sql_order_by_clauses(self.frames),
         )
         result = self.dbconn.execute(stmt)
-        cur_key: Optional[HealpixFrameKey] = None
-        cur_frames: List[HealpixFrame] = []
 
-        def frame_for_row(row: sq.engine.Row) -> HealpixFrame:
-            # Little helper to cast the results of the above query
-            return HealpixFrame(
-                id=None,
-                dataset_id=row.dataset_id,
-                obscode=row.obscode,
-                filter=row.filter,
-                exposure_mjd_start=row.exposure_mjd_start,
-                exposure_mjd_mid=row.exposure_mjd_mid,
-                exposure_duration=row.exposure_duration,
-                healpixel=row.healpixel,
-                exposure_id=row.exposure_id,
-                data_uri=row.data_uri,
-                data_offset=row.data_offset,
-                data_length=row.data_length,
-            )
+        (
+            ids,
+            dataset_ids,
+            obscodes,
+            exposure_ids,
+            filters,
+            exposure_mjd_starts,
+            exposure_mjd_mids,
+            exposure_durations,
+            healpixels,
+            data_uris,
+            data_offsets,
+            data_lengths,
+        ) = zip(*result)
 
-        for row in result:
-            key = HealpixFrameKey(
-                dataset_id=row.dataset_id,
-                obscode=row.obscode,
-                filter=row.filter,
-                exposure_mjd_start=row.exposure_mjd_start,
-                exposure_mjd_mid=row.exposure_mjd_mid,
-                exposure_duration=row.exposure_duration,
-                healpixel=row.healpixel,
-            )
-            if cur_key is None:
-                # First iteration
-                cur_key = key
-                cur_frames = [frame_for_row(row)]
-            elif key == cur_key:
-                # Continuing a previous key
-                cur_frames.append(frame_for_row(row))
-            else:
-                # New key - flush what we have and reset
-                assert cur_key is not None
-                yield cur_key, cur_frames
-                cur_key = key
-                cur_frames = [frame_for_row(row)]
-        # End of iteration - yield the last pair
-        if cur_key is not None:
-            yield cur_key, cur_frames
+        return HealpixFrame.from_kwargs(
+            id=ids,
+            dataset_id=dataset_ids,
+            obscode=obscodes,
+            exposure_id=exposure_ids,
+            filter=filters,
+            exposure_mjd_start=exposure_mjd_starts,
+            exposure_mjd_mid=exposure_mjd_mids,
+            exposure_duration=exposure_durations,
+            healpixel=healpixels,
+            data_uri=data_uris,
+            data_offset=data_offsets,
+            data_length=data_lengths,
+        )
 
-    def add_frames(self, frames: list[HealpixFrame]):
+    def add_frames(self, frames: HealpixFrame):
         """
         Add one or more frames to the index.
         """
         insert = sqlite_insert(self.frames)
-        values = [
-            {
-                "dataset_id": frame.dataset_id,
-                "obscode": frame.obscode,
-                "exposure_id": frame.exposure_id,
-                "filter": frame.filter,
-                "exposure_mjd_start": frame.exposure_mjd_start,
-                "exposure_mjd_mid": frame.exposure_mjd_mid,
-                "exposure_duration": frame.exposure_duration,
-                "healpixel": int(frame.healpixel),
-                "data_uri": frame.data_uri,
-                "data_offset": frame.data_offset,
-                "data_length": frame.data_length,
-            }
-            for frame in frames
-        ]
+        values = frames.table.drop_columns("id").to_pylist()
         if len(values) > 0:
             self.dbconn.execute(insert, values)
             self.dbconn.commit()
@@ -545,9 +623,7 @@ class FrameIndex:
         )
         self._metadata.create_all(self.db)
 
-    def frames_for_healpixel(
-        self, healpixel: int, obscode: str
-    ) -> Iterator[HealpixFrame]:
+    def frames_for_healpixel(self, healpixel: int, obscode: str) -> HealpixFrame:
         """
         Yields all the frames which are for a single healpixel-obscode pair.
         """
@@ -556,8 +632,35 @@ class FrameIndex:
             self.frames.c.obscode == obscode,
         )
         rows = self.dbconn.execute(stmt).fetchall()
-        for row in rows:
-            yield HealpixFrame(*row)
+        (
+            ids,
+            dataset_ids,
+            obscodes,
+            exposure_ids,
+            filters,
+            exposure_mjd_starts,
+            exposure_mjd_mids,
+            exposure_durations,
+            healpixels,
+            data_uris,
+            data_offsets,
+            data_lengths,
+        ) = zip(*rows)
+
+        return HealpixFrame.from_kwargs(
+            id=ids,
+            dataset_id=dataset_ids,
+            obscode=obscodes,
+            exposure_id=exposure_ids,
+            filter=filters,
+            exposure_mjd_start=exposure_mjd_starts,
+            exposure_mjd_mid=exposure_mjd_mids,
+            exposure_duration=exposure_durations,
+            healpixel=healpixels,
+            data_uri=data_uris,
+            data_offset=data_offsets,
+            data_length=data_lengths,
+        )
 
 
 class FrameDB:
@@ -634,39 +737,41 @@ class FrameDB:
     def has_dataset(self, dataset_id: str) -> bool:
         return dataset_id in self.idx.get_dataset_ids()
 
-    def add_frames(self, dataset_id: str, frames: Iterator[sourcecatalog.SourceFrame]):
+    def add_frames(
+        self, dataset_id: str, src_frames: Iterator[sourcecatalog.SourceFrame]
+    ):
         """Adds many SourceFrames to the database. This includes both
         writing binary observation data and storing frames in the
         FrameIndex.
 
         """
-        healpix_frames = []
-        for src_frame in frames:
-            observations = [Observation.from_srcobs(o) for o in src_frame.observations]
+        healpix_frames = HealpixFrame.empty()
+        for src_frame in src_frames:
+            observations: ObservationsTable = ObservationsTable.from_srcobs(
+                src_frame.observations
+            )
             year_month_str = self._compute_year_month_str(src_frame)
 
             # Write observations to disk
             data_uri, offset, length = self.store_observations(
                 observations, dataset_id, year_month_str
             )
-
-            frame = HealpixFrame(
-                id=None,
-                dataset_id=dataset_id,
-                obscode=src_frame.obscode,
-                exposure_id=src_frame.exposure_id,
-                filter=src_frame.filter,
-                exposure_mjd_start=src_frame.exposure_mjd_start,
-                exposure_mjd_mid=src_frame.exposure_mjd_mid,
-                exposure_duration=src_frame.exposure_duration,
-                healpixel=src_frame.healpixel,
-                data_uri=data_uri,
-                data_offset=offset,
-                data_length=length,
+            frame = HealpixFrame.from_kwargs(
+                id=[None],
+                dataset_id=[dataset_id],
+                obscode=[src_frame.obscode],
+                exposure_id=[src_frame.exposure_id],
+                filter=[src_frame.filter],
+                exposure_mjd_start=[src_frame.exposure_mjd_start],
+                exposure_mjd_mid=[src_frame.exposure_mjd_mid],
+                exposure_duration=[src_frame.exposure_duration],
+                healpixel=[src_frame.healpixel],
+                data_uri=[data_uri],
+                data_offset=[offset],
+                data_length=[length],
             )
 
-            healpix_frames.append(frame)
-
+            healpix_frames = qv.concatenate([healpix_frames, frame])
         self.idx.add_frames(healpix_frames)
 
     @staticmethod
@@ -746,16 +851,22 @@ class FrameDB:
     def _current_data_file(self, dataset_id: str, year_month_str: str):
         return self.data_files[self._current_data_file_name(dataset_id, year_month_str)]
 
-    def iterate_observations(self, exp: HealpixFrame) -> Iterator[Observation]:
+    def get_observations(self, exp: HealpixFrame) -> ObservationsTable:
         """
-        Iterate over the observations stored in a frame.
+        Get the observations for a given HealpixFrame as a Quivr Table
         """
-        f = self.data_files[exp.data_uri]
-        f.seek(exp.data_offset)
+        assert len(exp) == 1
+        data_uri = exp.data_uri[0].as_py()
+        data_offset = exp.data_offset[0].as_py()
+        data_length = exp.data_length[0].as_py()
+
+        f = self.data_files[data_uri]
+        f.seek(data_offset)
         data_layout = struct.Struct(DATA_LAYOUT)
         datagram_size = struct.calcsize(DATA_LAYOUT)
         bytes_read = 0
-        while bytes_read < exp.data_length:
+        observations = []
+        while bytes_read < data_length:
             raw = f.read(datagram_size)
             (
                 mjd,
@@ -769,7 +880,21 @@ class FrameDB:
             ) = data_layout.unpack(raw)
             id = f.read(id_size)
             bytes_read += datagram_size + id_size
-            yield Observation(mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id)
+            observations.append((mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id))
+        (mjds, ras, decs, ra_sigmas, dec_sigmas, mags, mag_sigmas, ids) = zip(
+            *observations
+        )
+
+        return ObservationsTable.from_kwargs(
+            id=ids,
+            time=Timestamp.from_mjd(mjds, scale="utc"),
+            ra=ras,
+            dec=decs,
+            ra_sigma=ra_sigmas,
+            dec_sigma=dec_sigmas,
+            mag=mags,
+            mag_sigma=mag_sigmas,
+        )
 
     def get_frames_for_ra_dec(self, ra: float, dec: float, obscode: str):
         """Yields all frames that overlap given ra, dec for a given
@@ -784,7 +909,7 @@ class FrameDB:
             yield frame
 
     def store_observations(
-        self, observations: Iterable[Observation], dataset_id: str, year_month_str: str
+        self, observations: ObservationsTable, dataset_id: str, year_month_str: str
     ):
         """
         Write observations in exp_data to disk. The write goes to the latest (or
@@ -811,8 +936,8 @@ class FrameDB:
         f.seek(0, 2)  # seek to end
         start_pos = f.tell()
 
-        for obs in observations:
-            f.write(obs.to_bytes())
+        for obs_bytes in observations.to_bytes():
+            f.write(obs_bytes)
 
         end_pos = f.tell()
         length = end_pos - start_pos
@@ -838,52 +963,3 @@ class FrameDB:
         os.makedirs(os.path.dirname(current_data_file), exist_ok=True)
         f = open(current_data_file, "a+b")
         self.data_files[self._current_data_file_name(dataset_id, year_month_str)] = f
-
-    def defragment(self, new_index: FrameIndex, new_db: "FrameDB"):
-        """Deduplicates HealpixFrames by writing a new database.
-
-        Iterates over all frames in the index, grouped by a common key
-        (see the HealpixFrameKey for the grouping).
-
-        For each frame key, all associated observations are gathered
-        and held in memory, and then reserialized to disk. A new
-        HealpixFrame is then created and inserted into the index,
-        pointing to the new data serialization.
-
-        This function does not modify the current FrameDB. It works by
-        writing to a separate (presumably empty) FrameDB and
-        FrameIndex.
-        """
-        for key, frames in self.idx.all_frames_by_key():
-            year_month_str = "-".join(
-                Time(key.exposure_mjd_mid, format="mjd", scale="utc").isot.split("-")[
-                    :2
-                ]
-            )
-            observations: List[Observation] = []
-            for frame in frames:
-                observations.extend(self.iterate_observations(frame))
-                last_exposure_id = frame.exposure_id
-
-            # Re-store the observations now that we have all of them for a common HealpixFrameKey
-            data_uri, offset, length = new_db.store_observations(
-                observations, frame.dataset_id, year_month_str
-            )
-            new_frame = HealpixFrame(
-                id=None,
-                # Fields common to all frames:
-                dataset_id=key.dataset_id,
-                obscode=key.obscode,
-                filter=key.filter,
-                exposure_mjd_start=key.exposure_mjd_start,
-                exposure_mjd_mid=key.exposure_mjd_mid,
-                exposure_duration=key.exposure_duration,
-                healpixel=key.healpixel,
-                # Pick one exposure_id - the last will suffice
-                exposure_id=last_exposure_id,
-                # Use the new data locators
-                data_uri=data_uri,
-                data_offset=offset,
-                data_length=length,
-            )
-            new_db.idx.add_frames([new_frame])

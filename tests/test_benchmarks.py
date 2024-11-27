@@ -3,7 +3,7 @@ from adam_core.dynamics.propagation import propagate_2body
 from adam_core.propagator.adam_assist import ASSISTPropagator
 from adam_core.time import Timestamp
 
-from precovery.observation import Observation
+from precovery.observation import ObservationsTable
 
 from .testutils import make_sourceframe_with_observations
 
@@ -25,8 +25,7 @@ def test_benchmark_iterate_frame_observations(benchmark, frame_db, nobs):
 
     # Benchmark iterating over the observations in the frame.
     def benchmark_case():
-        for _ in frame_db.iterate_observations(frame):
-            pass
+        frame_db.get_observations(frame)
 
     benchmark(benchmark_case)
 
@@ -40,7 +39,9 @@ def test_benchmark_store_observations(benchmark, frame_db, nobs):
     )
     src_frame = make_sourceframe_with_observations(nobs, healpixel=1, obscode="obs")
     yearmonth = frame_db._compute_year_month_str(src_frame)
-    observations = [Observation.from_srcobs(o) for o in src_frame.observations]
+    observations: ObservationsTable = ObservationsTable.from_srcobs(
+        src_frame.observations
+    )
 
     def benchmark_case():
         frame_db.store_observations(observations, "test_dataset", yearmonth)

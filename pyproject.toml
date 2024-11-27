@@ -27,32 +27,34 @@ classifiers = [
 ]
 
 dependencies = [
-    "adam_core>=0.2.3",
+    "adam_core>=0.2.5",
     "numpy",
     "numba",
-    "jaxlib==0.4.17",
-    "jax==0.4.17",
-    "sqlalchemy < 2",
+    "jaxlib",
+    "jax",
+    "sqlalchemy",
     "regex",
     "pandas",
     "healpy",
     "requests",
 ]
-
-[project.optional-dependencies]
-dev = [
+[dependency-groups]
+test = [
     "adam_assist",
     "pre-commit",
     "pytest",
     "black",
     "isort",
-    "pdm",
     "mypy",
     "pytest-cov",
     "pytest-benchmark",
     "pytest-doctestplus",
     "ruff",
     "astroquery",
+    "pytest-mock>=3.14.0",
+]
+dev = [
+    "ipython>=8.29.0",
 ]
 
 [project.urls]
@@ -64,7 +66,7 @@ precovery-index = "precovery.ingest:index"
 [tool.pdm.version]
 source = "scm"
 write_to = "precovery/_version.py"
-write_template = "__version__ = '{}'"
+write_template = '__version__ = "{}"'
 
 [tool.pytest.ini_options]
 python_functions = "test_*"

@@ -3,15 +3,15 @@ import os
 import shutil
 
 import numpy as np
+import numpy.testing as npt
 import pandas as pd
 import pytest
-from adam_core.orbits import Orbits
-from adam_core.propagator.adam_assist import ASSISTPropagator
+import quivr as qv
 
+from precovery.healpix_geom import radec_to_healpixel
 from precovery.ingest import index
-from precovery.main import precover
-
-from .testutils import requires_jpl_ephem_data
+from precovery.observation import ObservationsTable
+from precovery.precovery_db import PrecoveryDatabase
 
 SAMPLE_ORBITS_FILE = os.path.join(
     os.path.dirname(__file__), "data", "sample_orbits.parquet"
@@ -28,16 +28,10 @@ def test_db_dir():
     shutil.rmtree(out_dir)
 
 
-@requires_jpl_ephem_data
-def test_precovery(test_db_dir):
+def test_precovery_index(test_db_dir):
     """
-    Given a properly formatted csv file, ensure the observations are indexed properly
+    Test that frames and observations are being added to db and fs correctly.
     """
-    # Initialize orbits from sample orbits file
-    orbits = Orbits.from_parquet(SAMPLE_ORBITS_FILE)
-
-    # Load observations from csv files and index each one (one observation file
-    # per dataset)
     observation_files = glob.glob(
         os.path.join(TEST_OBSERVATIONS_DIR, "dataset_*", "*.csv")
     )
@@ -64,129 +58,70 @@ def test_precovery(test_db_dir):
             data_dir=os.path.join(
                 os.path.dirname(__file__), f"data/index/{dataset_id}/"
             ),
-            nside=16,
+            nside=32,
         )
+
     observations_df = pd.concat(observations_dfs, ignore_index=True)
-    observations_df.sort_values(
-        by=["mjd", "observatory_code"], inplace=True, ignore_index=True
+    observations_df.rename(columns={"obs_id": "id"}, inplace=True)
+    observations_df = observations_df.sort_values("exposure_mjd_mid")
+    input_observations_healpix = radec_to_healpixel(
+        observations_df["ra"], observations_df["dec"], nside=32
     )
+    observations_df["healpix"] = input_observations_healpix
 
-    # For each sample orbit, validate we get all the observations we planted
-    for orbit in orbits:
-        orbit_name = orbit.object_id[0].as_py()
-        matches, misses = precover(
-            orbit,
-            test_db_dir,
-            tolerance=1 / 3600,
-            window_size=1,
-            propagator_class=ASSISTPropagator,
+    # Read in the frames and observations from the database
+    db = PrecoveryDatabase.from_dir(test_db_dir, mode="r")
+    frames = db.frames.idx.all_frames()
+    frames = frames.sort_by("exposure_mjd_mid")
+
+    # We should have a frame for every unique
+    # combination of obscode, exposure_mjd_mid and healpix
+
+    # generate unique grouping of healpix, obscode, exposure_mjd_mid
+    # in the observation dataframe
+    observation_grouping = observations_df.groupby(
+        ["healpix", "observatory_code", "exposure_mjd_mid"]
+    )
+    assert len(frames) == len(observation_grouping)
+
+    all_observations: ObservationsTable = ObservationsTable.empty()
+    for frame in frames:
+        frame_observations = db.frames.get_observations(frame)
+
+        # Check that the frame observations contains the same list
+        # as those in the observation dataframe with matching
+        # healpix, obscode, exposure_mjd_mid
+        observation_subset = observation_grouping.get_group(
+            (
+                frame.healpixel[0].as_py(),
+                frame.obscode[0].as_py(),
+                frame.exposure_mjd_mid[0].as_py(),
+            )
         )
 
-        object_observations = observations_df[
-            observations_df["object_id"] == orbit.object_id[0].as_py()
-        ]
-        assert len(matches) == len(object_observations)
-        assert len(matches) > 0
+        for column in ["ra", "dec", "ra_sigma", "dec_sigma", "mag", "mag_sigma"]:
+            npt.assert_array_equal(
+                frame_observations.table[column].to_numpy(),
+                observation_subset[column].values,
+            )
 
-        matches_df = matches.to_dataframe()
-
-        matches_df.rename(
-            columns={
-                "ra_deg": "ra",
-                "dec_deg": "dec",
-                "ra_sigma_arcsec": "ra_sigma",
-                "dec_sigma_arcsec": "dec_sigma",
-                "observation_id": "obs_id",
-                "obscode": "observatory_code",
-            },
-            inplace=True,
+        db_ids = frame_observations.table["id"].to_numpy().astype(str)
+        npt.assert_array_equal(
+            db_ids,
+            observation_subset["id"].values,
         )
 
-        matches_df["ra_sigma"] /= 3600.0
-        matches_df["dec_sigma"] /= 3600.0
-        matches_df["mjd"] = matches.time.mjd().to_pylist()
-        matches_df["exposure_mjd_start"] = matches.exposure_time_start.mjd().to_pylist()
-        matches_df["exposure_mjd_mid"] = matches.exposure_time_mid.mjd().to_pylist()
+        db_mjds = frame_observations.time.mjd().to_numpy()
+        npt.assert_array_equal(
+            db_mjds,
+            observation_subset["mjd"].values,
+        )
 
-        # We are assuming that both the test observation file and the results
-        # are sorted by mjd
-        matches_df.sort_values(by=["mjd"], inplace=True)
+        all_observations = qv.concatenate([all_observations, frame_observations])
 
-        for col in [
-            "mjd",
-            "ra",
-            "ra_sigma",
-            "dec",
-            "dec_sigma",
-            "mag",
-            "mag_sigma",
-            "exposure_mjd_start",
-            "exposure_mjd_mid",
-            "exposure_duration",
-            # "filter", # can't do string comparisons this way
-        ]:
-            np.testing.assert_array_equal(
-                object_observations[col].values,
-                matches_df[col].values,
-                err_msg=f"Column {col} does not match for {orbit_name}.",
-            )
+    assert len(all_observations) == len(observations_df)
 
-        # Test that the observation_id, exposure_id, observatory_code, and filter
-        # are identical to the test observations
-        for col in [
-            "obs_id",
-            "exposure_id",
-            "observatory_code",
-            "filter",
-        ]:
-            assert (matches_df[col].values == object_observations[col].values).all()
-
-        # Test that the predicted location of each object in each exposure is
-        # close to the actual location of the object in that exposure (we did
-        # not add any errors to the test observations)
-        # Note that the predicted location is sensitive to accumulating float point arithmetic
-        # errors since orbits in precovery are propagated, then stored, then propagated again, and so on.
-        # The number of propagations will have an effect on the consistency of the predicted
-        # location when compared to the single propagation required to create the test observations.
-        # Additionally, the observations in the test data are not defined at the same as the midpoint of
-        # the exposure. Internally precovery will use 2-body propagation to adjust the predicted location
-        # of the orbit within the frame in the cases, which will also introduce some error.
-        try:
-            np.testing.assert_allclose(
-                matches_df[["pred_ra_deg", "pred_dec_deg"]].values,
-                object_observations[["ra", "dec"]].values,
-                atol=MILLIARCSECOND,
-                rtol=0,
-                err_msg=(
-                    f"Predicted location does match actual location for {orbit_name}.",
-                ),
-            )
-
-            # Test that the calculated distance is within 1 millarcsecond (need additional order of magnitude
-            # tolerance to account for errors added in quadrature)
-            np.testing.assert_allclose(
-                matches_df["distance_arcsec"].values / 3600.0,
-                np.zeros(len(matches), dtype=np.float64),
-                atol=MILLIARCSECOND,
-                rtol=0,
-                err_msg=f"Distance for {orbit_name} is not within tolerance.",
-            )
-
-        except AssertionError as e:
-            os.makedirs(RESULTS_DIR, exist_ok=True)
-            result_file = os.path.join(RESULTS_DIR, f"results_{orbit_name}.csv")
-            matches_df.to_csv(result_file, float_format="%.16f", index=False)
-
-            object_observations_file = os.path.join(
-                RESULTS_DIR,
-                f"object_observations_{orbit_name}.csv",
-            )
-            object_observations.to_csv(
-                object_observations_file, float_format="%.16f", index=False
-            )
-
-            print(f"Results written to: {result_file}")
-            print(f"Object observations written to: {object_observations_file}")
-            raise e
-        # running these takes a long time. For now, we will test only one orbit
-        break
+    # Make sure we have all the datasets
+    all_datasets = db.all_datasets()
+    input_datasets = set(observations_df["dataset_id"].unique())
+    assert all_datasets == input_datasets

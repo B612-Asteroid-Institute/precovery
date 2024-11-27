@@ -1,10 +1,12 @@
 import sqlite3 as sql
 
 import numpy as np
+import pyarrow.compute as pc
 import pytest
+from adam_core.time import Timestamp
 from astropy.time import Time
 
-from precovery.frame_db import FrameDB, FrameIndex
+from precovery.frame_db import FrameDB, FrameIndex, WindowCenters
 from precovery.sourcecatalog import SourceFrame, SourceObservation, bundle_into_frames
 
 from .testutils import make_sourceframe_with_observations, make_sourceobs
@@ -217,20 +219,15 @@ def test_add_frames(frame_db):
     frame_db.add_frames("test_dataset", [frame1, frame2, frame3])
 
     # Okay, setup is done - assertions begin here.
-    stored_frames = list(frame_db.idx.all_frames_by_key())
+    stored_frames = frame_db.idx.all_frames()
     assert len(stored_frames) == 3
 
     # Find frame 1
-    stored_frame_1 = None
-    for key, frames in stored_frames:
-        for f in frames:
-            if f.exposure_id == "e1" and f.healpixel == 1:
-                stored_frame_1 = f
-                break
-    assert stored_frame_1 is not None, "frame1 was not stored, or not retrieved"
+    stored_frame_1 = stored_frames.select("exposure_id", "e1").select("healpixel", 1)
+    assert len(stored_frame_1) == 1, "frame1 was not stored, or not retrieved"
 
     # Get associated observations
-    stored_obs1 = list(frame_db.iterate_observations(stored_frame_1))
+    stored_obs1 = frame_db.get_observations(stored_frame_1)
     assert len(stored_obs1) == 2
 
 
@@ -284,10 +281,10 @@ def test_add_frames_optional(frame_db):
 
     # Let's extract the observation and check that the nans were
     # correctly stored.
-    for obs in frame_db.iterate_observations(frame_stored[0]):
-        assert np.isnan(obs.ra_sigma)
-        assert np.isnan(obs.dec_sigma)
-        assert np.isnan(obs.mag_sigma)
+    obs = frame_db.get_observations(frame_stored[0])
+    assert np.isnan(obs.ra_sigma)
+    assert np.isnan(obs.dec_sigma)
+    assert np.isnan(obs.mag_sigma)
 
 
 def test_add_frames_dedupes_sorted_exposures(frame_db):
@@ -374,21 +371,77 @@ def test_get_frames_for_ra_dec(frame_db):
     assert len(results) == 1
 
 
+def test_window_centers(frame_db):
+    """
+    Ensure we are getting the correct number and size of window centers
+    """
+    # Create one observation per week over 3 months
+    observation_times = np.arange(23.3, 110, 7)
+
+    # Delete all times between 50 and 70 to provide a gap to test
+    observation_times = observation_times[
+        np.logical_or(observation_times < 50, observation_times > 70)
+    ]
+    obs = [
+        make_sourceobs(mjd=obs_time, exposure_duration=1)
+        for obs_time in observation_times
+    ]
+    frames = list(bundle_into_frames(obs))
+    frame_db.add_dataset("test_dataset")
+    frame_db.add_frames("test_dataset", frames)
+
+    window_centers_7 = frame_db.idx.window_centers(
+        start_mjd=0, end_mjd=200, window_size_days=7
+    )
+    assert len(window_centers_7) == 10
+    assert window_centers_7.time.mjd().to_pylist() == [
+        24.5,
+        31.5,
+        38.5,
+        45.5,
+        73.5,
+        80.5,
+        87.5,
+        94.5,
+        101.5,
+        108.5,
+    ]
+
+    window_centers_2 = frame_db.idx.window_centers(
+        start_mjd=0, end_mjd=200, window_size_days=2
+    )
+    assert len(window_centers_2) == 10
+    assert window_centers_2.time.mjd().to_pylist() == [
+        23.0,
+        31.0,
+        37.0,
+        45.0,
+        73.0,
+        79.0,
+        87.0,
+        93.0,
+        101.0,
+        107.0,
+    ]
+
+    window_centers_30 = frame_db.idx.window_centers(
+        start_mjd=0, end_mjd=200, window_size_days=30
+    )
+    assert len(window_centers_30) == 4
+    assert window_centers_30.time.mjd().to_pylist() == [15.0, 45.0, 75.0, 105.0]
+
+
 def test_window_centers_dataset_filter(frame_db):
     mjd = 10
     frames_1 = [
-        make_sourceframe_with_observations(
-            obscode="obs1", n_observations=1, exposure_mjd_mid=mjd
-        )
+        make_sourceframe_with_observations(obscode="obs1", n_observations=1, mjd=mjd)
     ]
     dataset_1 = "test_dataset_1"
     frame_db.add_dataset(dataset_1)
     frame_db.add_frames(dataset_1, frames_1)
 
     frames_2 = [
-        make_sourceframe_with_observations(
-            obscode="obs2", n_observations=1, exposure_mjd_mid=mjd
-        )
+        make_sourceframe_with_observations(obscode="obs2", n_observations=1, mjd=mjd)
     ]
     dataset_2 = "test_dataset_2"
     frame_db.add_dataset(dataset_2)
@@ -398,14 +451,9 @@ def test_window_centers_dataset_filter(frame_db):
     centers = frame_db.idx.window_centers(
         start_mjd=mjd - 1, end_mjd=mjd + 1, window_size_days=1
     )
-    print(centers)
 
     assert len(centers) == 2
-    seen_obscodes = set()
-    for obscode, _ in centers:
-        seen_obscodes.add(obscode)
-
-    assert seen_obscodes == {"obs1", "obs2"}
+    assert set(pc.unique(centers.obscode).to_pylist()) == {"obs1", "obs2"}
 
     # When using a dataset filter, we should return windows for only
     # the specified datasets
@@ -417,11 +465,7 @@ def test_window_centers_dataset_filter(frame_db):
     )
 
     assert len(centers) == 1
-    seen_obscodes = set()
-    for obscode, _ in centers:
-        seen_obscodes.add(obscode)
-
-    assert seen_obscodes == {"obs1"}
+    assert set(pc.unique(centers.obscode).to_pylist()) == {"obs1"}
 
 
 def test_propagation_targets_dataset_filter(frame_db):
@@ -431,7 +475,7 @@ def test_propagation_targets_dataset_filter(frame_db):
             exposure_id="exp1",
             obscode="obs1",
             n_observations=1,
-            exposure_mjd_mid=mjd,
+            mjd=mjd,
             healpixel=1,
         )
     ]
@@ -446,26 +490,25 @@ def test_propagation_targets_dataset_filter(frame_db):
             exposure_id="exp2",
             obscode="obs1",
             n_observations=1,
-            exposure_mjd_mid=mjd,
+            mjd=mjd,
             healpixel=2,
         )
     ]
     dataset_2 = "test_dataset_2"
     frame_db.add_dataset(dataset_2)
     frame_db.add_frames(dataset_2, frames_2)
-
-    targets = list(
-        frame_db.idx.propagation_targets(
-            start_mjd=mjd - 1,
-            end_mjd=mjd + 1,
-            obscode="obs1",
-            datasets={dataset_1},
-        )
+    window: WindowCenters = WindowCenters.from_kwargs(
+        obscode=["obs1"],
+        time=Timestamp.from_mjd([mjd], scale="utc"),
+        window_size_days=[1],
+    )
+    targets = frame_db.idx.propagation_targets(
+        window,
+        datasets={dataset_1},
     )
 
     assert len(targets) == 1
-    target_healpixels = targets[0][1]
-    assert target_healpixels == {1}
+    assert targets.healpixel.to_pylist() == [1]
 
 
 def test_get_frames_dataset_filter(frame_db):
@@ -475,7 +518,7 @@ def test_get_frames_dataset_filter(frame_db):
             exposure_id="exp1",
             obscode="obs1",
             n_observations=1,
-            exposure_mjd_mid=mjd,
+            mjd=mjd,
             healpixel=1,
         )
     ]
@@ -490,7 +533,7 @@ def test_get_frames_dataset_filter(frame_db):
             exposure_id="exp2",
             obscode="obs1",
             n_observations=1,
-            exposure_mjd_mid=mjd,
+            mjd=mjd,
             healpixel=1,
         )
     ]
@@ -498,14 +541,237 @@ def test_get_frames_dataset_filter(frame_db):
     frame_db.add_dataset(dataset_2)
     frame_db.add_frames(dataset_2, frames_2)
 
-    returned_frames = list(
-        frame_db.idx.get_frames(
-            obscode="obs1",
-            mjd=mjd,
-            healpixel=1,
-            datasets={dataset_1},
-        )
+    returned_frames = frame_db.idx.get_frames(
+        obscode="obs1",
+        mjd=mjd,
+        healpixel=1,
+        datasets={dataset_1},
     )
 
     assert len(returned_frames) == 1
-    assert returned_frames[0].dataset_id == dataset_1
+    assert returned_frames.dataset_id.to_pylist() == [dataset_1]
+
+
+def test_get_frames_by_id(frame_db):
+    mjd = 10
+    frames = [
+        make_sourceframe_with_observations(
+            exposure_id="exp1",
+            obscode="obs1",
+            n_observations=1,
+            mjd=mjd,
+            healpixel=1,
+        ),
+        make_sourceframe_with_observations(
+            exposure_id="exp2",
+            obscode="obs1",
+            n_observations=1,
+            mjd=mjd,
+            healpixel=1,
+        ),
+    ]
+    dataset = "test_dataset"
+    frame_db.add_dataset(dataset)
+    frame_db.add_frames(dataset, frames)
+
+    frames_in_db = frame_db.idx.all_frames()
+    frame_1_id = frames_in_db.id[0].as_py()
+
+    returned_frames = frame_db.idx.get_frames_by_id([frame_1_id])
+
+    assert len(returned_frames) == 1
+    assert returned_frames.dataset_id.to_pylist() == [dataset]
+
+
+def test_n_frames(frame_db):
+    mjd = 10
+    frames = [
+        make_sourceframe_with_observations(
+            exposure_id="exp1",
+            obscode="obs1",
+            n_observations=1,
+            mjd=mjd,
+            healpixel=1,
+        ),
+        make_sourceframe_with_observations(
+            exposure_id="exp2",
+            obscode="obs1",
+            n_observations=1,
+            mjd=mjd,
+            healpixel=1,
+        ),
+    ]
+    dataset = "test_dataset"
+    frame_db.add_dataset(dataset)
+    frame_db.add_frames(dataset, frames)
+
+    assert frame_db.idx.n_frames() == 2
+
+    # Add a frame to a different dataset
+    frames = [
+        make_sourceframe_with_observations(
+            exposure_id="exp3",
+            obscode="obs1",
+            n_observations=1,
+            mjd=mjd,
+            healpixel=1,
+        ),
+    ]
+    dataset = "test_dataset_2"
+    frame_db.add_dataset(dataset)
+    frame_db.add_frames(dataset, frames)
+
+    assert frame_db.idx.n_frames() == 3
+
+
+def test_n_bytes(frame_db):
+    mjd = 10
+    frames = [
+        make_sourceframe_with_observations(
+            exposure_id="exp1",
+            obscode="obs1",
+            n_observations=1,
+            mjd=mjd,
+            healpixel=1,
+        ),
+        make_sourceframe_with_observations(
+            exposure_id="exp2",
+            obscode="obs1",
+            n_observations=1,
+            mjd=mjd,
+            healpixel=1,
+        ),
+    ]
+    dataset = "test_dataset"
+    frame_db.add_dataset(dataset)
+    frame_db.add_frames(dataset, frames)
+
+    assert frame_db.idx.n_bytes() > 0
+
+
+def test_n_bytes_empty(frame_db):
+    assert frame_db.idx.n_bytes() == 0
+
+
+def test_n_unique_frames(frame_db):
+    mjd = 10
+    frames = [
+        make_sourceframe_with_observations(
+            exposure_id="exp1",
+            obscode="obs1",
+            n_observations=1,
+            mjd=mjd,
+            healpixel=1,
+        ),
+        make_sourceframe_with_observations(
+            exposure_id="exp2",
+            obscode="obs1",
+            n_observations=1,
+            mjd=mjd,
+            healpixel=1,
+        ),
+    ]
+    dataset = "test_dataset"
+    frame_db.add_dataset(dataset)
+    frame_db.add_frames(dataset, frames)
+
+    assert (
+        frame_db.idx.n_unique_frames() == 1
+    ), "Frames with identical obscode, time, healpix should only count as one"
+
+    # Add a frame to a different dataset
+    frames = [
+        make_sourceframe_with_observations(
+            exposure_id="exp3",
+            obscode="obs1",
+            n_observations=1,
+            mjd=mjd,
+            healpixel=2,
+        ),
+    ]
+    dataset = "test_dataset_2"
+    frame_db.add_dataset(dataset)
+    frame_db.add_frames(dataset, frames)
+
+    assert frame_db.idx.n_unique_frames() == 2
+
+
+def test_mjd_bounds(frame_db):
+    mjd = 10
+    frames = [
+        make_sourceframe_with_observations(
+            exposure_id="exp1",
+            obscode="obs1",
+            n_observations=1,
+            mjd=mjd,
+            healpixel=1,
+        ),
+        make_sourceframe_with_observations(
+            exposure_id="exp2",
+            obscode="obs1",
+            n_observations=1,
+            mjd=mjd,
+            healpixel=1,
+        ),
+    ]
+    dataset = "test_dataset"
+    frame_db.add_dataset(dataset)
+    frame_db.add_frames(dataset, frames)
+
+    assert frame_db.idx.mjd_bounds() == (10, 10)
+
+    # Add a frame to a different dataset
+    frames = [
+        make_sourceframe_with_observations(
+            exposure_id="exp3",
+            obscode="obs1",
+            n_observations=1,
+            mjd=mjd + 100,
+            healpixel=2,
+        ),
+    ]
+    dataset = "test_dataset_2"
+    frame_db.add_dataset(dataset)
+    frame_db.add_frames(dataset, frames)
+
+    assert frame_db.idx.mjd_bounds() == (10, 110)
+
+
+def test_mjd_bounds_dataset_filter(frame_db):
+    mjd = 10
+    frames = [
+        make_sourceframe_with_observations(
+            exposure_id="exp1",
+            obscode="obs1",
+            n_observations=1,
+            mjd=mjd,
+            healpixel=1,
+        ),
+        make_sourceframe_with_observations(
+            exposure_id="exp2",
+            obscode="obs1",
+            n_observations=1,
+            mjd=mjd,
+            healpixel=1,
+        ),
+    ]
+    dataset = "test_dataset"
+    frame_db.add_dataset(dataset)
+    frame_db.add_frames(dataset, frames)
+
+    # Add a frame to a different dataset
+    frames = [
+        make_sourceframe_with_observations(
+            exposure_id="exp3",
+            obscode="obs1",
+            n_observations=1,
+            mjd=mjd + 100,
+            healpixel=2,
+        ),
+    ]
+    other_dataset = "test_dataset_2"
+    frame_db.add_dataset(other_dataset)
+    frame_db.add_frames(other_dataset, frames)
+
+    assert frame_db.idx.mjd_bounds(datasets={dataset}) == (10, 10)
+    assert frame_db.idx.mjd_bounds(datasets={other_dataset}) == (110, 110)

@@ -24,6 +24,9 @@ def frame_index(tmp_path):
 @pytest.fixture
 def frame_db(tmp_path, frame_index):
     data_root = tmp_path / "data"
+    # remove the folder first to avoid any conflicts
+    if os.path.exists(data_root):
+        os.removedirs(name=data_root)
     os.makedirs(name=data_root)
     fdb = FrameDB(idx=frame_index, data_root=str(data_root), mode="w")
     yield fdb
@@ -32,7 +35,7 @@ def frame_db(tmp_path, frame_index):
 
 @pytest.fixture
 def precovery_db(tmp_path, frame_db):
-    yield PrecoveryDatabase.from_dir(str(tmp_path), mode="w", create=True)
+    yield PrecoveryDatabase.create(str(tmp_path), nside=32)
 
 
 @pytest.fixture
