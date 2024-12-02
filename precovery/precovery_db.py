@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from typing import Optional, Tuple, Type
 
 import numpy as np
@@ -380,34 +381,25 @@ def find_healpixel_matches(
     PropagationTargets
         Propagation targets that match the ephemeris
     """
-    unique_target_times: Timestamp = propagation_targets.time.unique()
-    filtered_targets = GenericFrame.empty()
-    for target_time in unique_target_times:
-        time_propagation_targets = propagation_targets.apply_mask(
-            propagation_targets.time.equals(target_time)
-        )
-        assert len(time_propagation_targets) > 0, "No matching targets found"
-        time_matching_ephems_mask = ephems.coordinates.time.equals(
-            target_time, precision="ms"
-        )
-        time_matching_ephems = ephems.apply_mask(time_matching_ephems_mask)
-        assert (
-            len(time_matching_ephems) > 0
-        ), "No matching ephemeris found for target time"
+    # Sort them both by time
+    propagation_targets = propagation_targets.sort_by(["time.days", "time.nanos"])
+    ephems = ephems.sort_by(["coordinates.time.days", "coordinates.time.nanos"])
 
-        ephem_healpixels = pa.array(
-            radec_to_healpixel(
-                ra=time_matching_ephems.coordinates.lon.to_numpy(),
-                dec=time_matching_ephems.coordinates.lat.to_numpy(),
-                nside=nside,
-            ),
-            type=pa.int64(),
-        )
+    # quickly check to make sure times are equal
+    assert pc.all(
+        propagation_targets.time.equals(ephems.coordinates.time, precision="ms")
+    ).as_py(), "Propagation targets and ephemeris must have matching times"
 
-        matching_targets = time_propagation_targets.where(
-            pc.is_in(time_propagation_targets.healpixel, ephem_healpixels)
-        )
-        filtered_targets = qv.concatenate([filtered_targets, matching_targets])
+    # Calculate the healpixels for the ephemeris
+    ephem_healpixels = radec_to_healpixel(
+        ephems.coordinates.lon.to_numpy(),
+        ephems.coordinates.lat.to_numpy(),
+        nside=nside,
+    )
+
+    # Find the matching healpixels
+    mask = pc.equal(propagation_targets.healpixel, ephem_healpixels)
+    filtered_targets = propagation_targets.apply_mask(mask)
 
     return filtered_targets
 
@@ -724,14 +716,12 @@ class PrecoveryDatabase:
             )
             return PrecoveryCandidates.empty(), FrameCandidates.empty()
 
-        times = propagation_targets.time.unique()
+        times = propagation_targets.time
 
         # create our observers
         observers = Observers.from_code(obscode, times)
-
         ## first propagate with 2_body
         propagated_orbits = propagate_2body(orbit, times)
-
         # hotfix: rescale the times back from propagated_orbits
         # this behavior should be fixed in adam_core, to always return
         # the timescale of the submitted times
@@ -739,11 +729,8 @@ class PrecoveryDatabase:
             "coordinates.time", propagated_orbits.coordinates.time.rescale("utc")
         )
 
-        assert propagated_orbits.coordinates.time.equals(times)
-
         # generate ephemeris
         ephems = generate_ephemeris_2body(propagated_orbits, observers)
-
         frames_to_check = find_healpixel_matches(
             propagation_targets, ephems, self.frames.healpix_nside
         )
@@ -862,6 +849,9 @@ class PrecoveryDatabase:
             matching_observations, matching_ephem = find_observation_matches(
                 observations, repeated_ephem, tolerance
             )
+
+        if len(matching_observations) == 0:
+            return PrecoveryCandidates.empty()
 
         candidates = candidates_from_ephem(matching_observations, matching_ephem, frame)
         return candidates

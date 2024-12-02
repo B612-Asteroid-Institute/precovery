@@ -27,7 +27,6 @@ classifiers = [
 ]
 
 dependencies = [
-    "adam_core>=0.2.5",
     "numpy",
     "numba",
     "jaxlib",
@@ -37,11 +36,11 @@ dependencies = [
     "pandas",
     "healpy",
     "requests",
+    "adam-core @ git+https://github.com/B612-Asteroid-Institute/adam_core@f843e60fd0434b5280803f4d7d6bd83222bbd77a",
 ]
 [dependency-groups]
 test = [
     "adam_assist",
-    "pre-commit",
     "pytest",
     "black",
     "isort",
@@ -52,9 +51,6 @@ test = [
     "ruff",
     "astroquery",
     "pytest-mock>=3.14.0",
-]
-dev = [
-    "ipython>=8.29.0",
 ]
 
 [project.urls]
@@ -82,9 +78,9 @@ lint = { composite = [
 fix = "ruff ./precovery --fix"
 typecheck = "mypy ./precovery"
 
-test = "pytest --benchmark-disable {args}"
+test = "pytest --benchmark-skip {args}"
 doctest = "pytest --doctest-plus --doctest-only"
-benchmark = "pytest --benchmark-only"
+benchmark = "pytest --benchmark-only --benchmark-cprofile=cumtime"
 coverage = "pytest --cov=precovery --cov-report=xml"
 
 [tool.pdm]

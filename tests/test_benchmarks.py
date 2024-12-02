@@ -78,3 +78,13 @@ def test_benchmark_propagate_orbit_2body(benchmark, sample_orbits, propagate_dis
         propagate_2body(orbit, times)
 
     benchmark(benchmark_case)
+
+
+@pytest.mark.benchmark(group="precovery")
+def test_benchmark_precovery_search(benchmark, precovery_db_with_data, sample_orbits):
+
+    orbit = sample_orbits[0]
+
+    def benchmark_case():
+        precovery_db_with_data.precover(orbit, tolerance=5 / 3600, window_size=7, propagator_class=ASSISTPropagator)
+    benchmark.pedantic(benchmark_case, iterations=1, rounds=1)

@@ -1,10 +1,19 @@
+import glob
 import os
 
+import numpy as np
+import pandas as pd
 import pytest
 from adam_core.orbits import Orbits
 
 from precovery.frame_db import FrameDB, FrameIndex
+from precovery.ingest import index
 from precovery.precovery_db import PrecoveryDatabase
+
+SAMPLE_ORBITS_FILE = os.path.join(
+    os.path.dirname(__file__), "data", "sample_orbits.parquet"
+)
+TEST_OBSERVATIONS_DIR = os.path.join(os.path.dirname(__file__), "data/index")
 
 
 @pytest.fixture
@@ -36,6 +45,42 @@ def frame_db(tmp_path, frame_index):
 @pytest.fixture
 def precovery_db(tmp_path, frame_db):
     yield PrecoveryDatabase.create(str(tmp_path), nside=32)
+
+
+@pytest.fixture
+def precovery_db_with_data(tmp_path):
+    observation_files = glob.glob(
+        os.path.join(TEST_OBSERVATIONS_DIR, "dataset_*", "*.csv")
+    )
+    observations_dfs = []
+    for observation_file in observation_files:
+        observations_df_i = pd.read_csv(
+            observation_file,
+            float_precision="round_trip",
+            dtype={
+                "dataset_id": str,
+                "observatory_code": str,
+                "filter": str,
+                "exposure_duration": np.float64,
+            },
+        )
+        observations_dfs.append(observations_df_i)
+
+        dataset_id = observations_df_i["dataset_id"].values[0]
+
+        index(
+            out_dir=tmp_path,
+            dataset_id=dataset_id,
+            dataset_name=dataset_id,
+            data_dir=os.path.join(
+                os.path.dirname(__file__), f"data/index/{dataset_id}/"
+            ),
+            nside=32,
+        )
+
+    # Read in the frames and observations from the database
+    db = PrecoveryDatabase.from_dir(tmp_path, mode="r")
+    return db
 
 
 @pytest.fixture
