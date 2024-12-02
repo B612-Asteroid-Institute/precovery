@@ -257,6 +257,7 @@ class FrameIndex:
             A table of healpixels and times.
 
         """
+        print(f"Selecting propagation targets for {window.obscode[0].as_py()} at {window.time.mjd()[0].as_py()}")
         assert len(window) == 1
         obscode = window.obscode[0].as_py()
         start_mjd = window.window_start().mjd()[0].as_py()
@@ -285,10 +286,13 @@ class FrameIndex:
             )
 
         rows = self.dbconn.execute(select_stmt).fetchall()
+        print(f"Found {len(rows)} rows")
         if len(rows) == 0:
             return GenericFrame.empty()
         # turn rows into columns
+        print(f"Turning rows into columns")
         times, healpixels = zip(*rows)
+        print(f"Returning")
         return GenericFrame.from_kwargs(
             time=Timestamp.from_mjd(times, scale="utc"),
             healpixel=healpixels,
