@@ -725,6 +725,7 @@ class PrecoveryDatabase:
         # create our observers
         observers = Observers.from_code(obscode, times)
         ## first propagate with 2_body
+        print("starting propagate_2body")
         propagated_orbits = propagate_2body(orbit, times)
         # hotfix: rescale the times back from propagated_orbits
         # this behavior should be fixed in adam_core, to always return
@@ -734,6 +735,7 @@ class PrecoveryDatabase:
         )
 
         # generate ephemeris
+        print("starting generate_ephemeris_2body")
         ephems = generate_ephemeris_2body(propagated_orbits, observers)
         logger.info("Finding healpixels")
         frames_to_check = find_healpixel_matches(
