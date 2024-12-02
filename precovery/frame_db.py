@@ -190,20 +190,11 @@ class FrameIndex:
                 sq.func.floor(
                     (self.frames.c.exposure_mjd_mid - start_mjd) / window_size_days
                 ).label("window_id"),
-                sq.func.min(self.frames.c.exposure_mjd_start).label("min_start"),
-                sq.func.max(
-                    self.frames.c.exposure_mjd_start
-                    + self.frames.c.exposure_duration / 86400
-                ).label("max_end"),
             )
             .where(
                 # Single condition for frames overlapping the full range
                 (self.frames.c.exposure_mjd_start < end_mjd)
-                & (
-                    self.frames.c.exposure_mjd_start
-                    + self.frames.c.exposure_duration / 86400
-                    >= start_mjd
-                )
+                & (self.frames.c.exposure_mjd_start >= start_mjd)
             )
             .group_by(
                 sq.func.floor(
@@ -219,8 +210,11 @@ class FrameIndex:
         # Execute the query
         rows = self.dbconn.execute(query).fetchall()
 
+        if len(rows) == 0:
+            return WindowCenters.empty()
+
         # Process the results
-        (obscodes, window_ids, min_starts, max_ends) = zip(*rows)
+        (obscodes, window_ids) = zip(*rows)
         window_starts = [
             start_mjd + window_id * window_size_days for window_id in window_ids
         ]
@@ -257,7 +251,9 @@ class FrameIndex:
             A table of healpixels and times.
 
         """
-        print(f"Selecting propagation targets for {window.obscode[0].as_py()} at {window.time.mjd()[0].as_py()}")
+        print(
+            f"Selecting propagation targets for {window.obscode[0].as_py()} at {window.time.mjd()[0].as_py()}"
+        )
         assert len(window) == 1
         obscode = window.obscode[0].as_py()
         start_mjd = window.window_start().mjd()[0].as_py()
