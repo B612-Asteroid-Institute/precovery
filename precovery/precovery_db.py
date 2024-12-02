@@ -442,7 +442,7 @@ def find_observation_matches(
     Tuple[ObservationsTable, Ephemeris]
         Observations and ephemeris that match within the given tolerance
     """
-    print("Finding observation matches")
+    logger.info("Finding observation matches")
     assert len(ephems) == len(
         observations
     ), "Ephemeris must be the same length as observations"
@@ -466,7 +466,7 @@ def find_observation_matches(
     mask = pc.less(distances, tolerance_deg)
     matching_observations = observations.apply_mask(mask)
     matching_ephems = ephems.apply_mask(mask)
-    print("Done finding matches")
+    logger.info("Done finding matches")
     return matching_observations, matching_ephems
 
 
@@ -656,7 +656,7 @@ class PrecoveryDatabase:
         """
         Find all observations that match orbit within a list of windows
         """
-        print(f"Checking {len(windows)} windows")
+        logger.info(f"Checking {len(windows)} windows")
         # Propagate the orbit with n-body to every window center
         assert len(orbit) == 1, "_check_windows only support one orbit for now"
         windows = windows.sort_by(["time.days", "time.nanos"])
@@ -705,7 +705,7 @@ class PrecoveryDatabase:
         propagator_class: Type[Propagator],
         datasets: Optional[set[str]],
     ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
-        print(f"Checking window {window.time.mjd()[0].as_py()}")
+        logger.info(f"Checking window {window.time.mjd()[0].as_py()}")
         assert len(window) == 1, "Use _check_windows for multiple windows"
         assert len(orbit) == 1, "_check_window only support one orbit for now"
         obscode = window.obscode[0].as_py()
@@ -721,7 +721,7 @@ class PrecoveryDatabase:
 
         times = propagation_targets.time
 
-        print(f"Window 2 body prop and ephemeris start")
+        logger.info(f"Window 2 body prop and ephemeris start")
         # create our observers
         observers = Observers.from_code(obscode, times)
         ## first propagate with 2_body
@@ -735,11 +735,11 @@ class PrecoveryDatabase:
 
         # generate ephemeris
         ephems = generate_ephemeris_2body(propagated_orbits, observers)
-        print("Finding healpixels")
+        logger.info("Finding healpixels")
         frames_to_check = find_healpixel_matches(
             propagation_targets, ephems, self.frames.healpix_nside
         )
-        print(f"Found {len(frames_to_check)} frames to check")
+        logger.info(f"Found {len(frames_to_check)} frames to check")
         candidates = PrecoveryCandidates.empty()
         frame_candidates = FrameCandidates.empty()
         for frame in frames_to_check:
@@ -770,9 +770,9 @@ class PrecoveryDatabase:
         Deeply inspect all frames that match the given obscode, mjd, and healpix to
         see if they contain observations which match the ephemeris.
         """
-        print(f"Starting check frames with {len(generic_frames)} frames")
+        logger.info(f"Starting check frames with {len(generic_frames)} frames")
         frames = HealpixFrame.empty()
-        print("Getting the actual frames")
+        logger.info("Getting the actual frames")
         for generic_frame in generic_frames:
             frames = qv.concatenate(
                 [
@@ -785,8 +785,8 @@ class PrecoveryDatabase:
                     ),
                 ]
             )
-        print(f"Done fetching {len(frames)} frames")
-        print(f"Generating n-body frame ephemeris")
+        logger.info(f"Done fetching {len(frames)} frames")
+        logger.info(f"Generating n-body frame ephemeris")
         unique_frame_times = frames.exposure_mid_timestamp().unique()
         observers = Observers.from_code(obscode, unique_frame_times)
         # Compute the position of the ephem carefully.
@@ -794,7 +794,7 @@ class PrecoveryDatabase:
         ephemeris = propagator.generate_ephemeris(orbit, observers)
         precovery_candidates = PrecoveryCandidates.empty()
         frame_candidates = FrameCandidates.empty()
-        print("Matching the frames")
+        logger.info("Matching the frames")
         for f in frames:
             matching_ephem = ephemeris.apply_mask(
                 ephemeris.coordinates.time.equals(
@@ -832,21 +832,21 @@ class PrecoveryDatabase:
         """
         Find all sources in a single frame which match ephem.
         """
-        print(f"Finding matches in frame {frame.healpixel[0].as_py()}")
+        logger.info(f"Finding matches in frame {frame.healpixel[0].as_py()}")
         logger.debug("checking frame: %s", frame)
         assert len(frame_ephem) == 1, "ephem should have only one entry"
 
-        print("Getting observations")
+        logger.info("Getting observations")
         # Gather all observations.
         observations: ObservationsTable = self.frames.get_observations(frame)
-        print("Done getting observations")
+        logger.info("Done getting observations")
         # Check if the observations have per-observation MJDs.
         # If so we use 2 body to generate unique ephemeris for each
         if len(observations.time.unique()) > 1:
-            print(
+            logger.info(
                 f"{frame} has {len(observations.time.unique())} unique obs times"
             )
-            print("Using per-observation ephem")
+            logger.info("Using per-observation ephem")
             per_obs_ephem = generate_ephem_for_per_obs_timestamps(
                 orbit, observations, frame.obscode, propagator
             )
