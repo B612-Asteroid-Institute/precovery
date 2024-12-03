@@ -80,7 +80,7 @@ typecheck = "mypy ./precovery"
 
 test = "pytest --benchmark-skip {args}"
 doctest = "pytest --doctest-plus --doctest-only"
-benchmark = "pytest --benchmark-only --benchmark-cprofile=cumtime"
+benchmark = "pytest --benchmark-only {args}"
 coverage = "pytest --cov=precovery --cov-report=xml"
 
 [tool.pdm]

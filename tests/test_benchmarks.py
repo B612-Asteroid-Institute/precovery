@@ -81,10 +81,18 @@ def test_benchmark_propagate_orbit_2body(benchmark, sample_orbits, propagate_dis
 
 
 @pytest.mark.benchmark(group="precovery")
-def test_benchmark_precovery_search(benchmark, precovery_db_with_data, sample_orbits):
+@pytest.mark.parametrize("max_processes", [1, 8])
+def test_benchmark_precovery_search(benchmark, precovery_db_with_data, sample_orbits, max_processes):
 
     orbit = sample_orbits[0]
 
     def benchmark_case():
-        precovery_db_with_data.precover(orbit, tolerance=5 / 3600, window_size=7, propagator_class=ASSISTPropagator)
+        precovery_db_with_data.precover(
+            orbit,
+            tolerance=5 / 3600,
+            window_size=7,
+            propagator_class=ASSISTPropagator,
+            max_processes=max_processes,
+        )
+
     benchmark.pedantic(benchmark_case, iterations=1, rounds=1)

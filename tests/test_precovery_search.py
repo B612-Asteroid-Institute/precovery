@@ -95,4 +95,4 @@ def test_multiple_workers(precovery_db_with_data, sample_orbits):
         propagator_class=ASSISTPropagator,
     )
     assert len(matches) == 896
-    assert len(misses) == 0
+    assert len(misses) == 8

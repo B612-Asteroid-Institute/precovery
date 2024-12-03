@@ -26,6 +26,7 @@ def precover_worker(
     allow_version_mismatch: bool = False,
     datasets: Optional[set[str]] = None,
     propagator_class: Optional[Type[Propagator]] = None,
+    max_processes: Optional[int] = None,
 ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
     """
     Wraps the precover function to return the orbit_id for mapping.
@@ -46,6 +47,7 @@ def precover_worker(
         window_size=window_size,
         datasets=datasets,
         propagator_class=propagator_class,
+        max_processes=max_processes,
     )
 
     return (precovery_candidates, frame_candidates)

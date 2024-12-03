@@ -7,6 +7,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import quivr as qv
+import ray
 from adam_core.coordinates import CoordinateCovariances
 from adam_core.coordinates.origin import Origin
 from adam_core.coordinates.residuals import Residuals
@@ -18,6 +19,7 @@ from adam_core.observers import Observers
 from adam_core.orbits import Orbits
 from adam_core.orbits.ephemeris import Ephemeris
 from adam_core.propagator import Propagator
+from adam_core.ray_cluster import initialize_use_ray
 from adam_core.time import Timestamp
 
 try:
@@ -468,6 +470,99 @@ def find_observation_matches(
     return matching_observations, matching_ephems
 
 
+def check_window(
+    db_dir: str,
+    window: WindowCenters,
+    orbit: Orbits,
+    tolerance: float,
+    propagator_class: Type[Propagator],
+    datasets: Optional[set[str]] = None,
+) -> Tuple[PrecoveryCandidates, FrameCandidates]:
+    """
+    Check a single window for precovery candidates
+
+    Parameters
+    ----------
+    db_dir : str
+        Directory of the database
+    window : WindowCenters
+        Window to check
+    orbit : Orbits
+        Orbit to propagate
+    tolerance : float
+        Tolerance in degrees for matching
+    propagator_class : Type[Propagator]
+        Propagator class to use for propagation
+    datasets : Optional[set[str]], optional
+        Datasets to consider, by default None
+
+    Returns
+    -------
+    Tuple[PrecoveryCandidates, FrameCandidates]
+        Precovery candidates and frame candidates
+    """
+    logger.debug(f"Checking window {window.time.mjd()[0].as_py()}")
+    assert len(window) == 1, "Use _check_windows for multiple windows"
+    assert len(orbit) == 1, "_check_window only support one orbit for now"
+    db = PrecoveryDatabase.from_dir(db_dir, mode="r")
+    obscode = window.obscode[0].as_py()
+    propagation_targets = db.frames.idx.propagation_targets(
+        window,
+        datasets,
+    )
+    if len(propagation_targets) == 0:
+        logger.debug(
+            f"No propagation targets found for window {window.window_start().mjd()[0].as_py()} to {window.window_end().mjd()[0].as_py()}"
+        )
+        return PrecoveryCandidates.empty(), FrameCandidates.empty()
+
+    times = propagation_targets.time
+
+    # First make sure our orbit it n-body propagated to the window center
+    orbit = orbit.set_column(
+        "coordinates.time", orbit.coordinates.time.rescale("utc")
+    )
+    if not(pc.all(orbit.coordinates.time.equals(window.time, precision="ms")).as_py()):
+        propagator = propagator_class()
+        orbit = propagator.propagate_orbits(orbit, window.time)
+
+    # create our observers from the individual frame times
+    observers = Observers.from_code(obscode, times)
+    ## first propagate with 2_body
+    propagated_orbits = propagate_2body(orbit, times)
+    # hotfix: rescale the times back from propagated_orbits
+    # this behavior should be fixed in adam_core, to always return
+    # the timescale of the submitted times
+    propagated_orbits = propagated_orbits.set_column(
+        "coordinates.time", propagated_orbits.coordinates.time.rescale("utc")
+    )
+
+    # generate ephemeris
+    ephems = generate_ephemeris_2body(propagated_orbits, observers)
+    frames_to_check = find_healpixel_matches(
+        propagation_targets, ephems, db.frames.healpix_nside
+    )
+    logger.debug(f"Found {len(frames_to_check)} frames to check")
+    candidates = PrecoveryCandidates.empty()
+    frame_candidates = FrameCandidates.empty()
+    for frame in frames_to_check:
+        candidates_healpixel, frame_candidates_healpixel = db._check_frames(
+            orbit=orbit,
+            generic_frames=frame,
+            obscode=obscode,
+            tolerance=tolerance,
+            datasets=datasets,
+            propagator_class=propagator_class,
+        )
+        candidates = qv.concatenate([candidates, candidates_healpixel])
+        frame_candidates = qv.concatenate(
+            [frame_candidates, frame_candidates_healpixel]
+        )
+    return candidates, frame_candidates
+
+
+check_window_remote = ray.remote(check_window)
+
 class PrecoveryDatabase:
     def __init__(self, frames: FrameDB, directory: str, config: Config = DefaultConfig):
         self.frames = frames
@@ -552,6 +647,7 @@ class PrecoveryDatabase:
         window_size: int = 7,
         datasets: Optional[set[str]] = None,
         propagator_class: Optional[Type[Propagator]] = None,
+        max_processes: Optional[int] = None,
     ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
         """
         Find observations which match orbit in the database. Observations are
@@ -635,6 +731,7 @@ class PrecoveryDatabase:
                 tolerance,
                 propagator_class,
                 datasets=datasets,
+                max_processes=max_processes,
             )
             candidates = qv.concatenate([candidates, candidates_obscode])
             frame_candidates = qv.concatenate(
@@ -651,6 +748,7 @@ class PrecoveryDatabase:
         tolerance: float,
         propagator_class: Type[Propagator],
         datasets: Optional[set[str]] = None,
+        max_processes: Optional[int] = None,
     ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
         """
         Find all observations that match orbit within a list of windows
@@ -659,100 +757,74 @@ class PrecoveryDatabase:
         # Propagate the orbit with n-body to every window center
         assert len(orbit) == 1, "_check_windows only support one orbit for now"
         windows = windows.sort_by(["time.days", "time.nanos"])
-        propagator = propagator_class()
-        orbit_propagated = propagator.propagate_orbits(orbit, windows.time)
-
-        assert len(orbit_propagated) == len(windows)
-
-        orbit_propagated = orbit_propagated.set_column(
-            "coordinates.time", orbit_propagated.coordinates.time.rescale("utc")
-        )
-        orbit_propagated = orbit_propagated.sort_by(
-            ["coordinates.time.days", "coordinates.time.nanos"]
-        )
 
         # Using the propagated orbits, check each window. Propagate the orbit from the center of
         # window using 2-body to find any HealpixFrames where a detection could have occured
         precovery_candidates = PrecoveryCandidates.empty()
         frame_candidates = FrameCandidates.empty()
 
-        for window in windows:
-            orbit_window = orbit_propagated.apply_mask(
-                orbit_propagated.coordinates.time.equals(window.time, precision="ms")
-            )
+        if max_processes is not None and max_processes > 1:
+            initialize_use_ray(num_cpus=max_processes)
+            futures = []
+            for window in windows:
+                futures.append(
+                    check_window_remote.remote(
+                        self.directory,
+                        window,
+                        orbit,
+                        tolerance,
+                        propagator_class,
+                        datasets,
+                    )
+                )
 
-            candidates_window, frame_candidates_window = self._check_window(
-                window,
-                orbit=orbit_window,
-                tolerance=tolerance,
-                propagator_class=propagator_class,
-                datasets=datasets,
-            )
-            precovery_candidates = qv.concatenate(
-                [precovery_candidates, candidates_window]
-            )
-            frame_candidates = qv.concatenate(
-                [frame_candidates, frame_candidates_window]
-            )
+                if len(futures) >= max_processes * 2:
+                    finished, futures = ray.wait(futures, num_returns=1)
+                    precovery_candidates_window, frame_candidates_window = ray.get(
+                        finished[0]
+                    )
+                    precovery_candidates = qv.concatenate(
+                        [precovery_candidates, precovery_candidates_window]
+                    )
+                    frame_candidates = qv.concatenate(
+                        [frame_candidates, frame_candidates_window]
+                    )
+            
+            while len(futures) > 0:
+                finished, futures = ray.wait(futures, num_returns=1)
+                precovery_candidates_window, frame_candidates_window = ray.get(
+                    finished[0]
+                )
+                precovery_candidates = qv.concatenate(
+                    [precovery_candidates, precovery_candidates_window]
+                )
+                frame_candidates = qv.concatenate(
+                    [frame_candidates, frame_candidates_window]
+                )
+        else:
+            # When we are running as a single process,
+            # it makes sense to do the n-body propagation once
+            # and step along the windows
+            # In multiprocessing it makes more sense to 
+            # duplicate the n-body propagation inside the check_window
+            propagator = propagator_class()
+            for window in windows:
+                orbit = propagator.propagate_orbits(orbit, window.time)
+                candidates_window, frame_candidates_window = check_window(
+                    self.directory,
+                    window,
+                    orbit=orbit,
+                    tolerance=tolerance,
+                    propagator_class=propagator_class,
+                    datasets=datasets,
+                )
+                precovery_candidates = qv.concatenate(
+                    [precovery_candidates, candidates_window]
+                )
+                frame_candidates = qv.concatenate(
+                    [frame_candidates, frame_candidates_window]
+                )
         return precovery_candidates, frame_candidates
-
-    def _check_window(
-        self,
-        window: WindowCenters,
-        orbit: Orbits,
-        tolerance: float,
-        propagator_class: Type[Propagator],
-        datasets: Optional[set[str]],
-    ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
-        logger.debug(f"Checking window {window.time.mjd()[0].as_py()}")
-        assert len(window) == 1, "Use _check_windows for multiple windows"
-        assert len(orbit) == 1, "_check_window only support one orbit for now"
-        obscode = window.obscode[0].as_py()
-        propagation_targets = self.frames.idx.propagation_targets(
-            window,
-            datasets,
-        )
-        if len(propagation_targets) == 0:
-            logger.debug(
-                f"No propagation targets found for window {window.window_start().mjd()[0].as_py()} to {window.window_end().mjd()[0].as_py()}"
-            )
-            return PrecoveryCandidates.empty(), FrameCandidates.empty()
-
-        times = propagation_targets.time
-
-        # create our observers
-        observers = Observers.from_code(obscode, times)
-        ## first propagate with 2_body
-        propagated_orbits = propagate_2body(orbit, times)
-        # hotfix: rescale the times back from propagated_orbits
-        # this behavior should be fixed in adam_core, to always return
-        # the timescale of the submitted times
-        propagated_orbits = propagated_orbits.set_column(
-            "coordinates.time", propagated_orbits.coordinates.time.rescale("utc")
-        )
-
-        # generate ephemeris
-        ephems = generate_ephemeris_2body(propagated_orbits, observers)
-        frames_to_check = find_healpixel_matches(
-            propagation_targets, ephems, self.frames.healpix_nside
-        )
-        logger.debug(f"Found {len(frames_to_check)} frames to check")
-        candidates = PrecoveryCandidates.empty()
-        frame_candidates = FrameCandidates.empty()
-        for frame in frames_to_check:
-            candidates_healpixel, frame_candidates_healpixel = self._check_frames(
-                orbit=orbit,
-                generic_frames=frame,
-                obscode=obscode,
-                tolerance=tolerance,
-                datasets=datasets,
-                propagator_class=propagator_class,
-            )
-            candidates = qv.concatenate([candidates, candidates_healpixel])
-            frame_candidates = qv.concatenate(
-                [frame_candidates, frame_candidates_healpixel]
-            )
-        return candidates, frame_candidates
 
     def _check_frames(
         self,

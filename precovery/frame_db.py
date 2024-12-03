@@ -672,7 +672,7 @@ class FrameDB:
         self.idx = idx
         self.data_root = data_root
         self.data_file_max_size = data_file_max_size
-        self.data_files: dict = {}  # basename -> open file
+        # self.data_files: dict = {}  # basename -> open file
         self.n_data_files: dict = (
             {}
         )  # Dictionary map of how many files for each dataset, and month
@@ -682,8 +682,8 @@ class FrameDB:
 
     def close(self):
         self.idx.close()
-        for f in self.data_files.values():
-            f.close()
+    #     for f in self.data_files.values():
+    #         f.close()
 
     def add_dataset(
         self,
@@ -825,9 +825,9 @@ class FrameDB:
                 self.n_data_files[dataset_id] = {}
             if year_month_str not in self.n_data_files[dataset_id].keys():
                 self.n_data_files[dataset_id][year_month_str] = 0
-            self.data_files[data_uri] = open(
-                abspath, "rb" if self.mode == "r" else "a+b"
-            )
+            # self.data_files[data_uri] = open(
+            #     abspath, "rb" if self.mode == "r" else "a+b"
+            # )
             self.n_data_files[dataset_id][year_month_str] += 1
 
     def _current_data_file_name(self, dataset_id: str, year_month_str: str):
@@ -846,7 +846,8 @@ class FrameDB:
         return os.stat(self._current_data_file_name(dataset_id, year_month_str)).st_size
 
     def _current_data_file(self, dataset_id: str, year_month_str: str):
-        return self.data_files[self._current_data_file_name(dataset_id, year_month_str)]
+        # return self.data_files[self._current_data_file_name(dataset_id, year_month_str)]
+        return self._current_data_file_name(dataset_id, year_month_str)
 
     def get_observations(self, exp: HealpixFrame) -> ObservationsTable:
         """
@@ -857,41 +858,44 @@ class FrameDB:
         data_offset = exp.data_offset[0].as_py()
         data_length = exp.data_length[0].as_py()
 
-        f = self.data_files[data_uri]
-        f.seek(data_offset)
-        data_layout = struct.Struct(DATA_LAYOUT)
-        datagram_size = struct.calcsize(DATA_LAYOUT)
-        bytes_read = 0
-        observations = []
-        while bytes_read < data_length:
-            raw = f.read(datagram_size)
-            (
-                mjd,
-                ra,
-                dec,
-                ra_sigma,
-                dec_sigma,
-                mag,
-                mag_sigma,
-                id_size,
-            ) = data_layout.unpack(raw)
-            id = f.read(id_size)
-            bytes_read += datagram_size + id_size
-            observations.append((mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id))
-        (mjds, ras, decs, ra_sigmas, dec_sigmas, mags, mag_sigmas, ids) = zip(
-            *observations
-        )
+        path = os.path.abspath(os.path.join(self.data_root, data_uri))
 
-        return ObservationsTable.from_kwargs(
-            id=ids,
-            time=Timestamp.from_mjd(mjds, scale="utc"),
-            ra=ras,
-            dec=decs,
-            ra_sigma=ra_sigmas,
-            dec_sigma=dec_sigmas,
-            mag=mags,
-            mag_sigma=mag_sigmas,
-        )
+        with open(path, "rb") as f:
+        # f = self.data_files[data_uri]
+            f.seek(data_offset)
+            data_layout = struct.Struct(DATA_LAYOUT)
+            datagram_size = struct.calcsize(DATA_LAYOUT)
+            bytes_read = 0
+            observations = []
+            while bytes_read < data_length:
+                raw = f.read(datagram_size)
+                (
+                    mjd,
+                    ra,
+                    dec,
+                    ra_sigma,
+                    dec_sigma,
+                    mag,
+                    mag_sigma,
+                    id_size,
+                ) = data_layout.unpack(raw)
+                id = f.read(id_size)
+                bytes_read += datagram_size + id_size
+                observations.append((mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id))
+            (mjds, ras, decs, ra_sigmas, dec_sigmas, mags, mag_sigmas, ids) = zip(
+                *observations
+            )
+
+            return ObservationsTable.from_kwargs(
+                id=ids,
+                time=Timestamp.from_mjd(mjds, scale="utc"),
+                ra=ras,
+                dec=decs,
+                ra_sigma=ra_sigmas,
+                dec_sigma=dec_sigmas,
+                mag=mags,
+                mag_sigma=mag_sigmas,
+            )
 
     def get_frames_for_ra_dec(self, ra: float, dec: float, obscode: str):
         """Yields all frames that overlap given ra, dec for a given
@@ -918,31 +922,38 @@ class FrameDB:
         which indicates the ID's length in bytes, followed by the UTF8-encoded
         bytes of the ID.
         """
-        f = None
+        # f = None
+        # try:
+        #     f = self._current_data_file(dataset_id, year_month_str)
+        # except KeyError as ke:  # NOQA: F841
+        #     self.new_data_file(dataset_id, year_month_str)
+        #     f = self._current_data_file(dataset_id, year_month_str)
+
         try:
-            f = self._current_data_file(dataset_id, year_month_str)
+            path = self._current_data_file_full(dataset_id, year_month_str)
         except KeyError as ke:  # NOQA: F841
             self.new_data_file(dataset_id, year_month_str)
-            f = self._current_data_file(dataset_id, year_month_str)
+            path = self._current_data_file_full(dataset_id, year_month_str)
+        
+        with open(path, "a+b") as f:
+            if hasattr(observations, "__len__"):
+                logger.info(f"Writing {len(observations)} observations to {f.name}")  # type: ignore
+            else:
+                logger.info(f"Writing stream of observations to {f.name}")
 
-        if hasattr(observations, "__len__"):
-            logger.info(f"Writing {len(observations)} observations to {f.name}")  # type: ignore
-        else:
-            logger.info(f"Writing stream of observations to {f.name}")
+            f.seek(0, 2)  # seek to end
+            start_pos = f.tell()
 
-        f.seek(0, 2)  # seek to end
-        start_pos = f.tell()
+            for obs_bytes in observations.to_bytes():
+                f.write(obs_bytes)
 
-        for obs_bytes in observations.to_bytes():
-            f.write(obs_bytes)
+            end_pos = f.tell()
+            length = end_pos - start_pos
+            data_uri = self._current_data_file_name(dataset_id, year_month_str)
 
-        end_pos = f.tell()
-        length = end_pos - start_pos
-        data_uri = self._current_data_file_name(dataset_id, year_month_str)
-
-        f.flush()
-        if end_pos > self.data_file_max_size:
-            self.new_data_file(dataset_id, year_month_str)
+            f.flush()
+            if end_pos > self.data_file_max_size:
+                self.new_data_file(dataset_id, year_month_str)
 
         return data_uri, start_pos, length
 
@@ -958,5 +969,10 @@ class FrameDB:
         self.n_data_files[dataset_id][year_month_str] += 1
         current_data_file = self._current_data_file_full(dataset_id, year_month_str)
         os.makedirs(os.path.dirname(current_data_file), exist_ok=True)
-        f = open(current_data_file, "a+b")
-        self.data_files[self._current_data_file_name(dataset_id, year_month_str)] = f
+        # touch the file
+        with open(current_data_file, "a+b") as f:
+            pass
+
+        # f = open(current_data_file, "a+b")
+        # self.data_files[self._current_data_file_name(dataset_id, year_month_str)] = f
+        # self.data_files[self._current_data_file_name(dataset_id, year_month_str)] = f
