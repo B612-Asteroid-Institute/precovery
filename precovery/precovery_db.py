@@ -504,7 +504,7 @@ def check_window(
     logger.debug(f"Checking window {window.time.mjd()[0].as_py()}")
     assert len(window) == 1, "Use _check_windows for multiple windows"
     assert len(orbit) == 1, "_check_window only support one orbit for now"
-    db = PrecoveryDatabase.from_dir(db_dir, mode="r")
+    db = PrecoveryDatabase.from_dir(db_dir, mode="r", allow_version_mismatch=True)
     obscode = window.obscode[0].as_py()
     propagation_targets = db.frames.idx.propagation_targets(
         window,
