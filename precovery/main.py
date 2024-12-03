@@ -16,7 +16,6 @@ logger.setLevel(logging.INFO)
 
 
 
-@ray.remote
 def precover_worker(
     orbit: Orbits,
     database_directory: str,
@@ -50,6 +49,9 @@ def precover_worker(
     )
 
     return (precovery_candidates, frame_candidates)
+
+
+precover_worker_remote = ray.remote(precover_worker)
 
 
 def precover(
@@ -111,7 +113,7 @@ def precover(
         frame_candidates = FrameCandidates.empty()
         for o in orbits:
             futures.append(
-                precover_worker.remote(
+                precover_worker_remote.remote(
                     o,
                     database_directory,
                     tolerance,
