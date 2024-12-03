@@ -3,8 +3,10 @@ import multiprocessing
 from typing import Optional, Tuple, Type
 
 import quivr as qv
+import ray
 from adam_core.orbits import Orbits
 from adam_core.propagator import Propagator
+from adam_core.ray_cluster import initialize_use_ray
 
 from .precovery_db import FrameCandidates, PrecoveryCandidates, PrecoveryDatabase
 
@@ -13,56 +15,8 @@ logging.basicConfig()
 logger.setLevel(logging.INFO)
 
 
-def precover_many(
-    orbits: Orbits,
-    database_directory: str,
-    tolerance: float = 1 / 3600,
-    start_mjd: Optional[float] = None,
-    end_mjd: Optional[float] = None,
-    window_size: int = 7,
-    allow_version_mismatch: bool = False,
-    datasets: Optional[set[str]] = None,
-    n_workers: int = multiprocessing.cpu_count(),
-    propagator_class: Optional[Type[Propagator]] = None,
-) -> Tuple[PrecoveryCandidates, FrameCandidates]:
-    """
-    Run a precovery search algorithm against many orbits at once.
-    """
-    inputs = [
-        (
-            o,
-            database_directory,
-            tolerance,
-            start_mjd,
-            end_mjd,
-            window_size,
-            allow_version_mismatch,
-            datasets,
-            propagator_class,
-        )
-        for o in orbits
-    ]
 
-    pool = multiprocessing.Pool(processes=n_workers)
-    results = pool.starmap(
-        precover_worker,
-        inputs,
-    )
-    pool.close()
-    pool.join()
-
-    precovery_candidates = PrecoveryCandidates.empty()
-    frame_candidates = FrameCandidates.empty()
-
-    for orb_precovery_candidate, orb_frame_candidate in results:
-        precovery_candidates = qv.concatenate(
-            [precovery_candidates, orb_precovery_candidate]
-        )
-        frame_candidates = qv.concatenate([frame_candidates, orb_frame_candidate])
-
-    return precovery_candidates, frame_candidates
-
-
+@ray.remote
 def precover_worker(
     orbit: Orbits,
     database_directory: str,
@@ -78,27 +32,28 @@ def precover_worker(
     Wraps the precover function to return the orbit_id for mapping.
     """
 
-    # initialize our propagator
-    precovery_candidates, frame_candidates = precover(
-        orbit,
+    precovery_db = PrecoveryDatabase.from_dir(
         database_directory,
-        tolerance,
-        start_mjd,
-        end_mjd,
-        window_size,
-        allow_version_mismatch,
-        datasets,
+        create=False,
+        mode="r",
+        allow_version_mismatch=allow_version_mismatch,
+    )
+
+    precovery_candidates, frame_candidates = precovery_db.precover(
+        orbit,
+        tolerance=tolerance,
+        start_mjd=start_mjd,
+        end_mjd=end_mjd,
+        window_size=window_size,
+        datasets=datasets,
         propagator_class=propagator_class,
     )
 
-    return (
-        precovery_candidates,
-        frame_candidates,
-    )
+    return (precovery_candidates, frame_candidates)
 
 
 def precover(
-    orbit: Orbits,
+    orbits: Orbits,
     database_directory: str,
     tolerance: float = 1 / 3600,
     start_mjd: Optional[float] = None,
@@ -107,6 +62,7 @@ def precover(
     allow_version_mismatch: bool = False,
     datasets: Optional[set[str]] = None,
     propagator_class: Optional[Type[Propagator]] = None,
+    max_processes: Optional[int] = None,
 ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
     """
     Connect to database directory and run precovery for the input orbit.
@@ -147,22 +103,57 @@ def precover(
         that intersected the orbit's trajectory but did not have any observations (PrecoveryCandidates)
         found within the angular tolerance.
     """
+    if max_processes is not None and max_processes > 1:
+        initialize_use_ray(max_processes)
 
-    precovery_db = PrecoveryDatabase.from_dir(
-        database_directory,
-        create=False,
-        mode="r",
-        allow_version_mismatch=allow_version_mismatch,
-    )
+        futures = []
+        precovery_candidates = PrecoveryCandidates.empty()
+        frame_candidates = FrameCandidates.empty()
+        for o in orbits:
+            futures.append(
+                precover_worker.remote(
+                    o,
+                    database_directory,
+                    tolerance,
+                    start_mjd,
+                    end_mjd,
+                    window_size,
+                    allow_version_mismatch,
+                    datasets,
+                    propagator_class,
+                )
+            )
 
-    precovery_candidates, frame_candidates = precovery_db.precover(
-        orbit,
-        tolerance=tolerance,
-        start_mjd=start_mjd,
-        end_mjd=end_mjd,
-        window_size=window_size,
-        datasets=datasets,
-        propagator_class=propagator_class,
-    )
+            if len(futures) == max_processes * 2:
+                finished, futures = ray.wait(futures, num_returns=1)
+                job_candidates, job_frame_candidates = ray.get(finished[0])
+                precovery_candidates = qv.concatenate(
+                    [precovery_candidates, job_candidates]
+                )
+                frame_candidates = qv.concatenate(
+                    [frame_candidates, job_frame_candidates]
+                )
 
+        while futures:
+            finished, futures = ray.wait(futures, num_returns=1)
+            job_candidates, job_frame_candidates = ray.get(finished[0])
+            precovery_candidates = qv.concatenate(
+                [precovery_candidates, job_candidates]
+            )
+            frame_candidates = qv.concatenate(
+                [frame_candidates, job_frame_candidates]
+            )
+    
+    else:
+        precovery_candidates, frame_candidates = precover_worker(
+            orbits,
+            database_directory,
+            tolerance,
+            start_mjd,
+            end_mjd,
+            window_size,
+            allow_version_mismatch,
+            datasets,
+            propagator_class,
+        )
     return precovery_candidates, frame_candidates

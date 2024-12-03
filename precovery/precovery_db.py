@@ -442,7 +442,6 @@ def find_observation_matches(
     Tuple[ObservationsTable, Ephemeris]
         Observations and ephemeris that match within the given tolerance
     """
-    logger.info("Finding observation matches")
     assert len(ephems) == len(
         observations
     ), "Ephemeris must be the same length as observations"
@@ -466,15 +465,15 @@ def find_observation_matches(
     mask = pc.less(distances, tolerance_deg)
     matching_observations = observations.apply_mask(mask)
     matching_ephems = ephems.apply_mask(mask)
-    logger.info("Done finding matches")
     return matching_observations, matching_ephems
 
 
 class PrecoveryDatabase:
-    def __init__(self, frames: FrameDB, config: Config = DefaultConfig):
+    def __init__(self, frames: FrameDB, directory: str, config: Config = DefaultConfig):
         self.frames = frames
         self._exposures_by_obscode: dict = {}
         self.config = config
+        self.directory: str = directory
 
     @classmethod
     def from_dir(
@@ -517,7 +516,7 @@ class PrecoveryDatabase:
         frame_db = FrameDB(
             frame_idx, data_path, config.data_file_max_size, config.nside, mode=mode
         )
-        return cls(frame_db, config)
+        return cls(frame_db, directory, config)
 
     @classmethod
     def create(
@@ -542,7 +541,7 @@ class PrecoveryDatabase:
 
         frame_db = FrameDB(frame_idx, data_path, data_file_max_size, nside)
 
-        return cls(frame_db, config)
+        return cls(frame_db, directory, config)
 
     def precover(
         self,
@@ -705,7 +704,7 @@ class PrecoveryDatabase:
         propagator_class: Type[Propagator],
         datasets: Optional[set[str]],
     ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
-        logger.info(f"Checking window {window.time.mjd()[0].as_py()}")
+        logger.debug(f"Checking window {window.time.mjd()[0].as_py()}")
         assert len(window) == 1, "Use _check_windows for multiple windows"
         assert len(orbit) == 1, "_check_window only support one orbit for now"
         obscode = window.obscode[0].as_py()
@@ -714,18 +713,16 @@ class PrecoveryDatabase:
             datasets,
         )
         if len(propagation_targets) == 0:
-            logger.info(
+            logger.debug(
                 f"No propagation targets found for window {window.window_start().mjd()[0].as_py()} to {window.window_end().mjd()[0].as_py()}"
             )
             return PrecoveryCandidates.empty(), FrameCandidates.empty()
 
         times = propagation_targets.time
 
-        logger.info(f"Window 2 body prop and ephemeris start")
         # create our observers
         observers = Observers.from_code(obscode, times)
         ## first propagate with 2_body
-        print("starting propagate_2body")
         propagated_orbits = propagate_2body(orbit, times)
         # hotfix: rescale the times back from propagated_orbits
         # this behavior should be fixed in adam_core, to always return
@@ -735,13 +732,11 @@ class PrecoveryDatabase:
         )
 
         # generate ephemeris
-        print("starting generate_ephemeris_2body")
         ephems = generate_ephemeris_2body(propagated_orbits, observers)
-        logger.info("Finding healpixels")
         frames_to_check = find_healpixel_matches(
             propagation_targets, ephems, self.frames.healpix_nside
         )
-        logger.info(f"Found {len(frames_to_check)} frames to check")
+        logger.debug(f"Found {len(frames_to_check)} frames to check")
         candidates = PrecoveryCandidates.empty()
         frame_candidates = FrameCandidates.empty()
         for frame in frames_to_check:
@@ -772,9 +767,7 @@ class PrecoveryDatabase:
         Deeply inspect all frames that match the given obscode, mjd, and healpix to
         see if they contain observations which match the ephemeris.
         """
-        logger.info(f"Starting check frames with {len(generic_frames)} frames")
         frames = HealpixFrame.empty()
-        logger.info("Getting the actual frames")
         for generic_frame in generic_frames:
             frames = qv.concatenate(
                 [
@@ -787,8 +780,6 @@ class PrecoveryDatabase:
                     ),
                 ]
             )
-        logger.info(f"Done fetching {len(frames)} frames")
-        logger.info(f"Generating n-body frame ephemeris")
         unique_frame_times = frames.exposure_mid_timestamp().unique()
         observers = Observers.from_code(obscode, unique_frame_times)
         # Compute the position of the ephem carefully.
@@ -796,7 +787,6 @@ class PrecoveryDatabase:
         ephemeris = propagator.generate_ephemeris(orbit, observers)
         precovery_candidates = PrecoveryCandidates.empty()
         frame_candidates = FrameCandidates.empty()
-        logger.info("Matching the frames")
         for f in frames:
             matching_ephem = ephemeris.apply_mask(
                 ephemeris.coordinates.time.equals(
@@ -815,7 +805,6 @@ class PrecoveryDatabase:
             # ephemeris at the exposure midpoint not at the observation
             # times which may differ from the exposure midpoint time
             if len(matches) == 0:
-                logger.debug("no observations found in this frame")
                 frame_candidates = qv.concatenate(
                     [frame_candidates, frame_candidates_from_frame(f, matching_ephem)]
                 )
@@ -834,21 +823,13 @@ class PrecoveryDatabase:
         """
         Find all sources in a single frame which match ephem.
         """
-        logger.info(f"Finding matches in frame {frame.healpixel[0].as_py()}")
-        logger.debug("checking frame: %s", frame)
         assert len(frame_ephem) == 1, "ephem should have only one entry"
 
-        logger.info("Getting observations")
         # Gather all observations.
         observations: ObservationsTable = self.frames.get_observations(frame)
-        logger.info("Done getting observations")
         # Check if the observations have per-observation MJDs.
         # If so we use 2 body to generate unique ephemeris for each
         if len(observations.time.unique()) > 1:
-            logger.info(
-                f"{frame} has {len(observations.time.unique())} unique obs times"
-            )
-            logger.info("Using per-observation ephem")
             per_obs_ephem = generate_ephem_for_per_obs_timestamps(
                 orbit, observations, frame.obscode, propagator
             )

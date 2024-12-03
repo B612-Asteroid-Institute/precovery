@@ -1,5 +1,7 @@
 from adam_core.propagator.adam_assist import ASSISTPropagator
 
+from precovery.main import precover
+from precovery.precovery_db import PrecoveryDatabase
 from precovery.sourcecatalog import bundle_into_frames
 
 from .testutils import make_sourceobs, make_sourceobs_of_orbit
@@ -79,3 +81,18 @@ def test_precover_dataset_filter(precovery_db, sample_orbits):
     have_ids = set(matches.observation_id.to_pylist())
     want_ids = set(o.id.decode("utf8") for o in ds1_observations)
     assert have_ids == want_ids
+
+
+def test_multiple_workers(precovery_db_with_data, sample_orbits):
+    """
+    Make sure we have no issues when running precovery with multiple workers.
+    """
+    # Do the search. We should find the three observations we inserted.
+    matches, misses = precover(
+        sample_orbits[:2],
+        precovery_db_with_data.directory,
+        max_processes=4,
+        propagator_class=ASSISTPropagator,
+    )
+    assert len(matches) == 896
+    assert len(misses) == 0
