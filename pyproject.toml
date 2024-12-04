@@ -4,7 +4,7 @@ build-backend = "pdm.backend"
 
 [project]
 name = "precovery"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
 dynamic = ["version"]
 authors = [
     { name = "Kathleen Kiker", email = "kathleen@b612foundation.org" },
@@ -34,11 +34,11 @@ dependencies = [
     "pandas",
     "healpy",
     "requests",
-    "adam-core>=0.2.5",
+    "adam-core>=0.3.0",
 ]
 [dependency-groups]
 test = [
-    "adam_assist",
+    "adam-assist>=0.2.0",
     "pytest",
     "black",
     "isort",
@@ -63,8 +63,6 @@ source = "scm"
 write_to = "precovery/_version.py"
 write_template = '__version__ = "{}"'
 
-[tool.pytest.ini_options]
-python_functions = "test_*"
 
 [tool.pdm.scripts]
 check = { composite = ["lint", "typecheck"] }
@@ -77,10 +75,11 @@ lint = { composite = [
 fix = "ruff ./precovery --fix"
 typecheck = "mypy ./precovery"
 
-test = "pytest --benchmark-skip {args}"
+test = "pytest --benchmark-skip -m 'not profile' {args}"
 doctest = "pytest --doctest-plus --doctest-only"
 benchmark = "pytest --benchmark-only {args}"
-coverage = "pytest --cov=precovery --cov-report=xml"
+coverage = "pytest --cov=precovery --cov-report=xml -m 'not profile'"
+profile = "pytest -s -m 'profile'"
 
 [tool.pdm]
 distribution = true

@@ -1,10 +1,10 @@
 import numpy as np
 import numpy.testing as npt
 import pyarrow as pa
+from adam_assist import ASSISTPropagator
 from adam_core.coordinates import CartesianCoordinates, Origin, SphericalCoordinates
 from adam_core.orbits import Orbits
 from adam_core.orbits.ephemeris import Ephemeris
-from adam_core.propagator.adam_assist import ASSISTPropagator
 from adam_core.time import Timestamp
 
 from precovery.frame_db import GenericFrame, HealpixFrame

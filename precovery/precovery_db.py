@@ -501,9 +501,9 @@ def check_window(
     Tuple[PrecoveryCandidates, FrameCandidates]
         Precovery candidates and frame candidates
     """
-    logger.debug(f"Checking window {window.time.mjd()[0].as_py()}")
     assert len(window) == 1, "Use _check_windows for multiple windows"
     assert len(orbit) == 1, "_check_window only support one orbit for now"
+    logger.info(f"check_window orbit: {orbit.orbit_id[0].as_py()} obscode: {window.obscode[0].as_py()} window: {window.window_start().mjd()[0].as_py()} to {window.window_end().mjd()[0].as_py()}")
     db = PrecoveryDatabase.from_dir(db_dir, mode="r", allow_version_mismatch=True)
     obscode = window.obscode[0].as_py()
     propagation_targets = db.frames.idx.propagation_targets(
@@ -516,13 +516,12 @@ def check_window(
         )
         return PrecoveryCandidates.empty(), FrameCandidates.empty()
 
+    logger.debug(f"Found {len(propagation_targets)} propagation targets")
     times = propagation_targets.time
 
     # First make sure our orbit it n-body propagated to the window center
-    orbit = orbit.set_column(
-        "coordinates.time", orbit.coordinates.time.rescale("utc")
-    )
-    if not(pc.all(orbit.coordinates.time.equals(window.time, precision="ms")).as_py()):
+    orbit = orbit.set_column("coordinates.time", orbit.coordinates.time.rescale("utc"))
+    if not (pc.all(orbit.coordinates.time.equals(window.time, precision="ms")).as_py()):
         propagator = propagator_class()
         orbit = propagator.propagate_orbits(orbit, window.time)
 
@@ -542,7 +541,7 @@ def check_window(
     frames_to_check = find_healpixel_matches(
         propagation_targets, ephems, db.frames.healpix_nside
     )
-    logger.debug(f"Found {len(frames_to_check)} frames to check")
+    logger.debug(f"Found {len(frames_to_check)} healpixel matches")
     candidates = PrecoveryCandidates.empty()
     frame_candidates = FrameCandidates.empty()
     for frame in frames_to_check:
@@ -562,6 +561,7 @@ def check_window(
 
 
 check_window_remote = ray.remote(check_window)
+
 
 class PrecoveryDatabase:
     def __init__(self, frames: FrameDB, directory: str, config: Config = DefaultConfig):
@@ -596,12 +596,6 @@ class PrecoveryDatabase:
                     f"Version mismatch: \nRunning version: {__version__}\nDatabase"
                     f" version: {config.build_version}\nUse allow_version_mismatch=True"
                     " to ignore this error."
-                )
-            else:
-                logger.warning(
-                    f"Version mismatch: \nRunning version: {__version__}\nDatabase"
-                    f" version: {config.build_version}\nallow_version_mismatch=True, so"
-                    " continuing."
                 )
 
         frame_idx_db = "sqlite:///" + os.path.join(directory, "index.db")
@@ -705,25 +699,20 @@ class PrecoveryDatabase:
                 end_mjd = last
 
         logger.info(
-            "precovering orbit %s from %.5f to %.5f, window=%d, datasets=%s",
-            orbit_id,
-            start_mjd,
-            end_mjd,
-            window_size,
-            datasets or "all",
+            f"precovering orbit {orbit_id} from {start_mjd} to {end_mjd}, window={window_size}, datasets={datasets or 'all'}"
         )
 
         windows = self.frames.idx.window_centers(
             start_mjd, end_mjd, window_size, datasets=datasets
         )
-
-        # group windows by obscodes so that many windows can be searched at once
+        logger.info(f"Searching {len(windows)} windows")
         candidates = PrecoveryCandidates.empty()
         frame_candidates = FrameCandidates.empty()
 
+        # group windows by obscodes so that many windows can be searched at once
         for obscode in windows.obscode.unique():
-            logger.info("searching windows for obscode %s", obscode)
             obscode_windows = windows.select("obscode", obscode)
+            logger.info(f"searching {len(obscode_windows)} windows for obscode {obscode}")
 
             candidates_obscode, frame_candidates_obscode = self._check_windows(
                 obscode_windows,
@@ -753,10 +742,11 @@ class PrecoveryDatabase:
         """
         Find all observations that match orbit within a list of windows
         """
-        logger.info(f"Checking {len(windows)} windows")
-        # Propagate the orbit with n-body to every window center
         assert len(orbit) == 1, "_check_windows only support one orbit for now"
-        windows = windows.sort_by(["time.days", "time.nanos"])
+        windows = windows.sort_by([("time.days", "descending"), ("time.nanos", "descending")])
+        logger.info(
+            f"_check_windows orbit: {orbit.orbit_id[0].as_py()} windows: {len(windows)} obscode: {windows.obscode.unique().to_pylist()}"
+        )
 
         # Using the propagated orbits, check each window. Propagate the orbit from the center of
         # window using 2-body to find any HealpixFrames where a detection could have occured
@@ -789,7 +779,7 @@ class PrecoveryDatabase:
                     frame_candidates = qv.concatenate(
                         [frame_candidates, frame_candidates_window]
                     )
-            
+
             while len(futures) > 0:
                 finished, futures = ray.wait(futures, num_returns=1)
                 precovery_candidates_window, frame_candidates_window = ray.get(
@@ -805,7 +795,7 @@ class PrecoveryDatabase:
             # When we are running as a single process,
             # it makes sense to do the n-body propagation once
             # and step along the windows
-            # In multiprocessing it makes more sense to 
+            # In multiprocessing it makes more sense to
             # duplicate the n-body propagation inside the check_window
             propagator = propagator_class()
             for window in windows:

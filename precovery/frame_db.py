@@ -183,52 +183,66 @@ class FrameIndex:
         datasets: Optional[set[str]] = None,
     ) -> WindowCenters:
         """Return the midpoint and obscode of all time windows with data in them."""
-        # Query for frames that overlap the entire range
+        
+        # Build base query with minimal columns
         query = (
             sq.select(
                 self.frames.c.obscode,
-                sq.func.floor(
-                    (self.frames.c.exposure_mjd_mid - start_mjd) / window_size_days
-                ).label("window_id"),
+                self.frames.c.exposure_mjd_mid,
             )
             .where(
-                # Single condition for frames overlapping the full range
-                (self.frames.c.exposure_mjd_start < end_mjd)
-                & (self.frames.c.exposure_mjd_start >= start_mjd)
-            )
-            .group_by(
-                sq.func.floor(
-                    (self.frames.c.exposure_mjd_mid - start_mjd) / window_size_days
-                ),
-                self.frames.c.obscode,
+                (self.frames.c.exposure_mjd_mid < end_mjd)
+                & (self.frames.c.exposure_mjd_mid >= start_mjd)
             )
         )
 
         if datasets is not None:
             query = query.where(self.frames.c.dataset_id.in_(list(datasets)))
 
-        # Execute the query
-        rows = self.dbconn.execute(query).fetchall()
+        # Execute query and fetch results in chunks
+        chunk_size = 100000
+        rows = []
+        result = self.dbconn.execution_options(stream_results=True).execute(query)
+        
+        while True:
+            chunk = result.fetchmany(chunk_size)
+            if not chunk:
+                break
+            rows.extend(chunk)
 
-        if len(rows) == 0:
+        if not rows:
             return WindowCenters.empty()
 
-        # Process the results
-        (obscodes, window_ids) = zip(*rows)
-        window_starts = [
-            start_mjd + window_id * window_size_days for window_id in window_ids
-        ]
-        window_centers = [
-            window_start + window_size_days / 2 for window_start in window_starts
-        ]
+        # Process results using PyArrow for better performance
+        obscodes, mjds = zip(*rows)
+        
+        # Convert to PyArrow arrays for faster computation
+        mjds_arr = pa.array(mjds)
+        window_ids = pc.floor(pc.divide(
+            pc.subtract(mjds_arr, pa.scalar(start_mjd)), 
+            pa.scalar(window_size_days)
+        ))
+
+        # Group by obscode and window_id using PyArrow
+        unique_pairs = set((obs, wid.as_py()) for obs, wid in zip(obscodes, window_ids))
+        
+        if not unique_pairs:
+            return WindowCenters.empty()
+        
+        final_obscodes, final_window_ids = zip(*unique_pairs)
+        
+        # Calculate window centers
+        window_starts = [start_mjd + wid * window_size_days for wid in final_window_ids]
+        window_centers = [ws + window_size_days / 2 for ws in window_starts]
 
         # Return as WindowCenters
-        return WindowCenters.from_kwargs(
-            obscode=obscodes,
+        window_centers = WindowCenters.from_kwargs(
+            obscode=final_obscodes,
             time=Timestamp.from_mjd(window_centers, scale="utc"),
             window_size_days=pa.repeat(window_size_days, len(window_centers)),
         )
-
+        window_centers = window_centers.sort_by(["time.days", "time.nanos"])
+        return window_centers
     def propagation_targets(
         self,
         window: WindowCenters,
@@ -265,10 +279,8 @@ class FrameIndex:
             )
             .where(
                 self.frames.c.obscode == obscode,
-                self.frames.c.exposure_mjd_start
-                + self.frames.c.exposure_duration / 86400
-                >= start_mjd,
-                self.frames.c.exposure_mjd_start <= end_mjd,
+                self.frames.c.exposure_mjd_mid >= start_mjd,
+                self.frames.c.exposure_mjd_mid <= end_mjd,
             )
             .distinct()
             .order_by(
@@ -602,6 +614,8 @@ class FrameIndex:
             sq.Column("data_length", sq.Integer, nullable=False),
             # Create index on midpoint mjd, healpixel, obscode
             sq.Index("fast_query", "exposure_mjd_mid", "healpixel", "obscode"),
+            # Add the window centers index
+            sq.Index("window_centers_idx", "exposure_mjd_mid", "dataset_id", "obscode"),
         )
 
         self.datasets = sq.Table(

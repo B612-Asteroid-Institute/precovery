@@ -3,11 +3,12 @@ import pstats
 from pstats import SortKey
 
 import pytest
-from adam_core.propagator.adam_assist import ASSISTPropagator
+from adam_assist import ASSISTPropagator
 
 from precovery.main import precover
 
 
+@pytest.mark.profile
 def test_precovery_profile(sample_orbits, precovery_db_with_data, tmp_path):
     """
     Detailed profiling of precovery performance.

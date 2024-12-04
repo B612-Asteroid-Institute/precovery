@@ -1,11 +1,6 @@
-import cProfile
-import pstats
-from pathlib import Path
-from pstats import SortKey
-
 import pytest
+from adam_assist import ASSISTPropagator
 from adam_core.dynamics.propagation import propagate_2body
-from adam_core.propagator.adam_assist import ASSISTPropagator
 from adam_core.time import Timestamp
 
 from precovery.main import precover

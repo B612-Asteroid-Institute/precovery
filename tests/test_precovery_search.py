@@ -1,4 +1,4 @@
-from adam_core.propagator.adam_assist import ASSISTPropagator
+from adam_assist import ASSISTPropagator
 
 from precovery.main import precover
 from precovery.precovery_db import PrecoveryDatabase

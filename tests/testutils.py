@@ -5,9 +5,9 @@ from typing import Optional, Tuple
 
 import healpy
 import pytest
+from adam_assist import ASSISTPropagator
 from adam_core.observers import Observers
 from adam_core.orbits import Orbits
-from adam_core.propagator.adam_assist import ASSISTPropagator
 from adam_core.time import Timestamp
 
 from precovery.sourcecatalog import SourceFrame, SourceObservation

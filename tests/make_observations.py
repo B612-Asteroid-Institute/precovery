@@ -3,9 +3,9 @@ import os
 
 import numpy as np
 import pandas as pd
+from adam_assist import ASSISTPropagator
 from adam_core.observers import Observers
 from adam_core.orbits import Orbits
-from adam_core.propagator.adam_assist import ASSISTPropagator
 from adam_core.time import Timestamp
 
 SAMPLE_ORBITS_FILE = os.path.join(
