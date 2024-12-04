@@ -34,7 +34,7 @@ dependencies = [
     "pandas",
     "healpy",
     "requests",
-    "adam-core>=0.2.5",
+    "adam-core @ git+https://github.com/B612-Asteroid-Institute/adam_core@f9dac602ee0b1c7161eb62f63cb8e97cbbeaa0a7",
 ]
 [dependency-groups]
 test = [
@@ -49,6 +49,7 @@ test = [
     "ruff",
     "astroquery",
     "pytest-mock>=3.14.0",
+    "snakeviz>=2.2.2",
 ]
 
 [project.urls]
