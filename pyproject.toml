@@ -72,7 +72,7 @@ lint = { composite = [
   "black --check ./precovery",
   "isort --check-only ./precovery",
 ] }
-fix = "ruff ./precovery --fix"
+fix = "ruff check ./precovery --fix"
 typecheck = "mypy ./precovery"
 
 test = "pytest --benchmark-skip -m 'not profile' {args}"

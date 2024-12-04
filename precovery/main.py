@@ -2,7 +2,6 @@ import logging
 from typing import Optional, Tuple, Type
 
 import quivr as qv
-import ray
 from adam_core.orbits import Orbits
 from adam_core.propagator import Propagator
 

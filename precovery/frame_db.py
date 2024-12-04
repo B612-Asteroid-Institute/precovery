@@ -183,17 +183,14 @@ class FrameIndex:
         datasets: Optional[set[str]] = None,
     ) -> WindowCenters:
         """Return the midpoint and obscode of all time windows with data in them."""
-        
+
         # Build base query with minimal columns
-        query = (
-            sq.select(
-                self.frames.c.obscode,
-                self.frames.c.exposure_mjd_mid,
-            )
-            .where(
-                (self.frames.c.exposure_mjd_mid < end_mjd)
-                & (self.frames.c.exposure_mjd_mid >= start_mjd)
-            )
+        query = sq.select(
+            self.frames.c.obscode,
+            self.frames.c.exposure_mjd_mid,
+        ).where(
+            (self.frames.c.exposure_mjd_mid < end_mjd)
+            & (self.frames.c.exposure_mjd_mid >= start_mjd)
         )
 
         if datasets is not None:
@@ -203,7 +200,7 @@ class FrameIndex:
         chunk_size = 100000
         rows = []
         result = self.dbconn.execution_options(stream_results=True).execute(query)
-        
+
         while True:
             chunk = result.fetchmany(chunk_size)
             if not chunk:
@@ -215,22 +212,23 @@ class FrameIndex:
 
         # Process results using PyArrow for better performance
         obscodes, mjds = zip(*rows)
-        
+
         # Convert to PyArrow arrays for faster computation
         mjds_arr = pa.array(mjds)
-        window_ids = pc.floor(pc.divide(
-            pc.subtract(mjds_arr, pa.scalar(start_mjd)), 
-            pa.scalar(window_size_days)
-        ))
+        window_ids = pc.floor(
+            pc.divide(
+                pc.subtract(mjds_arr, pa.scalar(start_mjd)), pa.scalar(window_size_days)
+            )
+        )
 
         # Group by obscode and window_id using PyArrow
         unique_pairs = set((obs, wid.as_py()) for obs, wid in zip(obscodes, window_ids))
-        
+
         if not unique_pairs:
             return WindowCenters.empty()
-        
+
         final_obscodes, final_window_ids = zip(*unique_pairs)
-        
+
         # Calculate window centers
         window_starts = [start_mjd + wid * window_size_days for wid in final_window_ids]
         window_centers = [ws + window_size_days / 2 for ws in window_starts]
@@ -243,6 +241,7 @@ class FrameIndex:
         )
         window_centers = window_centers.sort_by(["time.days", "time.nanos"])
         return window_centers
+
     def propagation_targets(
         self,
         window: WindowCenters,
@@ -696,6 +695,7 @@ class FrameDB:
 
     def close(self):
         self.idx.close()
+
     #     for f in self.data_files.values():
     #         f.close()
 
@@ -831,17 +831,12 @@ class FrameDB:
         files = sorted(glob.glob(matcher, recursive=True))
         for f in files:
             abspath = os.path.abspath(f)
-            name = os.path.basename(f)
             year_month_str = os.path.basename(os.path.dirname(abspath))
             dataset_id = os.path.basename(os.path.dirname(os.path.dirname(abspath)))
-            data_uri = f"{dataset_id}/{year_month_str}/{name}"
             if dataset_id not in self.n_data_files.keys():
                 self.n_data_files[dataset_id] = {}
             if year_month_str not in self.n_data_files[dataset_id].keys():
                 self.n_data_files[dataset_id][year_month_str] = 0
-            # self.data_files[data_uri] = open(
-            #     abspath, "rb" if self.mode == "r" else "a+b"
-            # )
             self.n_data_files[dataset_id][year_month_str] += 1
 
     def _current_data_file_name(self, dataset_id: str, year_month_str: str):
@@ -875,7 +870,7 @@ class FrameDB:
         path = os.path.abspath(os.path.join(self.data_root, data_uri))
 
         with open(path, "rb") as f:
-        # f = self.data_files[data_uri]
+            # f = self.data_files[data_uri]
             f.seek(data_offset)
             data_layout = struct.Struct(DATA_LAYOUT)
             datagram_size = struct.calcsize(DATA_LAYOUT)
@@ -895,7 +890,9 @@ class FrameDB:
                 ) = data_layout.unpack(raw)
                 id = f.read(id_size)
                 bytes_read += datagram_size + id_size
-                observations.append((mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id))
+                observations.append(
+                    (mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id)
+                )
             (mjds, ras, decs, ra_sigmas, dec_sigmas, mags, mag_sigmas, ids) = zip(
                 *observations
             )
@@ -948,7 +945,7 @@ class FrameDB:
         except KeyError as ke:  # NOQA: F841
             self.new_data_file(dataset_id, year_month_str)
             path = self._current_data_file_full(dataset_id, year_month_str)
-        
+
         with open(path, "a+b") as f:
             if hasattr(observations, "__len__"):
                 logger.info(f"Writing {len(observations)} observations to {f.name}")  # type: ignore
@@ -984,7 +981,7 @@ class FrameDB:
         current_data_file = self._current_data_file_full(dataset_id, year_month_str)
         os.makedirs(os.path.dirname(current_data_file), exist_ok=True)
         # touch the file
-        with open(current_data_file, "a+b") as f:
+        with open(current_data_file, "a+b") as f:  # NOQA: F841
             pass
 
         # f = open(current_data_file, "a+b")

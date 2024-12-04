@@ -1,6 +1,5 @@
 import logging
 import os
-import time
 from typing import Optional, Tuple, Type
 
 import numpy as np
@@ -503,7 +502,9 @@ def check_window(
     """
     assert len(window) == 1, "Use _check_windows for multiple windows"
     assert len(orbit) == 1, "_check_window only support one orbit for now"
-    logger.info(f"check_window orbit: {orbit.orbit_id[0].as_py()} obscode: {window.obscode[0].as_py()} window: {window.window_start().mjd()[0].as_py()} to {window.window_end().mjd()[0].as_py()}")
+    logger.info(
+        f"check_window orbit: {orbit.orbit_id[0].as_py()} obscode: {window.obscode[0].as_py()} window: {window.window_start().mjd()[0].as_py()} to {window.window_end().mjd()[0].as_py()}"
+    )
     db = PrecoveryDatabase.from_dir(db_dir, mode="r", allow_version_mismatch=True)
     obscode = window.obscode[0].as_py()
     propagation_targets = db.frames.idx.propagation_targets(
@@ -712,7 +713,9 @@ class PrecoveryDatabase:
         # group windows by obscodes so that many windows can be searched at once
         for obscode in windows.obscode.unique():
             obscode_windows = windows.select("obscode", obscode)
-            logger.info(f"searching {len(obscode_windows)} windows for obscode {obscode}")
+            logger.info(
+                f"searching {len(obscode_windows)} windows for obscode {obscode}"
+            )
 
             candidates_obscode, frame_candidates_obscode = self._check_windows(
                 obscode_windows,
@@ -743,7 +746,9 @@ class PrecoveryDatabase:
         Find all observations that match orbit within a list of windows
         """
         assert len(orbit) == 1, "_check_windows only support one orbit for now"
-        windows = windows.sort_by([("time.days", "descending"), ("time.nanos", "descending")])
+        windows = windows.sort_by(
+            [("time.days", "descending"), ("time.nanos", "descending")]
+        )
         logger.info(
             f"_check_windows orbit: {orbit.orbit_id[0].as_py()} windows: {len(windows)} obscode: {windows.obscode.unique().to_pylist()}"
         )
