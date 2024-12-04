@@ -34,7 +34,7 @@ dependencies = [
     "pandas",
     "healpy",
     "requests",
-    "adam-core @ git+https://github.com/B612-Asteroid-Institute/adam_core@f9dac602ee0b1c7161eb62f63cb8e97cbbeaa0a7",
+    "adam-core>=0.2.5",
 ]
 [dependency-groups]
 test = [
