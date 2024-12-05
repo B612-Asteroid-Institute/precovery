@@ -56,9 +56,10 @@ jobs:
           path: bench.json
           retention-days: 30
 
-      # If PR, download main's benchmarks and compare
+      # If PR, download main benchmark data
       - name: Download main benchmark data
         if: github.event_name == 'pull_request'
+        id: download-main-benchmark
         uses: actions/download-artifact@v3
         with:
           name: main-benchmark
@@ -66,7 +67,7 @@ jobs:
         continue-on-error: true
           
       - name: Compare benchmarks
-        if: 'github.event_name == "pull_request" && steps.download-main-benchmark.outputs.exists'
+        if: github.event_name == 'pull_request' && steps.download-main-benchmark.outcome == 'success'
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: Python Benchmark
