@@ -4,7 +4,7 @@ import logging
 import os
 import struct
 import warnings
-from typing import Iterator, List, Optional, Tuple
+from typing import Iterator, List, Optional, Sequence, Tuple
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -13,6 +13,7 @@ import sqlalchemy as sq
 from adam_core.time import Timestamp
 from astropy.time import Time
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.engine import Row
 from sqlalchemy.sql import func as sqlfunc
 from sqlalchemy.sql.expression import ColumnClause
 
@@ -198,22 +199,23 @@ class FrameIndex:
 
         # Execute query and fetch results in chunks
         chunk_size = 100000
-        rows = []
+        obscodes: List[str] = []
+        mjds: List[float] = []
         result = self.dbconn.execution_options(stream_results=True).execute(query)
 
         while True:
-            chunk = result.fetchmany(chunk_size)
+            chunk: Sequence[Row[Tuple[str, float]]] = result.fetchmany(chunk_size)
             if not chunk:
                 break
-            rows.extend(chunk)
+            # Unzip the chunk directly into the lists
+            chunk_obscodes, chunk_mjds = zip(*chunk)
+            obscodes.extend(chunk_obscodes)
+            mjds.extend(chunk_mjds)
 
-        if not rows:
+        if not mjds:  # or `if not mjds:` - they'll have the same length
             return WindowCenters.empty()
 
         # Process results using PyArrow for better performance
-        obscodes, mjds = zip(*rows)
-
-        # Convert to PyArrow arrays for faster computation
         mjds_arr = pa.array(mjds)
         window_ids = pc.floor(
             pc.divide(
@@ -231,15 +233,14 @@ class FrameIndex:
 
         # Calculate window centers
         window_starts = [start_mjd + wid * window_size_days for wid in final_window_ids]
-        window_centers = [ws + window_size_days / 2 for ws in window_starts]
+        window_center_mjds = [ws + window_size_days / 2 for ws in window_starts]
 
         # Return as WindowCenters
-        window_centers = WindowCenters.from_kwargs(
+        window_centers: WindowCenters = WindowCenters.from_kwargs(
             obscode=final_obscodes,
-            time=Timestamp.from_mjd(window_centers, scale="utc"),
-            window_size_days=pa.repeat(window_size_days, len(window_centers)),
-        )
-        window_centers = window_centers.sort_by(["time.days", "time.nanos"])
+            time=Timestamp.from_mjd(window_center_mjds, scale="utc"),
+            window_size_days=pa.repeat(window_size_days, len(window_center_mjds)),
+        ).sort_by(["time.days", "time.nanos"])
         return window_centers
 
     def propagation_targets(
