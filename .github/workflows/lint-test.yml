@@ -47,33 +47,28 @@ jobs:
         run: |
           pdm run benchmark --benchmark-json bench.json
 
-      # If on main branch, upload benchmark results
+      # Store benchmark results as a GitHub commit comment
       - name: Store main benchmark result
         if: github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v3
-        with:
-          name: main-benchmark
-          path: bench.json
-          retention-days: 30
-
-      # If PR, download main benchmark data
-      - name: Download main benchmark data
-        if: github.event_name == 'pull_request'
-        id: download-main-benchmark
-        uses: actions/download-artifact@v3
-        with:
-          name: main-benchmark
-          path: main-bench
-        continue-on-error: true
-          
-      - name: Compare benchmarks
-        if: github.event_name == 'pull_request' && steps.download-main-benchmark.outcome == 'success'
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: Python Benchmark
           tool: 'pytest'
           output-file-path: bench.json
-          external-data-json-path: main-bench/bench.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          # Store benchmarks on gh-pages branch
+          gh-pages-branch: gh-pages
+
+      # For PRs, the benchmark comparison will automatically happen
+      # since we're now storing benchmarks on the gh-pages branch
+      - name: Compare benchmarks
+        if: github.event_name == 'pull_request'
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Python Benchmark
+          tool: 'pytest'
+          output-file-path: bench.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
           comment-always: true
           fail-threshold: '150%'
