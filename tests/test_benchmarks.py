@@ -3,7 +3,6 @@ from adam_assist import ASSISTPropagator
 from adam_core.dynamics.propagation import propagate_2body
 from adam_core.time import Timestamp
 
-from precovery.main import precover
 from precovery.observation import ObservationsTable
 
 from .testutils import make_sourceframe_with_observations
