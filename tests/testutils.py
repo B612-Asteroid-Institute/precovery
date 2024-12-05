@@ -5,25 +5,24 @@ from typing import Optional, Tuple
 
 import healpy
 import pytest
+from adam_assist import ASSISTPropagator
 from adam_core.observers import Observers
 from adam_core.orbits import Orbits
-from adam_core.propagator.adam_assist import ASSISTPropagator
 from adam_core.time import Timestamp
 
 from precovery.sourcecatalog import SourceFrame, SourceObservation
 
 
 def make_sourceobs(
-    exposure_id: str = "exposure",
+    exposure_id: Optional[str] = None,
     id: Optional[bytes] = None,
     obscode: str = "obs",
     healpixel: Optional[int] = None,
     nside: int = 32,
     ra: float = 1.0,
     dec: float = 2.0,
-    mjd: float = 50000.0,
-    exposure_mjd_start: float = 50000.0,
-    exposure_mjd_mid: float = 50000.0,
+    mjd: float = 50000.5,
+    exposure_duration: float = 30,
 ) -> SourceObservation:
     """Constructor for SourceObservations which provides default
     values for anything unspecified, which makes test setup less
@@ -33,8 +32,16 @@ def make_sourceobs(
     if id is None:
         id = random_string(16).encode("utf8")
 
+    if exposure_id is None:
+        exposure_id = random_string(16).encode("utf8")
+
     if healpixel is not None:
         ra, dec = radec_for_healpixel(healpixel, nside)
+
+    # Calculate exposure start and mid from mjd
+    # We default to the observation time (mjd) to be equal to the midpoint for now
+    exposure_mjd_start = mjd - exposure_duration / 86400 / 2.0
+    exposure_mjd_mid = mjd
 
     return SourceObservation(
         exposure_id=exposure_id,
@@ -50,7 +57,7 @@ def make_sourceobs(
         filter="filter",
         exposure_mjd_start=exposure_mjd_start,
         exposure_mjd_mid=exposure_mjd_mid,
-        exposure_duration=30,
+        exposure_duration=exposure_duration,
     )
 
 
@@ -67,7 +74,7 @@ def make_sourceobs_of_orbit(
     ephem = propagator.generate_ephemeris(orbit, observers)
     obs = make_sourceobs(
         mjd=mjd,
-        exposure_mjd_mid=mjd,
+        exposure_duration=30.0,
         obscode=obscode,
         ra=ephem.coordinates.lon[0].as_py(),
         dec=ephem.coordinates.lat[0].as_py(),
@@ -79,8 +86,8 @@ def make_sourceframe_with_observations(
     n_observations: int,
     exposure_id: str = "exposure",
     obscode: str = "obs",
-    exposure_mjd_start: float = 50000.0,
-    exposure_mjd_mid: float = 50000.0,
+    mjd: float = 50000.0,
+    exposure_duration: float = 30.0,
     healpixel: int = 1,
 ) -> SourceFrame:
     """Constructor for SourceFrames which provides default
@@ -93,12 +100,14 @@ def make_sourceframe_with_observations(
             exposure_id=exposure_id,
             obscode=obscode,
             healpixel=healpixel,
-            mjd=exposure_mjd_mid,
-            exposure_mjd_start=exposure_mjd_start,
-            exposure_mjd_mid=exposure_mjd_mid,
+            mjd=mjd,
+            exposure_duration=exposure_duration,
         )
         for _ in range(n_observations)
     ]
+
+    exposure_mjd_start = mjd - exposure_duration / 86400 / 2.0
+    exposure_mjd_mid = mjd
 
     return SourceFrame(
         exposure_id=exposure_id,
@@ -106,8 +115,8 @@ def make_sourceframe_with_observations(
         filter="filter",
         exposure_mjd_start=exposure_mjd_start,
         exposure_mjd_mid=exposure_mjd_mid,
-        exposure_duration=30.0,
-        healpixel=1,
+        exposure_duration=exposure_duration,
+        healpixel=healpixel,
         observations=observations,
     )
 
@@ -121,10 +130,3 @@ def radec_for_healpixel(healpixel: int, nside: int) -> Tuple[float, float]:
 
 def random_string(length: int):
     return "".join(random.choice(string.ascii_lowercase) for i in range(length))
-
-
-# maybe replace this with a check that we have downloaded jpl ephemeris files?
-requires_jpl_ephem_data = pytest.mark.skipif(
-    "ASSIST_DATA_DIR" not in os.environ,
-    reason="test requires propagation, so ASSIST_DATA_DIR environment variable must be set",
-)

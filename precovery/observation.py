@@ -1,81 +1,81 @@
-import dataclasses
 import struct
+from typing import List
 
-import numpy as np
+import quivr as qv
+from adam_core.time import Timestamp
 
+from .healpix_geom import radec_to_healpixel
 from .sourcecatalog import SourceObservation
 
 # mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id
 DATA_LAYOUT = "<dddddddl"
 
 
-@dataclasses.dataclass
-class Observation:
-    mjd: float
-    ra: float
-    dec: float
-    ra_sigma: float
-    dec_sigma: float
-    mag: float
-    mag_sigma: float
-    id: bytes
+class ObservationsTable(qv.Table):
+    """
+    Quivr representation of observation
+    """
+
+    id = qv.BinaryColumn()
+    time = Timestamp.as_column()
+    ra = qv.Float64Column()
+    dec = qv.Float64Column()
+    ra_sigma = qv.Float64Column()
+    dec_sigma = qv.Float64Column()
+    mag = qv.Float64Column()
+    mag_sigma = qv.Float64Column()
 
     data_layout = struct.Struct(DATA_LAYOUT)
     datagram_size = struct.calcsize(DATA_LAYOUT)
 
-    def to_bytes(self) -> bytes:
-        prefix = self.data_layout.pack(
-            self.mjd,
-            self.ra,
-            self.dec,
-            self.ra_sigma,
-            self.dec_sigma,
-            self.mag,
-            self.mag_sigma,
-            len(self.id),
-        )
-        return prefix + self.id
+    def healpixel(self, nside):
+        return radec_to_healpixel(self.ra, self.dec, nside)
+
+    def to_bytes(self) -> List[bytes]:
+        mjds = self.time.mjd().to_pylist()
+        as_dicts = self.table.to_pylist()
+        return [
+            self.data_layout.pack(
+                mjd,
+                row["ra"],
+                row["dec"],
+                row["ra_sigma"],
+                row["dec_sigma"],
+                row["mag"],
+                row["mag_sigma"],
+                len(row["id"]),
+            )
+            + row["id"]
+            for mjd, row in zip(mjds, as_dicts)
+        ]
 
     @classmethod
-    def from_srcobs(cls, so: SourceObservation):
-        """
-        Cast a SourceObservation to an Observation.
-        """
-        return cls(
-            mjd=so.mjd,
-            ra=so.ra,
-            dec=so.dec,
-            ra_sigma=so.ra_sigma,
-            dec_sigma=so.dec_sigma,
-            mag=so.mag,
-            mag_sigma=so.mag_sigma,
-            id=so.id,
+    def from_srcobs(cls, srcobs: List[SourceObservation]):
+        if len(srcobs) == 0:
+            return ObservationsTable.empty()
+
+        (mjds, ras, decs, ra_sigmas, dec_sigmas, mags, mag_sigmas, ids) = zip(
+            *[
+                (
+                    so.mjd,
+                    so.ra,
+                    so.dec,
+                    so.ra_sigma,
+                    so.dec_sigma,
+                    so.mag,
+                    so.mag_sigma,
+                    so.id,
+                )
+                for so in srcobs
+            ]
         )
-
-
-class ObservationArray:
-    """A collection of Observations stored together in a numpy array."""
-
-    dtype = np.dtype(
-        [
-            ("mjd", np.float64),
-            ("ra", np.float64),
-            ("dec", np.float64),
-            ("ra_sigma", np.float64),
-            ("dec_sigma", np.float64),
-            ("mag", np.float64),
-            ("mag_sigma", np.float64),
-            ("id", np.object_),
-        ]
-    )
-
-    def __init__(self, observations: list[Observation]):
-        self.values = np.array(
-            [dataclasses.astuple(o) for o in observations], dtype=self.dtype
+        return ObservationsTable.from_kwargs(
+            id=ids,
+            time=Timestamp.from_mjd(mjds, scale="utc"),
+            ra=ras,
+            dec=decs,
+            ra_sigma=ra_sigmas,
+            dec_sigma=dec_sigmas,
+            mag=mags,
+            mag_sigma=mag_sigmas,
         )
-
-    def __len__(self) -> int:
-        return len(self.values)
-
-    def to_list(self):
-        return [Observation(*row) for row in self.values]

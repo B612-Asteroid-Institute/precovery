@@ -3,13 +3,13 @@ import os
 
 import numpy as np
 import pandas as pd
+from adam_assist import ASSISTPropagator
 from adam_core.observers import Observers
 from adam_core.orbits import Orbits
-from adam_core.propagator.adam_assist import ASSISTPropagator
 from adam_core.time import Timestamp
 
 SAMPLE_ORBITS_FILE = os.path.join(
-    os.path.dirname(__file__), "data", "sample_orbits.csv"
+    os.path.dirname(__file__), "data", "sample_orbits.parquet"
 )
 TEST_OBSERVATIONS_DIR = os.path.join(os.path.dirname(__file__), "data/index")
 
@@ -105,9 +105,10 @@ def make_observations(
                 + observatory_window_offset
             )
             exposure_mid_times = exposure_start_times + exposure_duration / 2 / 86400
-            observation_times = exposure_start_times + rng.uniform(
-                0, exposure_duration / 86400
-            )
+            # observation_times = exposure_start_times + rng.uniform(
+            #     0, exposure_duration / 86400
+            # )
+            observation_times = exposure_mid_times
 
             times = Timestamp.from_mjd(observation_times, scale="utc")
             # create observers

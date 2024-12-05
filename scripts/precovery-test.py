@@ -6,8 +6,8 @@ from typing import List
 import numpy as np
 import pandas as pd
 import quivr as qv
+from adam_assist import ASSISTPropagator
 from adam_core.orbits import Orbits
-from adam_core.propagator.adam_assist import ASSISTPropagator
 
 from precovery import precovery_db
 

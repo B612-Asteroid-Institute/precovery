@@ -1,9 +1,10 @@
 import pytest
+from adam_assist import ASSISTPropagator
 from adam_core.dynamics.propagation import propagate_2body
-from adam_core.propagator.adam_assist import ASSISTPropagator
 from adam_core.time import Timestamp
 
-from precovery.observation import Observation
+from precovery.main import precover
+from precovery.observation import ObservationsTable
 
 from .testutils import make_sourceframe_with_observations
 
@@ -25,8 +26,7 @@ def test_benchmark_iterate_frame_observations(benchmark, frame_db, nobs):
 
     # Benchmark iterating over the observations in the frame.
     def benchmark_case():
-        for _ in frame_db.iterate_observations(frame):
-            pass
+        frame_db.get_observations(frame)
 
     benchmark(benchmark_case)
 
@@ -40,7 +40,9 @@ def test_benchmark_store_observations(benchmark, frame_db, nobs):
     )
     src_frame = make_sourceframe_with_observations(nobs, healpixel=1, obscode="obs")
     yearmonth = frame_db._compute_year_month_str(src_frame)
-    observations = [Observation.from_srcobs(o) for o in src_frame.observations]
+    observations: ObservationsTable = ObservationsTable.from_srcobs(
+        src_frame.observations
+    )
 
     def benchmark_case():
         frame_db.store_observations(observations, "test_dataset", yearmonth)
@@ -77,3 +79,21 @@ def test_benchmark_propagate_orbit_2body(benchmark, sample_orbits, propagate_dis
         propagate_2body(orbit, times)
 
     benchmark(benchmark_case)
+
+
+@pytest.mark.benchmark(group="precovery")
+@pytest.mark.parametrize("max_processes", [1, 8])
+def test_benchmark_precovery_search(benchmark, precovery_db_with_data, sample_orbits, max_processes):
+
+    orbit = sample_orbits[0]
+
+    def benchmark_case():
+        precovery_db_with_data.precover(
+            orbit,
+            tolerance=5 / 3600,
+            window_size=7,
+            propagator_class=ASSISTPropagator,
+            max_processes=max_processes,
+        )
+
+    benchmark.pedantic(benchmark_case, iterations=1, rounds=1)

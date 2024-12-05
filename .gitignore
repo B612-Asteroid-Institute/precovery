@@ -120,3 +120,7 @@ out/
 database/
 .docker_bash_history.txt
 *.DS_Store
+
+pdm.lock
+.pdm-python
+precovery/_version.py
