@@ -78,8 +78,8 @@ typecheck = "mypy ./precovery"
 test = "pytest --benchmark-skip -m 'not profile' {args}"
 doctest = "pytest --doctest-plus --doctest-only"
 benchmark = "pytest --benchmark-only {args}"
-coverage = "pytest --cov=precovery --cov-report=xml -m 'not profile'"
-profile = "pytest -s -m 'profile'"
+coverage = "pytest --benchmark-skip--cov=precovery --cov-report=xml -m 'not profile' {args}"
+profile = "pytest -s -m 'profile' {args}"
 
 [tool.pdm]
 distribution = true
