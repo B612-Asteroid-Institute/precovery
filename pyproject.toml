@@ -34,7 +34,7 @@ dependencies = [
     "pandas",
     "healpy",
     "requests",
-    "adam-core>=0.3.0",
+    "adam-core>=0.3.1",
 ]
 [dependency-groups]
 test = [
