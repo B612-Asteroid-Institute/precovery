@@ -386,9 +386,12 @@ def find_healpixel_matches(
     propagation_targets = propagation_targets.sort_by(["time.days", "time.nanos"])
     ephems = ephems.sort_by(["coordinates.time.days", "coordinates.time.nanos"])
 
+    propagation_target_times = propagation_targets.time.rescale("utc")
+    ephem_times = ephems.coordinates.time.rescale("utc")
+
     # quickly check to make sure times are equal
     assert pc.all(
-        propagation_targets.time.equals(ephems.coordinates.time, precision="ms")
+        propagation_target_times.equals(ephem_times, precision="ms")
     ).as_py(), "Propagation targets and ephemeris must have matching times"
 
     # Calculate the healpixels for the ephemeris
@@ -521,8 +524,8 @@ def check_window(
     times = propagation_targets.time
 
     # First make sure our orbit it n-body propagated to the window center
-    orbit = orbit.set_column("coordinates.time", orbit.coordinates.time.rescale("utc"))
-    if not (pc.all(orbit.coordinates.time.equals(window.time, precision="ms")).as_py()):
+    time_utc = orbit.coordinates.time.rescale("utc")
+    if not (pc.all(time_utc.equals(window.time, precision="ms")).as_py()):
         propagator = propagator_class()
         orbit = propagator.propagate_orbits(orbit, window.time)
 
@@ -530,12 +533,6 @@ def check_window(
     observers = Observers.from_code(obscode, times)
     ## first propagate with 2_body
     propagated_orbits = propagate_2body(orbit, times)
-    # hotfix: rescale the times back from propagated_orbits
-    # this behavior should be fixed in adam_core, to always return
-    # the timescale of the submitted times
-    propagated_orbits = propagated_orbits.set_column(
-        "coordinates.time", propagated_orbits.coordinates.time.rescale("utc")
-    )
 
     # generate ephemeris
     ephems = generate_ephemeris_2body(propagated_orbits, observers)
@@ -753,8 +750,6 @@ class PrecoveryDatabase:
             f"_check_windows orbit: {orbit.orbit_id[0].as_py()} windows: {len(windows)} obscode: {windows.obscode.unique().to_pylist()}"
         )
 
-        # Using the propagated orbits, check each window. Propagate the orbit from the center of
-        # window using 2-body to find any HealpixFrames where a detection could have occured
         precovery_candidates = PrecoveryCandidates.empty()
         frame_candidates = FrameCandidates.empty()
 
@@ -766,6 +761,11 @@ class PrecoveryDatabase:
                     check_window_remote.remote(
                         self.directory,
                         window,
+                        # Note: There is no speed benefit to pre-propagating
+                        # the orbit to the window center here, since we do
+                        # the n-body propagation inside the worker and the
+                        # delay to start the job offsets any advantage
+                        # from prepropagation.
                         orbit,
                         tolerance,
                         propagator_class,
@@ -797,13 +797,12 @@ class PrecoveryDatabase:
                     [frame_candidates, frame_candidates_window]
                 )
         else:
-            # When we are running as a single process,
-            # it makes sense to do the n-body propagation once
-            # and step along the windows
-            # In multiprocessing it makes more sense to
-            # duplicate the n-body propagation inside the check_window
             propagator = propagator_class()
             for window in windows:
+                # For single process, we propagate the orbit
+                # to the window center in a loop to avoid
+                # duplicating the n-body propagation inside
+                # check_window
                 orbit = propagator.propagate_orbits(orbit, window.time)
                 candidates_window, frame_candidates_window = check_window(
                     self.directory,
