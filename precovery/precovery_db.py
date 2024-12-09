@@ -763,7 +763,7 @@ class PrecoveryDatabase:
                         window,
                         # Note: There is no speed benefit to pre-propagating
                         # the orbit to the window center here, since we do
-                        # the n-body propagation inside the worker and the 
+                        # the n-body propagation inside the worker and the
                         # delay to start the job offsets any advantage
                         # from prepropagation.
                         orbit,
