@@ -20,6 +20,7 @@ from adam_core.observations import Exposures, PointSourceDetections
 from adam_core.observers import Observers
 from adam_core.orbits import Orbits
 from adam_core.orbits.ephemeris import Ephemeris
+from adam_core.photometry.magnitude import predict_magnitudes
 from adam_core.propagator import Propagator
 from adam_core.ray_cluster import initialize_use_ray
 from adam_core.time import Timestamp
@@ -69,6 +70,9 @@ class PrecoveryCandidates(qv.Table):
     delta_ra_arcsec = qv.Float64Column()
     delta_dec_arcsec = qv.Float64Column()
     distance_arcsec = qv.Float64Column()
+    pred_mag = qv.Float64Column(nullable=True)
+    mag_residual = qv.Float64Column(nullable=True)
+    aberrated_coordinates = CartesianCoordinates.as_column(nullable=True)
     dataset_id = qv.LargeStringColumn()
     orbit_id = qv.LargeStringColumn()
 
@@ -88,12 +92,15 @@ class PrecoveryCandidates(qv.Table):
     def exposures(self) -> Exposures:
         unique = self.drop_duplicates(subset=["exposure_id"])
 
+        return unique.as_exposures()
+
+    def as_exposures(self) -> Exposures:
         return Exposures.from_kwargs(
-            id=unique.exposure_id,
-            start_time=unique.exposure_time_start,
-            observatory_code=unique.obscode,
-            filter=unique.filter.to_pylist(),
-            duration=unique.exposure_duration,
+            id=self.exposure_id,
+            start_time=self.exposure_time_start,
+            observatory_code=self.obscode,
+            filter=self.filter.to_pylist(),
+            duration=self.exposure_duration,
         )
 
     def predicted_ephemeris(self, orbit_ids=None) -> Ephemeris:
@@ -212,18 +219,23 @@ class FrameCandidates(qv.Table):
     pred_dec_deg = qv.Float64Column()
     pred_vra_degpday = qv.Float64Column()
     pred_vdec_degpday = qv.Float64Column()
+    pred_mag = qv.Float64Column(nullable=True)
+    aberrated_coordinates = CartesianCoordinates.as_column(nullable=True)
     dataset_id = qv.LargeStringColumn()
     orbit_id = qv.LargeStringColumn()
 
     def exposures(self) -> Exposures:
         unique = self.drop_duplicates(subset=["exposure_id"])
 
+        return unique.as_exposures()
+
+    def as_exposures(self) -> Exposures:
         return Exposures.from_kwargs(
-            id=unique.exposure_id,
-            start_time=unique.exposure_time_start,
-            observatory_code=unique.obscode,
-            filter=unique.filter.to_pylist(),
-            duration=unique.exposure_duration,
+            id=self.exposure_id,
+            start_time=self.exposure_time_start,
+            observatory_code=self.obscode,
+            filter=self.filter.to_pylist(),
+            duration=self.exposure_duration,
         )
 
     def predicted_ephemeris(self, orbit_ids=None) -> Ephemeris:
@@ -329,6 +341,9 @@ def candidates_from_ephem(
         delta_ra_arcsec=delta_ra_arcsec,
         delta_dec_arcsec=delta_dec_arcsec,
         distance_arcsec=distance_arcsec,
+        pred_mag=None,
+        mag_residual=None,
+        aberrated_coordinates=ephem.aberrated_coordinates,
         dataset_id=dataset_id,
         orbit_id=orbit_id,
     )
@@ -350,6 +365,7 @@ def frame_candidates_from_frame(frame: HealpixFrame, ephem: Ephemeris):
             nside=CANDIDATE_NSIDE,
         )
     )
+
     return FrameCandidates.from_kwargs(
         exposure_time_start=Timestamp.from_mjd(frame.exposure_mjd_start, scale="utc"),
         exposure_time_mid=Timestamp.from_mjd(frame.exposure_mjd_mid, scale="utc"),
@@ -363,6 +379,8 @@ def frame_candidates_from_frame(frame: HealpixFrame, ephem: Ephemeris):
         pred_dec_deg=ephem.coordinates.lat,
         pred_vra_degpday=ephem.coordinates.vlon,
         pred_vdec_degpday=ephem.coordinates.vlat,
+        pred_mag=None,
+        aberrated_coordinates=ephem.aberrated_coordinates,
         orbit_id=ephem.orbit_id,
     )
 
@@ -1231,7 +1249,75 @@ class PrecoveryDatabase:
             )
 
         # convert these to our new output formats
+        candidates = self._attach_magnitudes(candidates, orbit)
+        frame_candidates = self._attach_magnitudes(frame_candidates, orbit)
+
+        # Null out the temporary aberrated_coordinates column before returning
+        if len(candidates) > 0:
+            candidates = candidates.set_column(
+                "aberrated_coordinates",
+                pa.array(
+                    [None] * len(candidates),
+                    type=candidates.table.schema.field("aberrated_coordinates").type,
+                ),
+            )
+        if len(frame_candidates) > 0:
+            frame_candidates = frame_candidates.set_column(
+                "aberrated_coordinates",
+                pa.array(
+                    [None] * len(frame_candidates),
+                    type=frame_candidates.table.schema.field("aberrated_coordinates").type,
+                ),
+            )
+
         return candidates, frame_candidates
+
+    def _attach_magnitudes(
+        self, table: qv.Table, orbit: Orbits
+    ) -> qv.Table:
+        """
+        Calculate and attach predicted magnitudes and residuals to the given table.
+        """
+        if len(table) == 0:
+            return table
+
+        if orbit.physical_parameters is None:
+            return table
+
+        # We assume len(orbit) == 1 as enforced in precover()
+        H = orbit.physical_parameters.H_v[0].as_py()
+        G = orbit.physical_parameters.G[0].as_py()
+
+        if H is None:
+            return table
+
+        if G is None:
+            G = 0.15
+
+        # Photometry requires heliocentric coordinates. The stored aberrated_coordinates
+        # are in the barycentric ecliptic frame.
+        obj_helio = transform_coordinates(
+            table.aberrated_coordinates,
+            CartesianCoordinates,
+            frame_out="ecliptic",
+            origin_out=OriginCodes.SUN,
+        )
+
+        # predict_magnitudes expects object_coords and exposures to be the same length.
+        pred_mag = predict_magnitudes(
+            H=H,
+            object_coords=obj_helio,
+            exposures=table.as_exposures(),
+            G=G,
+            composition="C",
+        )
+
+        table = table.set_column("pred_mag", pred_mag)
+        if isinstance(table, PrecoveryCandidates):
+            mag_residual = pc.subtract(table.mag, pred_mag)
+            table = table.set_column("mag_residual", mag_residual)
+
+        return table
 
     def _check_windows(
         self,
@@ -1412,7 +1498,10 @@ class PrecoveryDatabase:
             # times which may differ from the exposure midpoint time
             if len(matches) == 0:
                 frame_candidates = qv.concatenate(
-                    [frame_candidates, frame_candidates_from_frame(f, matching_ephem)]
+                    [
+                        frame_candidates,
+                        frame_candidates_from_frame(f, matching_ephem),
+                    ]
                 )
             else:
                 precovery_candidates = qv.concatenate([precovery_candidates, matches])
@@ -1471,7 +1560,9 @@ class PrecoveryDatabase:
         if len(matching_observations) == 0:
             return PrecoveryCandidates.empty()
 
-        candidates = candidates_from_ephem(matching_observations, matching_ephem, frame)
+        candidates = candidates_from_ephem(
+            matching_observations, matching_ephem, frame
+        )
         return candidates
 
     def find_observations_in_region(
