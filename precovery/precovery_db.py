@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Optional, Tuple, Type
+from typing import Optional, Tuple, Type, Union, cast, overload
 
 import numpy as np
 import pyarrow as pa
@@ -19,6 +19,10 @@ from adam_core.observations import Exposures, PointSourceDetections
 from adam_core.observers import Observers
 from adam_core.orbits import Orbits
 from adam_core.orbits.ephemeris import Ephemeris
+from adam_core.photometry.bandpasses import (
+    bandpass_delta_mag,
+    map_to_canonical_filter_bands,
+)
 from adam_core.photometry.magnitude import predict_magnitudes
 from adam_core.propagator import Propagator
 from adam_core.ray_cluster import initialize_use_ray
@@ -29,6 +33,7 @@ try:
 except ImportError:
     __version__ = "unknown"
 from .config import Config, DefaultConfig
+from .filter_limiting_magnitudes import FilterLimitingMagnitudes
 from .frame_db import FrameDB, FrameIndex, GenericFrame, HealpixFrame, WindowCenters
 from .healpix_geom import radec_to_healpixel
 from .observation import ObservationsTable
@@ -91,14 +96,20 @@ class PrecoveryCandidates(qv.Table):
     def exposures(self) -> Exposures:
         unique = self.drop_duplicates(subset=["exposure_id"])
 
-        return unique.as_exposures()
+        return Exposures.from_kwargs(
+            id=unique.exposure_id,
+            start_time=unique.exposure_time_start,
+            observatory_code=unique.obscode,
+            filter=unique.filter,
+            duration=unique.exposure_duration,
+        )
 
     def as_exposures(self) -> Exposures:
         return Exposures.from_kwargs(
             id=self.exposure_id,
             start_time=self.exposure_time_start,
             observatory_code=self.obscode,
-            filter=self.filter.to_pylist(),
+            filter=self.filter,
             duration=self.exposure_duration,
         )
 
@@ -226,14 +237,20 @@ class FrameCandidates(qv.Table):
     def exposures(self) -> Exposures:
         unique = self.drop_duplicates(subset=["exposure_id"])
 
-        return unique.as_exposures()
+        return Exposures.from_kwargs(
+            id=unique.exposure_id,
+            start_time=unique.exposure_time_start,
+            observatory_code=unique.obscode,
+            filter=unique.filter,
+            duration=unique.exposure_duration,
+        )
 
     def as_exposures(self) -> Exposures:
         return Exposures.from_kwargs(
             id=self.exposure_id,
             start_time=self.exposure_time_start,
             observatory_code=self.obscode,
-            filter=self.filter.to_pylist(),
+            filter=self.filter,
             duration=self.exposure_duration,
         )
 
@@ -443,7 +460,9 @@ def generate_ephem_for_per_obs_timestamps(
         mean_orbit_state, observations.time, propagator, obscode
     )
     observers = Observers.from_code(obscode, observations.time)
-    ephemeris = generate_ephemeris_2body(propagated_orbits, observers)
+    ephemeris = generate_ephemeris_2body(
+        propagated_orbits, observers, predict_magnitudes=False
+    )
     return ephemeris
 
 
@@ -555,7 +574,9 @@ def check_window(
     propagated_orbits = propagate_2body(orbit, times)
 
     # generate ephemeris
-    ephems = generate_ephemeris_2body(propagated_orbits, observers)
+    ephems = generate_ephemeris_2body(
+        propagated_orbits, observers, predict_magnitudes=False
+    )
     frames_to_check = find_healpixel_matches(
         propagation_targets, ephems, db.frames.healpix_nside
     )
@@ -587,6 +608,78 @@ class PrecoveryDatabase:
         self._exposures_by_obscode: dict = {}
         self.config = config
         self.directory: str = directory
+        # Loaded once from a generated Parquet cache file. We keep a Python dict for
+        # readability/debuggability and also pre-materialize Arrow arrays for fast,
+        # vectorized lookups in the faint-frame skipping hot path (no per-row Python).
+        self._limit_by_code_filter: dict[str, float] = {}
+        self._limit_codefid_keys: pa.Array = pa.array([], type=pa.large_string())
+        self._limit_codefid_vals: pa.Array = pa.array([], type=pa.float64())
+
+    @staticmethod
+    def _timestamp_key(days: pa.Array, nanos: pa.Array) -> pa.Array:
+        """
+        Build an int64 composite key for Timestamp alignment: key = days*NANOS_IN_DAY + nanos.
+
+        We use this because (at least) pyarrow 22 does not support `index_in()` over struct keys.
+        """
+        nanos_in_day = pa.scalar(86_400_000_000_000, type=pa.int64())  # 86400 * 1e9
+        return pc.add_checked(pc.multiply_checked(days, nanos_in_day), nanos)
+
+    @staticmethod
+    def _dict_to_kv_arrays(d: dict[str, float]) -> tuple[pa.Array, pa.Array]:
+        """
+        Convert a python dict[str, float] into Arrow key/value arrays.
+        """
+        if not d:
+            return (
+                pa.array([], type=pa.large_string()),
+                pa.array([], type=pa.float64()),
+            )
+        return (
+            pa.array(list(d.keys()), type=pa.large_string()),
+            pa.array(list(d.values()), type=pa.float64()),
+        )
+
+    @staticmethod
+    def _arrow_lookup(needles: pa.Array, keys: pa.Array, values: pa.Array) -> pa.Array:
+        """
+        Vectorized lookup: for each element in `needles`, return the corresponding `values`
+        where `needles[i]` is present in `keys`, else null.
+        """
+        if len(keys) == 0:
+            return pa.nulls(len(needles), type=pa.float64())
+        idx = pc.fill_null(pc.index_in(needles, value_set=keys), -1)
+        valid = pc.greater_equal(idx, 0)
+        idx_safe = pc.cast(pc.if_else(valid, idx, 0), pa.int64())
+        out = pc.take(values, idx_safe)
+        return pc.if_else(valid, out, None)
+
+    def _load_limiting_magnitudes_cache(self) -> None:
+        """
+        Load a generated-once limiting magnitude cache file from the DB directory.
+
+        This avoids any subsequent DB lookups during precovery search.
+        """
+        parq_name = getattr(self.config, "limiting_magnitudes_parquet_file", None)
+        if parq_name:
+            parq_path = os.path.join(self.directory, parq_name)
+            if os.path.exists(parq_path):
+                try:
+                    table = FilterLimitingMagnitudes.from_parquet(parq_path)
+                    self._limit_by_code_filter = table.static_code_filter_map()
+                    if len(self._limit_by_code_filter) > 0:
+                        self._limit_codefid_keys = pa.array(
+                            list(self._limit_by_code_filter.keys()),
+                            type=pa.large_string(),
+                        )
+                        self._limit_codefid_vals = pa.array(
+                            list(self._limit_by_code_filter.values()), type=pa.float64()
+                        )
+                    return
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to read limiting magnitudes parquet cache file: {e}"
+                    )
 
     @classmethod
     def from_dir(
@@ -623,7 +716,9 @@ class PrecoveryDatabase:
         frame_db = FrameDB(
             frame_idx, data_path, config.data_file_max_size, config.nside, mode=mode
         )
-        return cls(frame_db, directory, config)
+        db = cls(frame_db, directory, config)
+        db._load_limiting_magnitudes_cache()
+        return db
 
     @classmethod
     def create(
@@ -648,7 +743,9 @@ class PrecoveryDatabase:
 
         frame_db = FrameDB(frame_idx, data_path, data_file_max_size, nside)
 
-        return cls(frame_db, directory, config)
+        db = cls(frame_db, directory, config)
+        db._load_limiting_magnitudes_cache()
+        return db
 
     def precover(
         self,
@@ -755,25 +852,56 @@ class PrecoveryDatabase:
         if len(candidates) > 0:
             candidates = candidates.set_column(
                 "aberrated_coordinates",
-                pa.array(
-                    [None] * len(candidates),
-                    type=candidates.table.schema.field("aberrated_coordinates").type,
+                CartesianCoordinates.from_kwargs(
+                    x=pa.nulls(len(candidates), type=pa.float64()),
+                    y=pa.nulls(len(candidates), type=pa.float64()),
+                    z=pa.nulls(len(candidates), type=pa.float64()),
+                    vx=pa.nulls(len(candidates), type=pa.float64()),
+                    vy=pa.nulls(len(candidates), type=pa.float64()),
+                    vz=pa.nulls(len(candidates), type=pa.float64()),
+                    time=candidates.time,
+                    origin=Origin.from_kwargs(code=pa.repeat("SUN", len(candidates))),
+                    frame="ecliptic",
                 ),
             )
         if len(frame_candidates) > 0:
             frame_candidates = frame_candidates.set_column(
                 "aberrated_coordinates",
-                pa.array(
-                    [None] * len(frame_candidates),
-                    type=frame_candidates.table.schema.field("aberrated_coordinates").type,
+                CartesianCoordinates.from_kwargs(
+                    x=pa.nulls(len(frame_candidates), type=pa.float64()),
+                    y=pa.nulls(len(frame_candidates), type=pa.float64()),
+                    z=pa.nulls(len(frame_candidates), type=pa.float64()),
+                    vx=pa.nulls(len(frame_candidates), type=pa.float64()),
+                    vy=pa.nulls(len(frame_candidates), type=pa.float64()),
+                    vz=pa.nulls(len(frame_candidates), type=pa.float64()),
+                    time=frame_candidates.exposure_time_mid,
+                    origin=Origin.from_kwargs(
+                        code=pa.repeat("SUN", len(frame_candidates))
+                    ),
+                    frame="ecliptic",
                 ),
             )
 
         return candidates, frame_candidates
 
+    # mypy helper: `_attach_magnitudes()` is implemented once, but it preserves the concrete
+    # table type (PrecoveryCandidates in -> PrecoveryCandidates out; FrameCandidates in ->
+    # FrameCandidates out). These overloads are for static typing only; no runtime effect.
+    @overload
     def _attach_magnitudes(
-        self, table: qv.Table, orbit: Orbits
-    ) -> qv.Table:
+        self, table: PrecoveryCandidates, orbit: Orbits
+    ) -> PrecoveryCandidates:
+        ...
+
+    @overload
+    def _attach_magnitudes(
+        self, table: FrameCandidates, orbit: Orbits
+    ) -> FrameCandidates:
+        ...
+
+    def _attach_magnitudes(
+        self, table: Union[PrecoveryCandidates, FrameCandidates], orbit: Orbits
+    ) -> Union[PrecoveryCandidates, FrameCandidates]:
         """
         Calculate and attach predicted magnitudes and residuals to the given table.
         """
@@ -793,6 +921,16 @@ class PrecoveryDatabase:
         if G is None:
             G = 0.15
 
+        # Need emission-time cartesian state for photometry.
+        # We require this to compute H-G geometry. If it's missing, fail loudly so callers
+        # don't accidentally interpret missing magnitudes as valid results.
+        if pc.all(pc.is_null(table.aberrated_coordinates.x)).as_py():
+            raise ValueError(
+                "Cannot compute predicted magnitudes: aberrated_coordinates are missing/null. "
+                "This likely indicates ephemeris generation did not attach emission-time cartesian "
+                "states, or `_attach_magnitudes()` was called after aberrated_coordinates were stripped."
+            )
+
         # Photometry requires heliocentric coordinates. The stored aberrated_coordinates
         # are in the barycentric ecliptic frame.
         obj_helio = transform_coordinates(
@@ -802,21 +940,50 @@ class PrecoveryDatabase:
             origin_out=OriginCodes.SUN,
         )
 
+        # Build per-row exposures aligned with `obj_helio` time sampling.
+        # For hits, center the exposure midpoint on the observation time to keep
+        # observer/object epochs consistent in photometry.
+        exposures = table.as_exposures()
+        if isinstance(table, PrecoveryCandidates):
+            exposures = exposures.set_column(
+                "start_time",
+                table.time.add_seconds(pc.multiply(table.exposure_duration, -0.5)),
+            )
+
+        # Canonicalize reported bands -> canonical filter_id strings expected by
+        # bandpass photometry (e.g. 'g' @ W84 -> 'DECam_g').
+        canonical = map_to_canonical_filter_bands(
+            exposures.observatory_code,
+            exposures.filter,
+            allow_fallback_filters=True,
+        )
+        exposures = exposures.set_column(
+            "filter", pa.array(canonical, type=pa.large_string())
+        )
+
         # predict_magnitudes expects object_coords and exposures to be the same length.
         pred_mag = predict_magnitudes(
             H=H,
             object_coords=obj_helio,
-            exposures=table.as_exposures(),
+            exposures=exposures,
             G=G,
             composition="C",
         )
 
-        table = table.set_column("pred_mag", pred_mag)
         if isinstance(table, PrecoveryCandidates):
-            mag_residual = pc.subtract(table.mag, pred_mag)
-            table = table.set_column("mag_residual", mag_residual)
+            out_candidates = PrecoveryCandidates.from_pyarrow(
+                table.set_column("pred_mag", pred_mag).table
+            )
+            mag_residual = pc.subtract(out_candidates.mag, pred_mag)
+            out_candidates = PrecoveryCandidates.from_pyarrow(
+                out_candidates.set_column("mag_residual", mag_residual).table
+            )
+            return out_candidates
 
-        return table
+        out_frames = FrameCandidates.from_pyarrow(
+            table.set_column("pred_mag", pred_mag).table
+        )
+        return out_frames
 
     def _check_windows(
         self,
@@ -934,22 +1101,94 @@ class PrecoveryDatabase:
                     ),
                 ]
             )
+        if len(frames) == 0:
+            return PrecoveryCandidates.empty(), FrameCandidates.empty()
+
         unique_frame_times = frames.exposure_mid_timestamp().unique()
         observers = Observers.from_code(obscode, unique_frame_times)
         # Compute the position of the ephem carefully.
         propagator = propagator_class()
-        ephemeris = propagator.generate_ephemeris(orbit, observers)
+
+        # Optional performance feature: if we have configured limiting magnitudes,
+        # we can skip deep inspection of frames where the object is predicted to be
+        # fainter than the instrument limit.
+        # Prefer the generated cache file (loaded once at DB open), falling back to config dicts.
+        limit_codefid_keys = self._limit_codefid_keys
+        limit_codefid_vals = self._limit_codefid_vals
+        faint_margin = float(
+            getattr(self.config, "faint_frame_skip_margin_mag", 0.0) or 0.0
+        )
+        enable_faint_skip = (
+            limit_codefid_keys is not None and len(limit_codefid_keys) > 0
+        )
+
+        ephemeris = propagator.generate_ephemeris(
+            orbit, observers, predict_magnitudes=enable_faint_skip
+        )
+
+        # Align ephemeris rows to frames by exposure-midpoint time (vectorized),
+        # then iterate row-wise without repeated time masking.
+        frame_mid = frames.exposure_mid_timestamp().rounded("us")
+        eph_mid = ephemeris.coordinates.time.rounded("us")
+
+        frame_key = self._timestamp_key(frame_mid.days, frame_mid.nanos)
+        eph_key = self._timestamp_key(eph_mid.days, eph_mid.nanos)
+        idx = pc.fill_null(pc.index_in(frame_key, value_set=eph_key), -1)
+        assert pc.all(pc.greater_equal(idx, 0)).as_py(), "No matching ephemeris found"
+        idx64 = pc.cast(idx, pa.int64())
+        ephem_for_frames = Ephemeris.from_pyarrow(ephemeris.table.take(idx64))
+
         precovery_candidates = PrecoveryCandidates.empty()
         frame_candidates = FrameCandidates.empty()
-        for f in frames:
-            matching_ephem = ephemeris.apply_mask(
-                ephemeris.coordinates.time.equals(
-                    f.exposure_mid_timestamp(), precision="us"
+
+        # If enabled, short-circuit expensive observation inspection for frames
+        # where the object is predicted to be too faint to detect.
+        #
+        # Note: we do NOT report these as "misses"; we omit them from results entirely.
+        if (
+            enable_faint_skip
+            and not pc.all(pc.is_null(ephem_for_frames.predicted_magnitude_v)).as_py()
+        ):
+            try:
+                canonical = map_to_canonical_filter_bands(
+                    frames.obscode,
+                    frames.filter,
+                    allow_fallback_filters=True,
                 )
-            )
-            # If we don't have at least one matching ephem, it implies
-            # our propagated times are not matching the frame times well enough
-            assert len(matching_ephem) == 1, "No matching ephemeris found, should be 1"
+                canon_arr = pa.array(canonical, type=pa.large_string())
+
+                # Compute V->filter delta mags for the unique filters in this batch.
+                uniq = sorted(set(map(str, canonical)))
+                delta_map = {fid: bandpass_delta_mag("C", "V", fid) for fid in uniq}
+                delta_keys, delta_vals = self._dict_to_kv_arrays(delta_map)
+                deltas = self._arrow_lookup(canon_arr, delta_keys, delta_vals)
+
+                pred_mag_band = pc.add(ephem_for_frames.predicted_magnitude_v, deltas)
+
+                # Build per-frame limiting magnitude (require obscode|filter_id cache).
+                sep = pa.scalar("|", type=pa.large_string())
+                codefid = pc.binary_join_element_wise(frames.obscode, canon_arr, sep)
+
+                limit = self._arrow_lookup(
+                    codefid, limit_codefid_keys, limit_codefid_vals
+                )
+
+                # Too faint if predicted magnitude is greater (numerically) than limit+margin.
+                limit_with_margin = pc.add(limit, faint_margin)
+                too_faint = pc.fill_null(
+                    pc.and_(
+                        pc.is_valid(limit), pc.greater(pred_mag_band, limit_with_margin)
+                    ),
+                    False,
+                )
+
+                keep = pc.invert(too_faint)
+                frames = frames.apply_mask(keep)
+                ephem_for_frames = ephem_for_frames.apply_mask(keep)
+            except Exception as e:
+                logger.warning(f"Unable to apply faint-frame skip: {e}")
+
+        for f, matching_ephem in zip(frames, ephem_for_frames):
             matches = self.find_matches_in_frame(
                 f, orbit, matching_ephem, tolerance, propagator
             )
@@ -1006,9 +1245,7 @@ class PrecoveryDatabase:
         if len(matching_observations) == 0:
             return PrecoveryCandidates.empty()
 
-        candidates = candidates_from_ephem(
-            matching_observations, matching_ephem, frame
-        )
+        candidates = candidates_from_ephem(matching_observations, matching_ephem, frame)
         return candidates
 
     def find_observations_in_region(

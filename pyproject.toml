@@ -34,7 +34,7 @@ dependencies = [
     "pandas",
     "healpy",
     "requests",
-    "adam-core>=0.3.1",
+    "adam-core @ git+https://github.com/B612-Asteroid-Institute/adam_core.git@58fa623c3fde657a9133551f629b9c16d25e7a00",
 ]
 [dependency-groups]
 test = [
@@ -57,6 +57,8 @@ test = [
 
 [project.scripts]
 precovery-index = "precovery.ingest:index"
+precovery-limitmags = "precovery.limiting_magnitudes:main"
+precovery-migrate = "precovery.migrate:main"
 
 [tool.pdm.version]
 source = "scm"
@@ -106,8 +108,8 @@ ignore_missing_imports = true
 module = "healpy"
 ignore_missing_imports = true
 
-[tool.pytest]
-filterwarnings = "ignore::DeprecationWarning:astropy"
+[tool.pytest.ini_options]
+filterwarnings = ["ignore::DeprecationWarning:astropy"]
 
 [tool.ruff]
 line-length = 110

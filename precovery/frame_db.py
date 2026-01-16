@@ -151,6 +151,48 @@ class FrameIndex:
         self._metadata.reflect(bind=self.db)
         self.frames = self._metadata.tables["frames"]
         self.datasets = self._metadata.tables["datasets"]
+        # Optional table (newer DBs): per-observatory limiting magnitudes used for
+        # faint-frame skipping heuristics.
+        self.limiting_magnitudes = self._metadata.tables.get("limiting_magnitudes")
+
+    def migrate(self) -> None:
+        """
+        Apply lightweight, additive schema migrations for existing DBs.
+
+        This is designed to be safe to run on production DBs: it only creates
+        missing tables/indexes and does not rewrite existing frame data.
+        """
+        # Keep migrations as explicit SQL to avoid relying on SQLAlchemy reflection.
+        self.dbconn.execute(
+            sq.text(
+                """
+                CREATE TABLE IF NOT EXISTS limiting_magnitudes (
+                    obscode TEXT NOT NULL,
+                    filter_id TEXT NOT NULL,
+                    limiting_mag REAL NOT NULL,
+                    mag_system TEXT,
+                    PRIMARY KEY (obscode, filter_id)
+                );
+                """
+            )
+        )
+        self.dbconn.execute(
+            sq.text(
+                """
+                CREATE INDEX IF NOT EXISTS limiting_magnitudes_lookup
+                ON limiting_magnitudes (obscode, filter_id);
+                """
+            )
+        )
+        self.dbconn.commit()
+        # Refresh reflected table handles if we were opened in read mode and reflected already.
+        try:
+            self._metadata = sq.MetaData()
+            self._metadata.reflect(bind=self.db)
+            self.limiting_magnitudes = self._metadata.tables.get("limiting_magnitudes")
+        except Exception:
+            # Not fatal; the caller can still use the DB, but table handles may be stale.
+            pass
 
     def _check_fast_query(self):
         curs = self.dbconn.execute(
@@ -186,10 +228,7 @@ class FrameIndex:
         """Return the midpoint and obscode of all time windows with data in them."""
 
         # Build base query with minimal columns
-        query = sq.select(
-            self.frames.c.obscode,
-            self.frames.c.exposure_mjd_mid,
-        ).where(
+        query = sq.select(self.frames.c.obscode, self.frames.c.exposure_mjd_mid,).where(
             (self.frames.c.exposure_mjd_mid < end_mjd)
             & (self.frames.c.exposure_mjd_mid >= start_mjd)
         )
@@ -632,7 +671,77 @@ class FrameIndex:
             sq.Column("documentation_url", sq.String, nullable=True),
             sq.Column("sia_url", sq.String, nullable=True),
         )
+
+        self.limiting_magnitudes = sq.Table(
+            "limiting_magnitudes",
+            self._metadata,
+            sq.Column("obscode", sq.String, nullable=False),
+            # Canonical bandpass filter_id (e.g. "DECam_g", "LSST_r", "V")
+            sq.Column("filter_id", sq.String, nullable=False),
+            sq.Column("limiting_mag", sq.Float, nullable=False),
+            sq.Column("mag_system", sq.String, nullable=True),
+            sq.PrimaryKeyConstraint(
+                "obscode", "filter_id", name="pk_limiting_magnitudes"
+            ),
+            sq.Index("limiting_magnitudes_lookup", "obscode", "filter_id"),
+        )
         self._metadata.create_all(self.db)
+
+    def upsert_limiting_magnitude(
+        self,
+        *,
+        obscode: str,
+        filter_id: str,
+        limiting_mag: float,
+        mag_system: str | None = None,
+    ) -> None:
+        """
+        Insert or update a limiting magnitude row.
+
+        Notes
+        -----
+        `filter_id` must be a canonical bandpass filter ID as used by `adam_core.photometry`.
+        """
+        if getattr(self, "limiting_magnitudes", None) is None:
+            raise RuntimeError(
+                "Database missing limiting_magnitudes table. Create a new DB or migrate schema."
+            )
+        insert = sqlite_insert(self.limiting_magnitudes).values(
+            obscode=obscode,
+            filter_id=filter_id,
+            limiting_mag=float(limiting_mag),
+            mag_system=mag_system,
+        )
+        # Upsert behavior for SQLite (update limiting_mag + mag_system on conflict).
+        insert = insert.on_conflict_do_update(
+            index_elements=["obscode", "filter_id"],
+            set_={
+                "limiting_mag": float(limiting_mag),
+                "mag_system": mag_system,
+            },
+        )
+        self.dbconn.execute(insert)
+        self.dbconn.commit()
+
+    def limiting_magnitude_rows(
+        self,
+        *,
+        obscode: str | None = None,
+    ) -> list[Row]:
+        """
+        Return limiting magnitude rows (optionally filtered).
+        """
+        if getattr(self, "limiting_magnitudes", None) is None:
+            return []
+        stmt = sq.select(
+            self.limiting_magnitudes.c.obscode,
+            self.limiting_magnitudes.c.filter_id,
+            self.limiting_magnitudes.c.limiting_mag,
+            self.limiting_magnitudes.c.mag_system,
+        )
+        if obscode is not None:
+            stmt = stmt.where(self.limiting_magnitudes.c.obscode == obscode)
+        return list(self.dbconn.execute(stmt))
 
     def frames_for_healpixel(self, healpixel: int, obscode: str) -> HealpixFrame:
         """
