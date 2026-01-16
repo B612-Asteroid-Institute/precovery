@@ -1,5 +1,7 @@
-import json
+from __future__ import annotations
+
 import inspect
+import json
 
 try:
     from ._version import __version__
@@ -13,6 +15,8 @@ class Config:
         nside: int = 32,
         data_file_max_size: int = int(1e9),
         build_version: str = __version__,
+        limiting_magnitudes_parquet_file: str | None = "limiting_magnitudes.parquet",
+        faint_frame_skip_margin_mag: float = 0.0,
     ):
         """
         Precovery Database Configuration
@@ -29,6 +33,12 @@ class Config:
         self.build_version = build_version
         self.nside = nside
         self.data_file_max_size = data_file_max_size
+        # Generated-once cache file stored in the DB directory (Parquet).
+        # If present, it will be loaded once at DB open and used for fast faint-frame
+        # skipping without any subsequent SQL queries.
+        self.limiting_magnitudes_parquet_file = limiting_magnitudes_parquet_file
+        # If predicted_mag > (limit + margin), treat it as too faint to be detectable.
+        self.faint_frame_skip_margin_mag = faint_frame_skip_margin_mag
 
         return
 

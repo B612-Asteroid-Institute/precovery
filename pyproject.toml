@@ -65,6 +65,8 @@ notebooks = [
 
 [project.scripts]
 precovery-index = "precovery.ingest:index"
+precovery-limitmags = "precovery.limiting_magnitudes:main"
+precovery-migrate = "precovery.migrate:main"
 
 [tool.pdm.version]
 source = "scm"
@@ -114,7 +116,7 @@ ignore_missing_imports = true
 module = "healpy"
 ignore_missing_imports = true
 
-[tool.pytest]
+[tool.pytest.ini_options]
 filterwarnings = ["ignore::DeprecationWarning:astropy"]
 
 [tool.ruff]
