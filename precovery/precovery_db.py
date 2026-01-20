@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Optional, Tuple, Type, Union, cast, overload
+from typing import Optional, Tuple, Type, Union, overload
 
 import healpy as hp
 import numpy as np
@@ -50,6 +50,9 @@ CANDIDATE_NSIDE = 2**CANDIDATE_K
 logging.basicConfig()
 logger = logging.getLogger("precovery")
 
+REJECT_REASON_LIMITING_MAGNITUDE = "limiting_magnitude"
+REJECT_REASON_MAG_RESIDUAL = "mag_residual"
+
 
 class PrecoveryCandidates(qv.Table):
 
@@ -77,6 +80,8 @@ class PrecoveryCandidates(qv.Table):
     distance_arcsec = qv.Float64Column()
     pred_mag = qv.Float64Column(nullable=True)
     mag_residual = qv.Float64Column(nullable=True)
+    rejected = qv.BooleanColumn()
+    rejected_reason = qv.LargeStringColumn(nullable=True)
     aberrated_coordinates = CartesianCoordinates.as_column(nullable=True)
     dataset_id = qv.LargeStringColumn()
     orbit_id = qv.LargeStringColumn()
@@ -144,6 +149,7 @@ class PrecoveryCandidates(qv.Table):
                 ),
                 frame="equatorial",
             ),
+            aberrated_coordinates=self.aberrated_coordinates,
         )
 
     def to_residuals(self) -> Residuals:
@@ -231,6 +237,8 @@ class FrameCandidates(qv.Table):
     pred_vra_degpday = qv.Float64Column()
     pred_vdec_degpday = qv.Float64Column()
     pred_mag = qv.Float64Column(nullable=True)
+    rejected = qv.BooleanColumn()
+    rejected_reason = qv.LargeStringColumn(nullable=True)
     aberrated_coordinates = CartesianCoordinates.as_column(nullable=True)
     dataset_id = qv.LargeStringColumn()
     orbit_id = qv.LargeStringColumn()
@@ -277,7 +285,14 @@ class FrameCandidates(qv.Table):
 
 
 def candidates_from_ephem(
-    obs: ObservationsTable, ephem: Ephemeris, frame: HealpixFrame
+    obs: ObservationsTable,
+    ephem: Ephemeris,
+    frame: HealpixFrame,
+    *,
+    pred_mag: pa.Array | None = None,
+    mag_residual: pa.Array | None = None,
+    rejected: pa.Array | None = None,
+    rejected_reason: pa.Array | None = None,
 ) -> PrecoveryCandidates:
     """
     Generates PrecoveryCandidates from constituent observations, ephem, and frame data
@@ -335,6 +350,15 @@ def candidates_from_ephem(
     dataset_id = pa.repeat(frame.dataset_id[0].as_py(), len(obs))
     orbit_id = pa.repeat(ephem.orbit_id[0].as_py(), len(obs))
 
+    if pred_mag is None:
+        pred_mag = pa.nulls(len(obs), type=pa.float64())
+    if mag_residual is None:
+        mag_residual = pa.nulls(len(obs), type=pa.float64())
+    if rejected is None:
+        rejected = pa.repeat(False, len(obs))
+    if rejected_reason is None:
+        rejected_reason = pa.array([None] * len(obs), type=pa.large_string())
+
     return PrecoveryCandidates.from_kwargs(
         time=obs.time,
         ra_deg=obs.ra,
@@ -358,15 +382,24 @@ def candidates_from_ephem(
         delta_ra_arcsec=delta_ra_arcsec,
         delta_dec_arcsec=delta_dec_arcsec,
         distance_arcsec=distance_arcsec,
-        pred_mag=None,
-        mag_residual=None,
+        pred_mag=pred_mag,
+        mag_residual=mag_residual,
+        rejected=rejected,
+        rejected_reason=rejected_reason,
         aberrated_coordinates=ephem.aberrated_coordinates,
         dataset_id=dataset_id,
         orbit_id=orbit_id,
     )
 
 
-def frame_candidates_from_frame(frame: HealpixFrame, ephem: Ephemeris):
+def frame_candidates_from_frame(
+    frame: HealpixFrame,
+    ephem: Ephemeris,
+    *,
+    pred_mag: float | None = None,
+    rejected: bool = False,
+    rejected_reason: str | None = None,
+):
     # Calculate the HEALpixel ID for the predicted ephemeris of
     # the orbit with a high nside value (k=15, nside=2**15) The
     # indexed observations are indexed to a much lower nside but
@@ -396,10 +429,16 @@ def frame_candidates_from_frame(frame: HealpixFrame, ephem: Ephemeris):
         pred_dec_deg=ephem.coordinates.lat,
         pred_vra_degpday=ephem.coordinates.vlon,
         pred_vdec_degpday=ephem.coordinates.vlat,
-        pred_mag=None,
+        pred_mag=[pred_mag],
+        rejected=[bool(rejected)],
+        rejected_reason=[rejected_reason],
         aberrated_coordinates=ephem.aberrated_coordinates,
         orbit_id=ephem.orbit_id,
     )
+
+
+def _as_bool_array(x: pa.Array) -> pa.Array:
+    return pc.cast(x, pa.bool_())
 
 
 def find_healpixel_matches(
@@ -799,6 +838,8 @@ def generate_ephem_for_per_obs_timestamps(
     observations: ObservationsTable,
     obscode: str,
     propagator: Propagator,
+    *,
+    predict_magnitudes: bool = False,
 ) -> Ephemeris:
     """
     Use 2 body propagation to generate ephemeris for unique time observations
@@ -820,7 +861,7 @@ def generate_ephem_for_per_obs_timestamps(
     propagated_orbits = propagate_2body(mean_orbit_state, observations.time)
     observers = Observers.from_code(obscode, observations.time)
     ephemeris = generate_ephemeris_2body(
-        propagated_orbits, observers, predict_magnitudes=False
+        propagated_orbits, observers, predict_magnitudes=bool(predict_magnitudes)
     )
     return ephemeris
 
@@ -1348,8 +1389,8 @@ class PrecoveryDatabase:
             )
 
         # convert these to our new output formats
-        candidates = self._attach_magnitudes(candidates, orbit)
-        frame_candidates = self._attach_magnitudes(frame_candidates, orbit)
+        # Predicted magnitudes / mag_residual are computed during the search (in `_check_frames()`)
+        # to avoid recomputation and to support rejection labeling.
 
         # Null out the temporary aberrated_coordinates column before returning
         if len(candidates) > 0:
@@ -1652,12 +1693,26 @@ class PrecoveryDatabase:
         faint_margin = float(
             getattr(self.config, "faint_frame_skip_margin_mag", 0.0) or 0.0
         )
+        # Magnitudes are only computable if the orbit has H (and a defaultable G).
+        try:
+            H = (
+                orbit.physical_parameters.H_v[0].as_py()
+                if orbit.physical_parameters is not None
+                else None
+            )
+        except Exception:
+            H = None
+        compute_pred_mags = H is not None
+
         enable_faint_skip = (
-            limit_codefid_keys is not None and len(limit_codefid_keys) > 0
+            compute_pred_mags
+            and limit_codefid_keys is not None
+            and len(limit_codefid_keys) > 0
         )
+        max_abs_mag_resid = getattr(self.config, "max_abs_mag_residual_mag", None)
 
         ephemeris = propagator.generate_ephemeris(
-            orbit, observers, predict_magnitudes=enable_faint_skip
+            orbit, observers, predict_magnitudes=compute_pred_mags
         )
 
         # Align ephemeris rows to frames by exposure-midpoint time (vectorized),
@@ -1675,14 +1730,13 @@ class PrecoveryDatabase:
         precovery_candidates = PrecoveryCandidates.empty()
         frame_candidates = FrameCandidates.empty()
 
-        # If enabled, short-circuit expensive observation inspection for frames
-        # where the object is predicted to be too faint to detect.
-        #
-        # Note: we do NOT report these as "misses"; we omit them from results entirely.
-        if (
-            enable_faint_skip
-            and not pc.all(pc.is_null(ephem_for_frames.predicted_magnitude_v)).as_py()
-        ):
+        # Compute per-frame predicted magnitudes (in the frame's canonical filter),
+        # and optionally flag frames as "too faint" based on limiting magnitudes.
+        canon_arr = pa.nulls(len(frames), type=pa.large_string())
+        deltas = pa.nulls(len(frames), type=pa.float64())
+        pred_mag_band = pa.nulls(len(frames), type=pa.float64())
+        too_faint = pa.repeat(False, len(frames))
+        if compute_pred_mags and not pc.all(pc.is_null(ephem_for_frames.predicted_magnitude_v)).as_py():
             try:
                 canonical = map_to_canonical_filter_bands(
                     frames.obscode,
@@ -1699,30 +1753,48 @@ class PrecoveryDatabase:
 
                 pred_mag_band = pc.add(ephem_for_frames.predicted_magnitude_v, deltas)
 
-                # Build per-frame limiting magnitude (require obscode|filter_id cache).
-                sep = pa.scalar("|", type=pa.large_string())
-                codefid = pc.binary_join_element_wise(frames.obscode, canon_arr, sep)
+                if enable_faint_skip:
+                    # Build per-frame limiting magnitude (require obscode|filter_id cache).
+                    sep = pa.scalar("|", type=pa.large_string())
+                    codefid = pc.binary_join_element_wise(frames.obscode, canon_arr, sep)
+                    limit = self._arrow_lookup(
+                        codefid, limit_codefid_keys, limit_codefid_vals
+                    )
 
-                limit = self._arrow_lookup(
-                    codefid, limit_codefid_keys, limit_codefid_vals
-                )
-
-                # Too faint if predicted magnitude is greater (numerically) than limit+margin.
-                limit_with_margin = pc.add(limit, faint_margin)
-                too_faint = pc.fill_null(
-                    pc.and_(
-                        pc.is_valid(limit), pc.greater(pred_mag_band, limit_with_margin)
-                    ),
-                    False,
-                )
-
-                keep = pc.invert(too_faint)
-                frames = frames.apply_mask(keep)
-                ephem_for_frames = ephem_for_frames.apply_mask(keep)
+                    # Too faint if predicted magnitude is greater (numerically) than limit+margin.
+                    limit_with_margin = pc.add(limit, faint_margin)
+                    too_faint = pc.fill_null(
+                        pc.and_(
+                            pc.is_valid(limit),
+                            pc.greater(pred_mag_band, limit_with_margin),
+                        ),
+                        False,
+                    )
             except Exception as e:
-                logger.warning(f"Unable to apply faint-frame skip: {e}")
+                logger.warning(f"Unable to compute per-frame magnitudes: {e}")
 
-        for f, matching_ephem in zip(frames, ephem_for_frames):
+        for i, (f, matching_ephem) in enumerate(zip(frames, ephem_for_frames)):
+            is_too_faint = bool(too_faint[i].as_py())
+            pred_mag_frame = (
+                None if pred_mag_band.is_null(i) else float(pred_mag_band[i].as_py())
+            )
+
+            if is_too_faint:
+                frame_candidates = qv.concatenate(
+                    [
+                        frame_candidates,
+                        frame_candidates_from_frame(
+                            f,
+                            matching_ephem,
+                            pred_mag=pred_mag_frame,
+                            rejected=True,
+                            rejected_reason=REJECT_REASON_LIMITING_MAGNITUDE,
+                        ),
+                    ]
+                )
+                continue
+
+            delta_i = None if deltas.is_null(i) else float(deltas[i].as_py())
             matches = self.find_matches_in_frame(
                 f,
                 orbit,
@@ -1731,6 +1803,9 @@ class PrecoveryDatabase:
                 propagator,
                 match_method=match_method,
                 n_sigma=n_sigma,
+                pred_mag_delta=delta_i,
+                compute_pred_mags=compute_pred_mags,
+                max_abs_mag_residual_mag=max_abs_mag_resid,
             )
             # If no observations were found in this frame then we
             # return frame candidates
@@ -1741,7 +1816,13 @@ class PrecoveryDatabase:
                 frame_candidates = qv.concatenate(
                     [
                         frame_candidates,
-                        frame_candidates_from_frame(f, matching_ephem),
+                        frame_candidates_from_frame(
+                            f,
+                            matching_ephem,
+                            pred_mag=pred_mag_frame,
+                            rejected=False,
+                            rejected_reason=None,
+                        ),
                     ]
                 )
             else:
@@ -1757,6 +1838,10 @@ class PrecoveryDatabase:
         propagator: Propagator,
         match_method: str = "circle",
         n_sigma: float = 3.0,
+        *,
+        pred_mag_delta: float | None = None,
+        compute_pred_mags: bool = False,
+        max_abs_mag_residual_mag: float | None = None,
     ) -> PrecoveryCandidates:
         """
         Find all sources in a single frame which match ephem.
@@ -1772,7 +1857,11 @@ class PrecoveryDatabase:
 
         if match_method in ("covariance", "covariance_mc", "covariance_polygon"):
             per_obs_ephem = generate_ephem_for_per_obs_timestamps(
-                orbit, observations, obscode, propagator
+                orbit,
+                observations,
+                obscode,
+                propagator,
+                predict_magnitudes=compute_pred_mags,
             )
             matching_observations, matching_ephem = find_observation_matches_covariance(
                 observations, per_obs_ephem, n_sigma=n_sigma
@@ -1801,7 +1890,43 @@ class PrecoveryDatabase:
         if len(matching_observations) == 0:
             return PrecoveryCandidates.empty()
 
-        candidates = candidates_from_ephem(matching_observations, matching_ephem, frame)
+        pred_mag = pa.nulls(len(matching_observations), type=pa.float64())
+        mag_residual = pa.nulls(len(matching_observations), type=pa.float64())
+        rejected = pa.repeat(False, len(matching_observations))
+        rejected_reason = pa.array(
+            [None] * len(matching_observations), type=pa.large_string()
+        )
+
+        if (
+            compute_pred_mags
+            and pred_mag_delta is not None
+            and hasattr(matching_ephem, "predicted_magnitude_v")
+            and not pc.all(pc.is_null(matching_ephem.predicted_magnitude_v)).as_py()
+        ):
+            delta_s = pa.scalar(float(pred_mag_delta), type=pa.float64())
+            pred_mag = pc.add(matching_ephem.predicted_magnitude_v, delta_s)
+            mag_residual = pc.subtract(matching_observations.mag, pred_mag)
+
+            if max_abs_mag_residual_mag is not None:
+                thr = pa.scalar(float(max_abs_mag_residual_mag), type=pa.float64())
+                outlier = pc.greater(pc.abs(mag_residual), thr)
+                outlier = pc.fill_null(outlier, False)
+                rejected = _as_bool_array(outlier)
+                rejected_reason = pc.if_else(
+                    outlier,
+                    pa.scalar(REJECT_REASON_MAG_RESIDUAL, type=pa.large_string()),
+                    pa.scalar(None, type=pa.large_string()),
+                )
+
+        candidates = candidates_from_ephem(
+            matching_observations,
+            matching_ephem,
+            frame,
+            pred_mag=pred_mag,
+            mag_residual=mag_residual,
+            rejected=rejected,
+            rejected_reason=rejected_reason,
+        )
         return candidates
 
     def find_observations_in_region(
