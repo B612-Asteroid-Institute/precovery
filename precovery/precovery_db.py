@@ -2,6 +2,7 @@ import logging
 import os
 from typing import Optional, Tuple, Type
 
+import healpy as hp
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -410,6 +411,97 @@ def find_healpixel_matches(
     return filtered_targets
 
 
+def find_healpixel_matches_covariance(
+    propagation_targets: GenericFrame,
+    ephems: Ephemeris,
+    nside: int,
+    n_sigma: float,
+) -> GenericFrame:
+    """
+    Covariance-aware healpixel selection.
+
+    Instead of requiring the predicted ephemeris point to fall in the exact same
+    healpixel as the frame, we expand the prediction into an N-sigma region and
+    keep any frame healpixels that intersect that region.
+
+    Fast approach: use a conservative disc radius based on the *major axis* of the
+    local tangent-plane covariance ellipse.
+    """
+    # Sort them both by time
+    propagation_targets = propagation_targets.sort_by(["time.days", "time.nanos"])
+    ephems = ephems.sort_by(["coordinates.time.days", "coordinates.time.nanos"])
+
+    propagation_target_times = propagation_targets.time.rescale("utc")
+    ephem_times = ephems.coordinates.time.rescale("utc")
+
+    # quickly check to make sure times are equal
+    assert pc.all(
+        propagation_target_times.equals(ephem_times, precision="ms")
+    ).as_py(), "Propagation targets and ephemeris must have matching times"
+
+    if ephems.coordinates.covariance is None or ephems.coordinates.covariance.is_all_nan():
+        # Fall back to exact-pixel matching if covariances aren't available.
+        logger.warning(
+            "Ephemeris has no covariances; falling back to exact healpixel matching."
+        )
+        return find_healpixel_matches(propagation_targets, ephems, nside)
+
+    lon = ephems.coordinates.lon.to_numpy(zero_copy_only=False).astype(np.float64)
+    lat = ephems.coordinates.lat.to_numpy(zero_copy_only=False).astype(np.float64)
+
+    # Extract (lon, lat) covariance block (degrees^2) and apply cos(lat) scaling to lon,
+    # matching the tangent-plane convention used elsewhere (and in adam_core Residuals).
+    cov6 = ephems.coordinates.covariance.to_matrix()
+    cov_ll = cov6[:, 1:3, 1:3]
+    cos_lat = np.cos(np.deg2rad(lat))
+    a = (cos_lat**2) * cov_ll[:, 0, 0]  # var(x) where x = lon*cos(lat)
+    d = cov_ll[:, 1, 1]  # var(y) where y = lat
+    b = 0.5 * cos_lat * (cov_ll[:, 0, 1] + cov_ll[:, 1, 0])  # cov(x, y)
+
+    # Major-axis variance of 2x2 covariance: lambda_max = 0.5*(tr + sqrt((a-d)^2 + 4b^2))
+    tr = a + d
+    disc = np.sqrt(np.maximum((a - d) ** 2 + 4.0 * (b**2), 0.0))
+    lambda_max = 0.5 * (tr + disc)
+    sigma_major_deg = np.sqrt(np.maximum(lambda_max, 0.0))
+
+    # Inflate by N-sigma and add a healpix "pixel radius" safety margin so we don't drop
+    # boundary cases due to discretization.
+    pix_margin_rad = float(hp.max_pixrad(nside))
+    radii_rad = np.deg2rad(float(n_sigma) * sigma_major_deg) + pix_margin_rad
+    radii_rad = np.where(np.isfinite(radii_rad) & (radii_rad > 0), radii_rad, pix_margin_rad)
+
+    # Many rows can share the same timestamp. Cache query_disc results per unique time
+    # to avoid recomputing pixel sets repeatedly.
+    days = ephems.coordinates.time.days.to_numpy(zero_copy_only=False)
+    nanos = ephems.coordinates.time.nanos.to_numpy(zero_copy_only=False)
+
+    pixels_by_time: dict[tuple[int, int], set[int]] = {}
+    for i in range(len(ephems)):
+        key = (int(days[i]), int(nanos[i]))
+        if key in pixels_by_time:
+            continue
+        vec = hp.ang2vec(lon[i], lat[i], lonlat=True)
+        pix = hp.query_disc(
+            nside,
+            vec,
+            float(radii_rad[i]),
+            inclusive=True,
+            nest=True,
+        )
+        pixels_by_time[key] = set(int(p) for p in pix.tolist())
+
+    # Filter propagation targets by membership in the per-time pixel set.
+    target_days = propagation_targets.time.days.to_numpy(zero_copy_only=False)
+    target_nanos = propagation_targets.time.nanos.to_numpy(zero_copy_only=False)
+    target_pixels = propagation_targets.healpixel.to_numpy(zero_copy_only=False)
+    keep = np.zeros(len(propagation_targets), dtype=bool)
+    for i in range(len(propagation_targets)):
+        key = (int(target_days[i]), int(target_nanos[i]))
+        keep[i] = int(target_pixels[i]) in pixels_by_time.get(key, set())
+
+    return propagation_targets.apply_mask(pa.array(keep))
+
+
 def generate_ephem_for_per_obs_timestamps(
     orbit: Orbits,
     observations: ObservationsTable,
@@ -653,9 +745,14 @@ def check_window(
 
     # generate ephemeris (covariances will be present if input orbit covariances exist)
     ephems = generate_ephemeris_2body(propagated_orbits, observers)
-    frames_to_check = find_healpixel_matches(
-        propagation_targets, ephems, db.frames.healpix_nside
-    )
+    if match_method == "covariance":
+        frames_to_check = find_healpixel_matches_covariance(
+            propagation_targets, ephems, db.frames.healpix_nside, n_sigma=n_sigma
+        )
+    else:
+        frames_to_check = find_healpixel_matches(
+            propagation_targets, ephems, db.frames.healpix_nside
+        )
     logger.debug(f"Found {len(frames_to_check)} healpixel matches")
     candidates = PrecoveryCandidates.empty()
     frame_candidates = FrameCandidates.empty()
