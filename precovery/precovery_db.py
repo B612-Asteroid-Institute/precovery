@@ -8,9 +8,11 @@ import pyarrow.compute as pc
 import quivr as qv
 import ray
 from adam_core.coordinates import CoordinateCovariances
-from adam_core.coordinates.origin import Origin
+from adam_core.coordinates.cartesian import CartesianCoordinates
+from adam_core.coordinates.origin import Origin, OriginCodes
 from adam_core.coordinates.residuals import Residuals
 from adam_core.coordinates.spherical import SphericalCoordinates
+from adam_core.coordinates.transform import transform_coordinates
 from adam_core.dynamics.ephemeris import generate_ephemeris_2body
 from adam_core.dynamics.propagation import propagate_2body
 from adam_core.observations import Exposures, PointSourceDetections
@@ -409,19 +411,29 @@ def find_healpixel_matches(
 
 
 def generate_ephem_for_per_obs_timestamps(
-    orbit: Orbits, observations: ObservationsTable, obscode: str, propagator: Propagator
+    orbit: Orbits,
+    observations: ObservationsTable,
+    obscode: str,
+    propagator: Propagator,
 ) -> Ephemeris:
     """
     Use 2 body propagation to generate ephemeris for unique time observations
     """
-    # The observations may not be centered on the exposure time
-    # So we want to make our 2 body propagation start from the mean
+    # We propagate to the mean observation epoch using the provided propagator (typically ASSIST),
+    # then use 2-body propagation to generate paired states at each observation timestamp.
+    #
+    # If the input orbit includes a covariance, we ask the propagator to propagate covariance to
+    # the mean epoch as well; the downstream 2-body + ephemeris generation can then produce
+    # ephemeris covariances for covariance-gated matching.
     mean_mjd = pc.mean(observations.time.mjd()).as_py()
     mean_time = Timestamp.from_mjd([mean_mjd], scale="utc")
-    mean_orbit_state = propagator.propagate_orbits(orbit, mean_time)
-    propagated_orbits = propagate_2body(
-        mean_orbit_state, observations.time, propagator, obscode
+
+    use_covariance = (
+        orbit.coordinates.covariance is not None
+        and not orbit.coordinates.covariance.is_all_nan()
     )
+    mean_orbit_state = propagator.propagate_orbits(orbit, mean_time, covariance=use_covariance)
+    propagated_orbits = propagate_2body(mean_orbit_state, observations.time)
     observers = Observers.from_code(obscode, observations.time)
     ephemeris = generate_ephemeris_2body(propagated_orbits, observers)
     return ephemeris
@@ -449,8 +461,12 @@ def find_observation_matches(
     assert len(ephems) == len(
         observations
     ), "Ephemeris must be the same length as observations"
+    # Ephemerides may be generated in a different timescale (e.g., TDB) than
+    # observations (typically UTC). Normalize to UTC for comparisons.
     assert pc.all(
-        ephems.coordinates.time.equals(observations.time, precision="ms")
+        ephems.coordinates.time.rescale("utc").equals(
+            observations.time.rescale("utc"), precision="ms"
+        )
     ).as_py(), "Ephemeris and observations must have matching times"
     # Check for bizarrely large tolerance which might have been
     # sent in as arcseconds instead of degrees
@@ -472,6 +488,101 @@ def find_observation_matches(
     return matching_observations, matching_ephems
 
 
+def _wrap_delta_lon_deg(lon_obs_deg: np.ndarray, lon_pred_deg: np.ndarray) -> np.ndarray:
+    """
+    Wrap longitude residuals into [-180, 180) degrees.
+    """
+    return (lon_obs_deg - lon_pred_deg + 180.0) % 360.0 - 180.0
+
+
+def find_observation_matches_covariance(
+    observations: ObservationsTable,
+    ephems: Ephemeris,
+    n_sigma: float,
+) -> Tuple[ObservationsTable, Ephemeris]:
+    """
+    Covariance-aware matching using a 2D Mahalanobis (chi^2) gate in a local tangent plane.
+
+    Notes
+    -----
+    - Requires ephemeris spherical coordinate covariances to be present. These are produced
+      by `adam_core.dynamics.ephemeris.generate_ephemeris_2body()` when input orbit covariances
+      are defined and propagated through `adam_core.dynamics.propagation.propagate_2body()`.
+    - Uses a small-angle tangent-plane approximation for the residuals.
+    """
+    assert len(ephems) == len(
+        observations
+    ), "Ephemeris must be the same length as observations"
+    # Ephemerides may be generated in a different timescale (e.g., TDB) than
+    # observations (typically UTC). Normalize to UTC for comparisons.
+    assert pc.all(
+        ephems.coordinates.time.rescale("utc").equals(
+            observations.time.rescale("utc"), precision="ms"
+        )
+    ).as_py(), "Ephemeris and observations must have matching times"
+
+    if ephems.coordinates.covariance is None or ephems.coordinates.covariance.is_all_nan():
+        raise ValueError(
+            "Ephemeris has no covariances; cannot use covariance-based matching. "
+            "Ensure the input orbit has a covariance and that you are using "
+            "propagation/ephemeris generation with covariance propagation enabled."
+        )
+
+    # Use `adam_core.coordinates.residuals.Residuals.calculate` so our gating logic matches
+    # what THOR uses: wrapped longitude residuals, cosine(latitude) correction, and
+    # chi2 = Δᵀ(Σ_obs + Σ_pred)⁻¹Δ in the observed subspace.
+    N = len(observations)
+    lon_obs = observations.ra.to_numpy(zero_copy_only=False).astype(np.float64)
+    lat_obs = observations.dec.to_numpy(zero_copy_only=False).astype(np.float64)
+
+    # Observational 1-sigma uncertainties in degrees.
+    ra_sig = observations.ra_sigma.to_numpy(zero_copy_only=False).astype(np.float64)
+    dec_sig = observations.dec_sigma.to_numpy(zero_copy_only=False).astype(np.float64)
+    ra_sig = np.where(np.isfinite(ra_sig), ra_sig, 0.0)
+    dec_sig = np.where(np.isfinite(dec_sig), dec_sig, 0.0)
+
+    # Build a full 6x6 spherical covariance for observations, with only lon/lat populated.
+    # The other dimensions are unused (set to NaN in the values), but their diagonal entries
+    # must be finite so we can construct a valid covariance matrix container.
+    cov = np.zeros((N, 6, 6), dtype=np.float64)
+    cov[:, 0, 0] = 1.0
+    cov[:, 3, 3] = 1.0
+    cov[:, 4, 4] = 1.0
+    cov[:, 5, 5] = 1.0
+    cov[:, 1, 1] = ra_sig**2
+    cov[:, 2, 2] = dec_sig**2
+
+    # Tiny diagonal jitter to avoid pathological singular inversions.
+    eps_deg = 1e-12
+    cov[:, 1, 1] += eps_deg**2
+    cov[:, 2, 2] += eps_deg**2
+
+    obs_coords = SphericalCoordinates.from_kwargs(
+        rho=np.full(N, np.nan, dtype=np.float64),
+        lon=lon_obs,
+        lat=lat_obs,
+        vrho=np.full(N, np.nan, dtype=np.float64),
+        vlon=np.full(N, np.nan, dtype=np.float64),
+        vlat=np.full(N, np.nan, dtype=np.float64),
+        time=observations.time,
+        covariance=CoordinateCovariances.from_matrix(cov),
+        origin=ephems.coordinates.origin,
+        frame=ephems.coordinates.frame,
+    )
+
+    residuals = Residuals.calculate(
+        observed=obs_coords,
+        predicted=ephems.coordinates,
+        use_predicted_covariance=True,
+    )
+    chi2 = residuals.chi2.to_numpy(zero_copy_only=False).astype(np.float64)
+    chi2 = np.where(np.isfinite(chi2), chi2, np.inf)
+
+    gate = chi2 <= float(n_sigma) ** 2
+    mask = pa.array(gate)
+    return observations.apply_mask(mask), ephems.apply_mask(mask)
+
+
 def check_window(
     db_dir: str,
     window: WindowCenters,
@@ -479,6 +590,8 @@ def check_window(
     tolerance: float,
     propagator_class: Type[Propagator],
     datasets: Optional[set[str]] = None,
+    match_method: str = "circle",
+    n_sigma: float = 3.0,
 ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
     """
     Check a single window for precovery candidates
@@ -523,18 +636,22 @@ def check_window(
     logger.debug(f"Found {len(propagation_targets)} propagation targets")
     times = propagation_targets.time
 
-    # First make sure our orbit it n-body propagated to the window center
+    # Ensure orbit is propagated to the window center
     time_utc = orbit.coordinates.time.rescale("utc")
     if not (pc.all(time_utc.equals(window.time, precision="ms")).as_py()):
         propagator = propagator_class()
-        orbit = propagator.propagate_orbits(orbit, window.time)
+        use_covariance = (
+            orbit.coordinates.covariance is not None
+            and not orbit.coordinates.covariance.is_all_nan()
+        )
+        orbit = propagator.propagate_orbits(orbit, window.time, covariance=use_covariance)
 
     # create our observers from the individual frame times
     observers = Observers.from_code(obscode, times)
     ## first propagate with 2_body
     propagated_orbits = propagate_2body(orbit, times)
 
-    # generate ephemeris
+    # generate ephemeris (covariances will be present if input orbit covariances exist)
     ephems = generate_ephemeris_2body(propagated_orbits, observers)
     frames_to_check = find_healpixel_matches(
         propagation_targets, ephems, db.frames.healpix_nside
@@ -550,6 +667,8 @@ def check_window(
             tolerance=tolerance,
             datasets=datasets,
             propagator_class=propagator_class,
+            match_method=match_method,
+            n_sigma=n_sigma,
         )
         candidates = qv.concatenate([candidates, candidates_healpixel])
         frame_candidates = qv.concatenate(
@@ -640,6 +759,8 @@ class PrecoveryDatabase:
         datasets: Optional[set[str]] = None,
         propagator_class: Optional[Type[Propagator]] = None,
         max_processes: Optional[int] = None,
+        match_method: str = "circle",
+        n_sigma: float = 3.0,
     ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
         """
         Find observations which match orbit in the database. Observations are
@@ -721,6 +842,8 @@ class PrecoveryDatabase:
                 propagator_class,
                 datasets=datasets,
                 max_processes=max_processes,
+                match_method=match_method,
+                n_sigma=n_sigma,
             )
             candidates = qv.concatenate([candidates, candidates_obscode])
             frame_candidates = qv.concatenate(
@@ -738,6 +861,8 @@ class PrecoveryDatabase:
         propagator_class: Type[Propagator],
         datasets: Optional[set[str]] = None,
         max_processes: Optional[int] = None,
+        match_method: str = "circle",
+        n_sigma: float = 3.0,
     ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
         """
         Find all observations that match orbit within a list of windows
@@ -753,8 +878,18 @@ class PrecoveryDatabase:
         precovery_candidates = PrecoveryCandidates.empty()
         frame_candidates = FrameCandidates.empty()
 
+        use_ray = False
         if max_processes is not None and max_processes > 1:
-            initialize_use_ray(num_cpus=max_processes)
+            try:
+                use_ray = initialize_use_ray(num_cpus=max_processes)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to initialize Ray; falling back to single-process window search. "
+                    f"Error: {exc}"
+                )
+                use_ray = False
+
+        if use_ray:
             futures = []
             for window in windows:
                 futures.append(
@@ -770,6 +905,8 @@ class PrecoveryDatabase:
                         tolerance,
                         propagator_class,
                         datasets,
+                        match_method,
+                        n_sigma,
                     )
                 )
 
@@ -803,7 +940,11 @@ class PrecoveryDatabase:
                 # to the window center in a loop to avoid
                 # duplicating the n-body propagation inside
                 # check_window
-                orbit = propagator.propagate_orbits(orbit, window.time)
+                use_covariance = (
+                    orbit.coordinates.covariance is not None
+                    and not orbit.coordinates.covariance.is_all_nan()
+                )
+                orbit = propagator.propagate_orbits(orbit, window.time, covariance=use_covariance)
                 candidates_window, frame_candidates_window = check_window(
                     self.directory,
                     window,
@@ -811,6 +952,8 @@ class PrecoveryDatabase:
                     tolerance=tolerance,
                     propagator_class=propagator_class,
                     datasets=datasets,
+                    match_method=match_method,
+                    n_sigma=n_sigma,
                 )
                 precovery_candidates = qv.concatenate(
                     [precovery_candidates, candidates_window]
@@ -828,6 +971,8 @@ class PrecoveryDatabase:
         tolerance: float,
         datasets: Optional[set[str]],
         propagator_class: Type[Propagator],
+        match_method: str = "circle",
+        n_sigma: float = 3.0,
     ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
         """
         Deeply inspect all frames that match the given obscode, mjd, and healpix to
@@ -863,7 +1008,13 @@ class PrecoveryDatabase:
             # our propagated times are not matching the frame times well enough
             assert len(matching_ephem) == 1, "No matching ephemeris found, should be 1"
             matches = self.find_matches_in_frame(
-                f, orbit, matching_ephem, tolerance, propagator
+                f,
+                orbit,
+                matching_ephem,
+                tolerance,
+                propagator,
+                match_method=match_method,
+                n_sigma=n_sigma,
             )
             # If no observations were found in this frame then we
             # return frame candidates
@@ -885,6 +1036,8 @@ class PrecoveryDatabase:
         frame_ephem: Ephemeris,
         tolerance: float,
         propagator: Propagator,
+        match_method: str = "circle",
+        n_sigma: float = 3.0,
     ) -> PrecoveryCandidates:
         """
         Find all sources in a single frame which match ephem.
@@ -893,24 +1046,38 @@ class PrecoveryDatabase:
 
         # Gather all observations.
         observations: ObservationsTable = self.frames.get_observations(frame)
-        # Check if the observations have per-observation MJDs.
-        # If so we use 2 body to generate unique ephemeris for each
-        if len(observations.time.unique()) > 1:
+
+        # For covariance-based matching, always generate a per-observation ephemeris using
+        # the 2-body pipeline so that ephemeris covariances are available (when orbit covariances exist).
+        obscode = frame.obscode[0].as_py()
+
+        if match_method == "covariance":
             per_obs_ephem = generate_ephem_for_per_obs_timestamps(
-                orbit, observations, frame.obscode, propagator
+                orbit, observations, obscode, propagator
             )
-            matching_observations, matching_ephem = find_observation_matches(
-                observations, per_obs_ephem, tolerance
+            matching_observations, matching_ephem = find_observation_matches_covariance(
+                observations, per_obs_ephem, n_sigma=n_sigma
             )
-        # Otherwise the default state is to use the same ephemeris
-        # for each observation in the frame
+
         else:
-            repeated_ephem = Ephemeris.from_pyarrow(
-                frame_ephem.table.take(np.zeros(len(observations), dtype=int))
-            )
-            matching_observations, matching_ephem = find_observation_matches(
-                observations, repeated_ephem, tolerance
-            )
+            # Check if the observations have per-observation MJDs.
+            # If so we use 2 body to generate unique ephemeris for each
+            if len(observations.time.unique()) > 1:
+                per_obs_ephem = generate_ephem_for_per_obs_timestamps(
+                    orbit, observations, obscode, propagator
+                )
+                matching_observations, matching_ephem = find_observation_matches(
+                    observations, per_obs_ephem, tolerance
+                )
+            # Otherwise the default state is to use the same ephemeris
+            # for each observation in the frame
+            else:
+                repeated_ephem = Ephemeris.from_pyarrow(
+                    frame_ephem.table.take(np.zeros(len(observations), dtype=int))
+                )
+                matching_observations, matching_ephem = find_observation_matches(
+                    observations, repeated_ephem, tolerance
+                )
 
         if len(matching_observations) == 0:
             return PrecoveryCandidates.empty()

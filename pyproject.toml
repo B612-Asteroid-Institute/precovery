@@ -35,6 +35,7 @@ dependencies = [
     "healpy",
     "requests",
     "adam-core>=0.3.1",
+    "pip>=25.3",
 ]
 [dependency-groups]
 test = [
@@ -107,7 +108,7 @@ module = "healpy"
 ignore_missing_imports = true
 
 [tool.pytest]
-filterwarnings = "ignore::DeprecationWarning:astropy"
+filterwarnings = ["ignore::DeprecationWarning:astropy"]
 
 [tool.ruff]
 line-length = 110
