@@ -34,6 +34,7 @@ def test_pred_mag_populated_for_hits(precovery_db, sample_orbits):
 
     assert pc.all(pc.is_finite(matches.pred_mag)).as_py()
     assert pc.all(pc.is_finite(matches.mag_residual)).as_py()
+    assert pc.all(pc.equal(matches.rejected, False)).as_py()
 
 
 def test_pred_mag_populated_for_misses(precovery_db, sample_orbits):
@@ -75,6 +76,7 @@ def test_pred_mag_populated_for_misses(precovery_db, sample_orbits):
     assert len(matches) == 0
     assert len(misses) > 0
     assert pc.all(pc.is_finite(misses.pred_mag)).as_py()
+    assert pc.all(pc.equal(misses.rejected, False)).as_py()
 
 
 def test_faint_frame_skip_avoids_observation_fetch(
@@ -109,6 +111,8 @@ def test_faint_frame_skip_avoids_observation_fetch(
     monkeypatch.setattr("precovery.frame_db.FrameDB.get_observations", _boom)
 
     matches, misses = db.precover(orbit, propagator_class=ASSISTPropagator)
-    # The frame is skipped as "too faint", so it is omitted from results.
+    # The frame is skipped as "too faint", but we keep a rejected FrameCandidate.
     assert len(matches) == 0
-    assert len(misses) == 0
+    assert len(misses) == 1
+    assert bool(misses.rejected[0].as_py()) is True
+    assert misses.rejected_reason[0].as_py() == "limiting_magnitude"
