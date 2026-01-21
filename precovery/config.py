@@ -17,7 +17,12 @@ class Config:
         build_version: str = __version__,
         limiting_magnitudes_parquet_file: str | None = "limiting_magnitudes.parquet",
         faint_frame_skip_margin_mag: float = 0.0,
-        max_abs_mag_residual_mag: float | None = None,
+        # Asymmetric magnitude residual thresholds (in magnitudes).
+        # mag_residual = observed_mag - predicted_mag
+        # - If mag_residual > max_mag_residual_fainter_mag => too faint => reject
+        # - If mag_residual < -max_mag_residual_brighter_mag => too bright => reject
+        max_mag_residual_fainter_mag: float | None = None,
+        max_mag_residual_brighter_mag: float | None = None,
     ):
         """
         Precovery Database Configuration
@@ -40,10 +45,8 @@ class Config:
         self.limiting_magnitudes_parquet_file = limiting_magnitudes_parquet_file
         # If predicted_mag > (limit + margin), treat it as too faint to be detectable.
         self.faint_frame_skip_margin_mag = faint_frame_skip_margin_mag
-        # Optional detection-level rejection: if |(observed_mag - predicted_mag)| exceeds
-        # this threshold (in magnitudes), mark detections as rejected.
-        # None disables this rejection.
-        self.max_abs_mag_residual_mag = max_abs_mag_residual_mag
+        self.max_mag_residual_fainter_mag = max_mag_residual_fainter_mag
+        self.max_mag_residual_brighter_mag = max_mag_residual_brighter_mag
 
         return
 

@@ -110,7 +110,12 @@ def test_faint_frame_skip_avoids_observation_fetch(
 
     monkeypatch.setattr("precovery.frame_db.FrameDB.get_observations", _boom)
 
-    matches, misses = db.precover(orbit, propagator_class=ASSISTPropagator)
+    matches, misses = db.precover(
+        orbit,
+        propagator_class=ASSISTPropagator,
+        start_mjd=mjd - 1,
+        end_mjd=mjd + 1,
+    )
     # The frame is skipped as "too faint", but we keep a rejected FrameCandidate.
     assert len(matches) == 0
     assert len(misses) == 1

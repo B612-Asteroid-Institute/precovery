@@ -40,7 +40,7 @@ dependencies = [
 ]
 [dependency-groups]
 test = [
-    "adam-assist>=0.2.0",
+    "adam-assist @ git+https://github.com/B612-Asteroid-Institute/adam-assist.git@feature/magnitudes",
     "pytest",
     "black",
     "isort",

@@ -441,6 +441,10 @@ def _as_bool_array(x: pa.Array) -> pa.Array:
     return pc.cast(x, pa.bool_())
 
 
+REJECT_REASON_LIMITING_MAGNITUDE = "limiting_magnitude"
+REJECT_REASON_MAG_RESIDUAL = "mag_residual"
+
+
 def find_healpixel_matches(
     propagation_targets: GenericFrame, ephems: Ephemeris, nside: int
 ) -> GenericFrame:
@@ -1700,17 +1704,23 @@ class PrecoveryDatabase:
                 if orbit.physical_parameters is not None
                 else None
             )
+            G = (
+                orbit.physical_parameters.G[0].as_py()
+                if orbit.physical_parameters is not None
+                else None
+            )
         except Exception:
             H = None
+            G = None
         compute_pred_mags = H is not None
+        if G is None:
+            G = 0.15
 
         enable_faint_skip = (
             compute_pred_mags
             and limit_codefid_keys is not None
             and len(limit_codefid_keys) > 0
         )
-        max_abs_mag_resid = getattr(self.config, "max_abs_mag_residual_mag", None)
-
         ephemeris = propagator.generate_ephemeris(
             orbit, observers, predict_magnitudes=compute_pred_mags
         )
@@ -1736,7 +1746,11 @@ class PrecoveryDatabase:
         deltas = pa.nulls(len(frames), type=pa.float64())
         pred_mag_band = pa.nulls(len(frames), type=pa.float64())
         too_faint = pa.repeat(False, len(frames))
-        if compute_pred_mags and not pc.all(pc.is_null(ephem_for_frames.predicted_magnitude_v)).as_py():
+        if (
+            compute_pred_mags
+            and hasattr(ephem_for_frames, "predicted_magnitude_v")
+            and not pc.all(pc.is_null(ephem_for_frames.predicted_magnitude_v)).as_py()
+        ):
             try:
                 canonical = map_to_canonical_filter_bands(
                     frames.obscode,
@@ -1745,12 +1759,11 @@ class PrecoveryDatabase:
                 )
                 canon_arr = pa.array(canonical, type=pa.large_string())
 
-                # Compute V->filter delta mags for the unique filters in this batch.
+                # Convert ephemeris predicted V magnitudes into each frame's canonical band.
                 uniq = sorted(set(map(str, canonical)))
                 delta_map = {fid: bandpass_delta_mag("C", "V", fid) for fid in uniq}
                 delta_keys, delta_vals = self._dict_to_kv_arrays(delta_map)
                 deltas = self._arrow_lookup(canon_arr, delta_keys, delta_vals)
-
                 pred_mag_band = pc.add(ephem_for_frames.predicted_magnitude_v, deltas)
 
                 if enable_faint_skip:
@@ -1775,9 +1788,8 @@ class PrecoveryDatabase:
 
         for i, (f, matching_ephem) in enumerate(zip(frames, ephem_for_frames)):
             is_too_faint = bool(too_faint[i].as_py())
-            pred_mag_frame = (
-                None if pred_mag_band.is_null(i) else float(pred_mag_band[i].as_py())
-            )
+            pred_mag_frame_py = pred_mag_band[i].as_py()
+            pred_mag_frame = None if pred_mag_frame_py is None else float(pred_mag_frame_py)
 
             if is_too_faint:
                 frame_candidates = qv.concatenate(
@@ -1794,7 +1806,8 @@ class PrecoveryDatabase:
                 )
                 continue
 
-            delta_i = None if deltas.is_null(i) else float(deltas[i].as_py())
+            delta_py = deltas[i].as_py()
+            delta_i = None if delta_py is None else float(delta_py)
             matches = self.find_matches_in_frame(
                 f,
                 orbit,
@@ -1805,7 +1818,12 @@ class PrecoveryDatabase:
                 n_sigma=n_sigma,
                 pred_mag_delta=delta_i,
                 compute_pred_mags=compute_pred_mags,
-                max_abs_mag_residual_mag=max_abs_mag_resid,
+                max_mag_residual_fainter_mag=getattr(
+                    self.config, "max_mag_residual_fainter_mag", None
+                ),
+                max_mag_residual_brighter_mag=getattr(
+                    self.config, "max_mag_residual_brighter_mag", None
+                ),
             )
             # If no observations were found in this frame then we
             # return frame candidates
@@ -1841,7 +1859,8 @@ class PrecoveryDatabase:
         *,
         pred_mag_delta: float | None = None,
         compute_pred_mags: bool = False,
-        max_abs_mag_residual_mag: float | None = None,
+        max_mag_residual_fainter_mag: float | None = None,
+        max_mag_residual_brighter_mag: float | None = None,
     ) -> PrecoveryCandidates:
         """
         Find all sources in a single frame which match ephem.
@@ -1907,9 +1926,24 @@ class PrecoveryDatabase:
             pred_mag = pc.add(matching_ephem.predicted_magnitude_v, delta_s)
             mag_residual = pc.subtract(matching_observations.mag, pred_mag)
 
-            if max_abs_mag_residual_mag is not None:
-                thr = pa.scalar(float(max_abs_mag_residual_mag), type=pa.float64())
-                outlier = pc.greater(pc.abs(mag_residual), thr)
+            # Asymmetric outlier rejection (preferred).
+            outlier = None
+            if max_mag_residual_fainter_mag is not None:
+                too_faint = pc.greater(
+                    mag_residual,
+                    pa.scalar(float(max_mag_residual_fainter_mag), type=pa.float64()),
+                )
+                outlier = too_faint if outlier is None else pc.or_(outlier, too_faint)
+            if max_mag_residual_brighter_mag is not None:
+                too_bright = pc.less(
+                    mag_residual,
+                    pa.scalar(-float(max_mag_residual_brighter_mag), type=pa.float64()),
+                )
+                outlier = (
+                    too_bright if outlier is None else pc.or_(outlier, too_bright)
+                )
+
+            if outlier is not None:
                 outlier = pc.fill_null(outlier, False)
                 rejected = _as_bool_array(outlier)
                 rejected_reason = pc.if_else(
