@@ -121,3 +121,38 @@ def test_faint_frame_skip_avoids_observation_fetch(
     assert len(misses) == 1
     assert bool(misses.rejected[0].as_py()) is True
     assert misses.rejected_reason[0].as_py() == "limiting_magnitude"
+
+
+def test_faint_frame_skip_respects_runtime_margin_override(tmp_path, sample_orbits):
+    # Build a tiny on-disk DB (so check_window re-opens it from_dir) with a single frame.
+    db = PrecoveryDatabase.create(str(tmp_path), nside=32)
+    orbit = _with_hg(sample_orbits[0], H_v=30.0, G=0.15)
+
+    mjd = 50000.0
+    o = make_sourceobs_of_orbit(orbit, "I41", mjd)
+    db.frames.add_dataset("ds")
+    db.frames.add_frames("ds", bundle_into_frames([o]))
+
+    # Write limiting magnitudes parquet cache to the DB dir (config defaults to this filename).
+    from precovery.filter_limiting_magnitudes import FilterLimitingMagnitudes
+
+    limit = FilterLimitingMagnitudes.from_kwargs(
+        obscode=["I41"],
+        filter_id=["V"],
+        limiting_mag=[10.0],
+        mag_system=[None],
+    )
+    limit.to_parquet(tmp_path / "limiting_magnitudes.parquet")
+
+    # Override margin so the frame should NOT be skipped (pred_mag ~ 30, limit+margin ~ 110).
+    db.config.faint_frame_skip_margin_mag = 100.0
+
+    matches, misses = db.precover(
+        orbit,
+        propagator_class=ASSISTPropagator,
+        start_mjd=mjd - 1,
+        end_mjd=mjd + 1,
+        max_processes=1,
+    )
+    assert len(matches) == 1
+    assert len(misses) == 0

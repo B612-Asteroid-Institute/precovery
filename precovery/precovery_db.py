@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Optional, Tuple, Type, Union, overload
+from typing import Any, Optional, Tuple, Type, Union, overload
 
 import healpy as hp
 import numpy as np
@@ -1026,6 +1026,7 @@ def check_window(
     covariance_polygon_vertices: int = 32,
     covariance_mc_num_samples: int = 64,
     covariance_mc_seed: int = 0,
+    config_overrides: dict[str, Any] | None = None,
 ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
     """
     Check a single window for precovery candidates
@@ -1056,6 +1057,13 @@ def check_window(
         f"check_window orbit: {orbit.orbit_id[0].as_py()} obscode: {window.obscode[0].as_py()} window: {window.window_start().mjd()[0].as_py()} to {window.window_end().mjd()[0].as_py()}"
     )
     db = PrecoveryDatabase.from_dir(db_dir, mode="r", allow_version_mismatch=True)
+    if config_overrides:
+        # Apply runtime overrides (e.g. magnitude cutoffs) without mutating on-disk config.json.
+        # This is critical because `check_window` re-opens the DB from disk even when the
+        # caller already has a `PrecoveryDatabase` instance with modified `config`.
+        for k, v in config_overrides.items():
+            if hasattr(db.config, k):
+                setattr(db.config, k, v)
     obscode = window.obscode[0].as_py()
     propagation_targets = db.frames.idx.propagation_targets(
         window,
@@ -1367,6 +1375,20 @@ class PrecoveryDatabase:
         candidates = PrecoveryCandidates.empty()
         frame_candidates = FrameCandidates.empty()
 
+        # Runtime configuration overrides that must be respected inside `check_window`, which
+        # re-opens the DB from disk. (Without this, callers cannot vary cutoffs per run.)
+        config_overrides: dict[str, Any] = {
+            "faint_frame_skip_margin_mag": getattr(
+                self.config, "faint_frame_skip_margin_mag", 0.0
+            ),
+            "max_mag_residual_fainter_mag": getattr(
+                self.config, "max_mag_residual_fainter_mag", None
+            ),
+            "max_mag_residual_brighter_mag": getattr(
+                self.config, "max_mag_residual_brighter_mag", None
+            ),
+        }
+
         # group windows by obscodes so that many windows can be searched at once
         for obscode in windows.obscode.unique():
             obscode_windows = windows.select("obscode", obscode)
@@ -1386,6 +1408,7 @@ class PrecoveryDatabase:
                 covariance_polygon_vertices=covariance_polygon_vertices,
                 covariance_mc_num_samples=covariance_mc_num_samples,
                 covariance_mc_seed=covariance_mc_seed,
+                config_overrides=config_overrides,
             )
             candidates = qv.concatenate([candidates, candidates_obscode])
             frame_candidates = qv.concatenate(
@@ -1546,6 +1569,7 @@ class PrecoveryDatabase:
         covariance_polygon_vertices: int = 32,
         covariance_mc_num_samples: int = 64,
         covariance_mc_seed: int = 0,
+        config_overrides: dict[str, Any] | None = None,
     ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
         """
         Find all observations that match orbit within a list of windows
@@ -1577,22 +1601,23 @@ class PrecoveryDatabase:
             for window in windows:
                 futures.append(
                     check_window_remote.remote(
-                        self.directory,
-                        window,
+                        db_dir=self.directory,
+                        window=window,
                         # Note: There is no speed benefit to pre-propagating
                         # the orbit to the window center here, since we do
                         # the n-body propagation inside the worker and the
                         # delay to start the job offsets any advantage
                         # from prepropagation.
-                        orbit,
-                        tolerance,
-                        propagator_class,
-                        datasets,
-                        match_method,
-                        n_sigma,
-                        covariance_polygon_vertices,
-                        covariance_mc_num_samples,
-                        covariance_mc_seed,
+                        orbit=orbit,
+                        tolerance=tolerance,
+                        propagator_class=propagator_class,
+                        datasets=datasets,
+                        match_method=match_method,
+                        n_sigma=n_sigma,
+                        covariance_polygon_vertices=covariance_polygon_vertices,
+                        covariance_mc_num_samples=covariance_mc_num_samples,
+                        covariance_mc_seed=covariance_mc_seed,
+                        config_overrides=config_overrides,
                     )
                 )
 
@@ -1643,6 +1668,7 @@ class PrecoveryDatabase:
                     covariance_polygon_vertices=covariance_polygon_vertices,
                     covariance_mc_num_samples=covariance_mc_num_samples,
                     covariance_mc_seed=covariance_mc_seed,
+                    config_overrides=config_overrides,
                 )
                 precovery_candidates = qv.concatenate(
                     [precovery_candidates, candidates_window]
