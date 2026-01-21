@@ -34,11 +34,11 @@ dependencies = [
     "pandas",
     "healpy",
     "requests",
-    "adam-core @ git+https://github.com/B612-Asteroid-Institute/adam_core.git@58fa623c3fde657a9133551f629b9c16d25e7a00",
+    "adam-core @ git+https://github.com/B612-Asteroid-Institute/adam_core.git@main",
 ]
 [dependency-groups]
 test = [
-    "adam-assist>=0.2.0",
+    "adam-assist @ git+https://github.com/B612-Asteroid-Institute/adam-assist.git@feature/magnitudes",
     "pytest",
     "black",
     "isort",
