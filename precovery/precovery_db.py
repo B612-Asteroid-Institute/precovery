@@ -1076,6 +1076,9 @@ def check_window(
         return PrecoveryCandidates.empty(), FrameCandidates.empty()
 
     logger.debug(f"Found {len(propagation_targets)} propagation targets")
+    # NOTE: `propagation_targets` is (time, healpixel) pairs. For a given exposure time
+    # there are typically many healpixels, so `times` contains many duplicates.
+    # We must avoid generating an ephemeris for *each* duplicated row.
     times = propagation_targets.time
 
     # Ensure orbit is propagated to the window center
@@ -1088,10 +1091,22 @@ def check_window(
         )
         orbit = propagator.propagate_orbits(orbit, window.time, covariance=use_covariance)
 
-    # create our observers from the individual frame times
-    observers = Observers.from_code(obscode, times)
+    # Deduplicate times (ms precision) so we only do 2-body propagation/ephemeris once per
+    # exposure time, then broadcast the predicted healpixel back over all target rows.
+    target_times = times.rescale("utc").rounded("ms")
+    unique_times = target_times.unique().sort_by(["days", "nanos"])
+
+    # Build mapping from each target row -> index in unique_times using an int64 composite key.
+    all_keys = PrecoveryDatabase._timestamp_key(target_times.days, target_times.nanos)
+    unique_keys = PrecoveryDatabase._timestamp_key(unique_times.days, unique_times.nanos)
+    idx = pc.fill_null(pc.index_in(all_keys, value_set=unique_keys), -1)
+    assert pc.all(pc.greater_equal(idx, 0)).as_py(), "Missing time mapping for targets"
+    idx64 = pc.cast(idx, pa.int64())
+
+    # create our observers from the individual (deduplicated) times
+    observers = Observers.from_code(obscode, unique_times)
     ## first propagate with 2_body
-    propagated_orbits = propagate_2body(orbit, times)
+    propagated_orbits = propagate_2body(orbit, unique_times)
 
     # generate ephemeris (covariances will be present if input orbit covariances exist)
     # Note: we do not need to predict magnitudes here; magnitudes are attached downstream,
@@ -1099,31 +1114,49 @@ def check_window(
     ephems = generate_ephemeris_2body(
         propagated_orbits, observers, predict_magnitudes=False
     )
-    if match_method == "covariance":
-        frames_to_check = find_healpixel_matches_covariance(
-            propagation_targets, ephems, db.frames.healpix_nside, n_sigma=n_sigma
-        )
-    elif match_method == "covariance_mc":
-        frames_to_check = find_healpixel_matches_covariance_mc(
-            propagation_targets,
-            ephems,
-            db.frames.healpix_nside,
-            n_sigma=n_sigma,
-            num_samples=covariance_mc_num_samples,
-            seed=covariance_mc_seed,
-        )
-    elif match_method == "covariance_polygon":
-        frames_to_check = find_healpixel_matches_covariance_polygon(
-            propagation_targets,
-            ephems,
-            db.frames.healpix_nside,
-            n_sigma=n_sigma,
-            num_vertices=covariance_polygon_vertices,
-        )
+    if match_method in ("covariance", "covariance_mc", "covariance_polygon"):
+        # For covariance-aware healpixel selection, we need an ephemeris aligned 1:1 with
+        # `propagation_targets`. We compute ephemerides at unique times, then broadcast the
+        # ephemeris rows back over all targets (by time) to avoid redundant propagation.
+        ephems_per_row = Ephemeris.from_pyarrow(ephems.table.take(idx64))
+        if match_method == "covariance":
+            frames_to_check = find_healpixel_matches_covariance(
+                propagation_targets,
+                ephems_per_row,
+                db.frames.healpix_nside,
+                n_sigma=n_sigma,
+            )
+        elif match_method == "covariance_mc":
+            frames_to_check = find_healpixel_matches_covariance_mc(
+                propagation_targets,
+                ephems_per_row,
+                db.frames.healpix_nside,
+                n_sigma=n_sigma,
+                num_samples=covariance_mc_num_samples,
+                seed=covariance_mc_seed,
+            )
+        else:
+            frames_to_check = find_healpixel_matches_covariance_polygon(
+                propagation_targets,
+                ephems_per_row,
+                db.frames.healpix_nside,
+                n_sigma=n_sigma,
+                num_vertices=covariance_polygon_vertices,
+            )
     else:
-        frames_to_check = find_healpixel_matches(
-            propagation_targets, ephems, db.frames.healpix_nside
+        # Fast circle mode: compute predicted healpixel per unique time, then broadcast to each
+        # target row and filter, avoiding per-row ephemeris work for repeated timestamps.
+        ephem_healpixels = pa.array(
+            radec_to_healpixel(
+                ephems.coordinates.lon.to_numpy(),
+                ephems.coordinates.lat.to_numpy(),
+                nside=db.frames.healpix_nside,
+            ),
+            type=pa.int64(),
         )
+        predicted_hp_per_row = pc.take(ephem_healpixels, idx64)
+        mask = pc.equal(propagation_targets.healpixel, predicted_hp_per_row)
+        frames_to_check = propagation_targets.apply_mask(mask)
     logger.debug(f"Found {len(frames_to_check)} healpixel matches")
     candidates = PrecoveryCandidates.empty()
     frame_candidates = FrameCandidates.empty()
@@ -1372,48 +1405,48 @@ class PrecoveryDatabase:
             start_mjd, end_mjd, window_size, datasets=datasets
         )
         logger.info(f"Searching {len(windows)} windows")
-        candidates = PrecoveryCandidates.empty()
-        frame_candidates = FrameCandidates.empty()
+        if len(windows) == 0:
+            return PrecoveryCandidates.empty(), FrameCandidates.empty()
 
         # Runtime configuration overrides that must be respected inside `check_window`, which
-        # re-opens the DB from disk. (Without this, callers cannot vary cutoffs per run.)
-        config_overrides: dict[str, Any] = {
-            "faint_frame_skip_margin_mag": getattr(
-                self.config, "faint_frame_skip_margin_mag", 0.0
-            ),
-            "max_mag_residual_fainter_mag": getattr(
-                self.config, "max_mag_residual_fainter_mag", None
-            ),
-            "max_mag_residual_brighter_mag": getattr(
-                self.config, "max_mag_residual_brighter_mag", None
-            ),
-        }
+        # re-opens the DB from disk.
+        #
+        # Only pass overrides that are explicitly set on this instance; otherwise we can
+        # clobber values coming from config.json (e.g., tests that edit config.json after
+        # creating the DB).
+        config_overrides: dict[str, Any] = {}
 
-        # group windows by obscodes so that many windows can be searched at once
-        for obscode in windows.obscode.unique():
-            obscode_windows = windows.select("obscode", obscode)
-            logger.info(
-                f"searching {len(obscode_windows)} windows for obscode {obscode}"
-            )
+        faint_margin = getattr(self.config, "faint_frame_skip_margin_mag", 0.0)
+        try:
+            faint_margin_f = float(faint_margin) if faint_margin is not None else 0.0
+        except Exception:
+            faint_margin_f = 0.0
+        if faint_margin_f != 0.0:
+            config_overrides["faint_frame_skip_margin_mag"] = faint_margin_f
+        max_faint = getattr(self.config, "max_mag_residual_fainter_mag", None)
+        if max_faint is not None:
+            config_overrides["max_mag_residual_fainter_mag"] = float(max_faint)
 
-            candidates_obscode, frame_candidates_obscode = self._check_windows(
-                obscode_windows,
-                orbit,
-                tolerance,
-                propagator_class,
-                datasets=datasets,
-                max_processes=max_processes,
-                match_method=match_method,
-                n_sigma=n_sigma,
-                covariance_polygon_vertices=covariance_polygon_vertices,
-                covariance_mc_num_samples=covariance_mc_num_samples,
-                covariance_mc_seed=covariance_mc_seed,
-                config_overrides=config_overrides,
-            )
-            candidates = qv.concatenate([candidates, candidates_obscode])
-            frame_candidates = qv.concatenate(
-                [frame_candidates, frame_candidates_obscode]
-            )
+        max_bright = getattr(self.config, "max_mag_residual_brighter_mag", None)
+        if max_bright is not None:
+            config_overrides["max_mag_residual_brighter_mag"] = float(max_bright)
+
+        # Search all windows across all observatory codes in one pass so parallelism can
+        # be applied across obscodes (not serialized per-obscode).
+        candidates, frame_candidates = self._check_windows(
+            windows,
+            orbit,
+            tolerance,
+            propagator_class,
+            datasets=datasets,
+            max_processes=max_processes,
+            match_method=match_method,
+            n_sigma=n_sigma,
+            covariance_polygon_vertices=covariance_polygon_vertices,
+            covariance_mc_num_samples=covariance_mc_num_samples,
+            covariance_mc_seed=covariance_mc_seed,
+            config_overrides=config_overrides or None,
+        )
 
         # convert these to our new output formats
         # Predicted magnitudes / mag_residual are computed during the search (in `_check_frames()`)
@@ -1795,7 +1828,9 @@ class PrecoveryDatabase:
                 if enable_faint_skip:
                     # Build per-frame limiting magnitude (require obscode|filter_id cache).
                     sep = pa.scalar("|", type=pa.large_string())
-                    codefid = pc.binary_join_element_wise(frames.obscode, canon_arr, sep)
+                    codefid = pc.binary_join_element_wise(
+                        frames.obscode, canon_arr, sep
+                    )
                     limit = self._arrow_lookup(
                         codefid, limit_codefid_keys, limit_codefid_vals
                     )
@@ -1815,7 +1850,9 @@ class PrecoveryDatabase:
         for i, (f, matching_ephem) in enumerate(zip(frames, ephem_for_frames)):
             is_too_faint = bool(too_faint[i].as_py())
             pred_mag_frame_py = pred_mag_band[i].as_py()
-            pred_mag_frame = None if pred_mag_frame_py is None else float(pred_mag_frame_py)
+            pred_mag_frame = (
+                None if pred_mag_frame_py is None else float(pred_mag_frame_py)
+            )
 
             if is_too_faint:
                 frame_candidates = qv.concatenate(
@@ -1965,9 +2002,7 @@ class PrecoveryDatabase:
                     mag_residual,
                     pa.scalar(-float(max_mag_residual_brighter_mag), type=pa.float64()),
                 )
-                outlier = (
-                    too_bright if outlier is None else pc.or_(outlier, too_bright)
-                )
+                outlier = too_bright if outlier is None else pc.or_(outlier, too_bright)
 
             if outlier is not None:
                 outlier = pc.fill_null(outlier, False)
