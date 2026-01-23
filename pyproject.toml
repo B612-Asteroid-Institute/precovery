@@ -38,7 +38,9 @@ dependencies = [
 ]
 [dependency-groups]
 test = [
-    "adam-assist @ git+https://github.com/B612-Asteroid-Institute/adam-assist.git@feature/magnitudes",
+    # Pin to a commit SHA (instead of a branch with `/`) because some PDM/unearth
+    # codepaths treat the revision as a filename during lock creation on Linux.
+    "adam-assist @ git+https://github.com/B612-Asteroid-Institute/adam-assist.git@ea0aa4949ca23bc7a8a93245365b48035f66c29b",
     "pytest",
     "black",
     "isort",
@@ -87,10 +89,11 @@ profile = "pytest -s -m 'profile' {args}"
 distribution = true
 
 [tool.black]
-line-length = 88
+line-length = 110
 
 [tool.flake8]
-line-length = 88
+max-line-length = 110
+extend-ignore = ["E231"]
 
 [tool.isort]
 profile = "black"

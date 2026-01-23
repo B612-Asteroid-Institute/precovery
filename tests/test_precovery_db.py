@@ -1,5 +1,4 @@
 import numpy as np
-import numpy.testing as npt
 import pyarrow as pa
 from adam_assist import ASSISTPropagator
 from adam_core.coordinates import CartesianCoordinates, Origin, SphericalCoordinates
@@ -11,8 +10,6 @@ from precovery.frame_db import GenericFrame, HealpixFrame
 from precovery.healpix_geom import radec_to_healpixel
 from precovery.observation import ObservationsTable
 from precovery.precovery_db import (
-    CANDIDATE_NSIDE,
-    PrecoveryCandidates,
     PrecoveryDatabase,
     candidates_from_ephem,
     find_healpixel_matches,
@@ -71,9 +68,7 @@ def test_find_healpixel_matches():
     ra = np.linspace(0, 360, 6)
     dec = np.linspace(-90, 90, 6)
     healpixels = radec_to_healpixel(ra, dec, nside=32)
-    times = Timestamp.from_mjd(
-        [50000.0, 50001.0, 50002.0, 50003.0, 50004.0, 50005.0], scale="utc"
-    )
+    times = Timestamp.from_mjd([50000.0, 50001.0, 50002.0, 50003.0, 50004.0, 50005.0], scale="utc")
 
     propagation_targets = GenericFrame.from_kwargs(
         # let's only match half the healpixels
@@ -159,9 +154,7 @@ def test_find_matches_in_frame(tmp_path, mocker):
         ),
     )
 
-    candidates = db.find_matches_in_frame(
-        frame, orbit, frame_ephem, 1 / 3600.0, ASSISTPropagator()
-    )
+    candidates = db.find_matches_in_frame(frame, orbit, frame_ephem, 1 / 3600.0, ASSISTPropagator())
     assert len(candidates) == 1
 
 
@@ -178,9 +171,7 @@ def test_find_matches_in_frame_per_obs_timestamps(tmp_path, mocker):
         time=Timestamp.from_mjd([50000.0, 50000.01, 50000.03], scale="utc"),
     )
 
-    gen_ephem = mocker.patch(
-        "precovery.precovery_db.generate_ephem_for_per_obs_timestamps"
-    )
+    gen_ephem = mocker.patch("precovery.precovery_db.generate_ephem_for_per_obs_timestamps")
     gen_ephem.return_value = Ephemeris.from_kwargs(
         orbit_id=pa.repeat("test_orbit", 3),
         object_id=pa.repeat("test_object", 3),
@@ -238,9 +229,7 @@ def test_find_matches_in_frame_per_obs_timestamps(tmp_path, mocker):
         ),
     )
 
-    candidates = db.find_matches_in_frame(
-        frame, orbit, frame_ephem, 1 / 3600.0, ASSISTPropagator()
-    )
+    candidates = db.find_matches_in_frame(frame, orbit, frame_ephem, 1 / 3600.0, ASSISTPropagator())
 
     assert len(candidates) == 1
     assert gen_ephem.call_count == 1
@@ -323,4 +312,8 @@ def test_candidates_from_ephem():
 
     assert len(candidates) == 3
     assert candidates.exposure_id.to_pylist() == ["exp0", "exp0", "exp0"]
-    assert candidates.distance_arcsec.to_pylist() == [2.9981724810565917, 0.9993908270183969, 3.99756330807566]
+    assert candidates.distance_arcsec.to_pylist() == [
+        2.9981724810565917,
+        0.9993908270183969,
+        3.99756330807566,
+    ]

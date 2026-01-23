@@ -56,9 +56,7 @@ def run(input_dir, output_dir):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Rearrange adam csv files by calendar month."
-    )
+    parser = argparse.ArgumentParser(description="Rearrange adam csv files by calendar month.")
     parser.add_argument(
         "--input_dir",
         help="Directory containing csv files to be reorganized.",

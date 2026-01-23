@@ -160,9 +160,7 @@ class PrecoveryCandidates(qv.Table):
         Residuals
             Residuals between the observations and the predicted ephemeris.
         """
-        return Residuals.calculate(
-            self.to_spherical_coordinates(), self.predicted_ephemeris().coordinates
-        )
+        return Residuals.calculate(self.to_spherical_coordinates(), self.predicted_ephemeris().coordinates)
 
     def to_spherical_coordinates(self) -> SphericalCoordinates:
         """
@@ -209,9 +207,7 @@ class PrecoveryCandidates(qv.Table):
         for obscode in self.obscode.unique():
             self_obs = self.select("obscode", obscode)
             times = self_obs.time
-            observers = qv.concatenate(
-                [observers, Observers.from_code(obscode.as_py(), times)]
-            )
+            observers = qv.concatenate([observers, Observers.from_code(obscode.as_py(), times)])
 
         return observers.sort_by(
             [
@@ -263,9 +259,7 @@ class FrameCandidates(qv.Table):
         )
 
     def predicted_ephemeris(self, orbit_ids=None) -> Ephemeris:
-        origin = Origin.from_kwargs(
-            code=["SUN" for i in range(len(self.exposure_time_mid))]
-        )
+        origin = Origin.from_kwargs(code=["SUN" for i in range(len(self.exposure_time_mid))])
         frame = "ecliptic"
         if orbit_ids is None:
             orbit_ids = [str(i) for i in range(len(self.exposure_time_mid))]
@@ -444,9 +438,7 @@ REJECT_REASON_LIMITING_MAGNITUDE = "limiting_magnitude"
 REJECT_REASON_MAG_RESIDUAL = "mag_residual"
 
 
-def find_healpixel_matches(
-    propagation_targets: GenericFrame, ephems: Ephemeris, nside: int
-) -> GenericFrame:
+def find_healpixel_matches(propagation_targets: GenericFrame, ephems: Ephemeris, nside: int) -> GenericFrame:
     """
     Find the healpixels that match between the propagation targets and the 2 body ephemeris
 
@@ -504,9 +496,7 @@ def generate_ephem_for_per_obs_timestamps(
     mean_mjd = pc.mean(observations.time.mjd()).as_py()
     mean_time = Timestamp.from_mjd([mean_mjd], scale="utc")
     mean_orbit_state = propagator.propagate_orbits(orbit, mean_time)
-    propagated_orbits = propagate_2body(
-        mean_orbit_state, observations.time, propagator, obscode
-    )
+    propagated_orbits = propagate_2body(mean_orbit_state, observations.time, propagator, obscode)
     observers = Observers.from_code(obscode, observations.time)
     ephemeris = generate_ephemeris_2body(
         propagated_orbits, observers, predict_magnitudes=bool(predict_magnitudes)
@@ -533,18 +523,14 @@ def find_observation_matches(
     Tuple[ObservationsTable, Ephemeris]
         Observations and ephemeris that match within the given tolerance
     """
-    assert len(ephems) == len(
-        observations
-    ), "Ephemeris must be the same length as observations"
+    assert len(ephems) == len(observations), "Ephemeris must be the same length as observations"
     assert pc.all(
         ephems.coordinates.time.equals(observations.time, precision="ms")
     ).as_py(), "Ephemeris and observations must have matching times"
     # Check for bizarrely large tolerance which might have been
     # sent in as arcseconds instead of degrees
     if tolerance_deg > 2:
-        logger.warning(
-            "Tolerance is very large, did you pass in arcseconds instead of degrees?"
-        )
+        logger.warning("Tolerance is very large, did you pass in arcseconds instead of degrees?")
 
     distances = haversine_distance_deg(
         observations.ra.to_numpy(),
@@ -594,7 +580,8 @@ def check_window(
     assert len(window) == 1, "Use _check_windows for multiple windows"
     assert len(orbit) == 1, "_check_window only support one orbit for now"
     logger.info(
-        f"check_window orbit: {orbit.orbit_id[0].as_py()} obscode: {window.obscode[0].as_py()} window: {window.window_start().mjd()[0].as_py()} to {window.window_end().mjd()[0].as_py()}"
+        f"check_window orbit: {orbit.orbit_id[0].as_py()} obscode: {window.obscode[0].as_py()} "
+        f"window: {window.window_start().mjd()[0].as_py()} to {window.window_end().mjd()[0].as_py()}"
     )
     db = PrecoveryDatabase.from_dir(db_dir, mode="r", allow_version_mismatch=True)
     if config_overrides:
@@ -611,7 +598,8 @@ def check_window(
     )
     if len(propagation_targets) == 0:
         logger.debug(
-            f"No propagation targets found for window {window.window_start().mjd()[0].as_py()} to {window.window_end().mjd()[0].as_py()}"
+            f"No propagation targets found for window "
+            f"{window.window_start().mjd()[0].as_py()} to {window.window_end().mjd()[0].as_py()}"
         )
         return PrecoveryCandidates.empty(), FrameCandidates.empty()
 
@@ -641,13 +629,11 @@ def check_window(
 
     # create our observers from the individual (deduplicated) times
     observers = Observers.from_code(obscode, unique_times)
-    ## first propagate with 2_body
+    # first propagate with 2_body
     propagated_orbits = propagate_2body(orbit, unique_times)
 
     # generate ephemeris
-    ephems = generate_ephemeris_2body(
-        propagated_orbits, observers, predict_magnitudes=False
-    )
+    ephems = generate_ephemeris_2body(propagated_orbits, observers, predict_magnitudes=False)
 
     # Compute predicted healpixel per unique time, then broadcast to each target row.
     ephem_healpixels = pa.array(
@@ -674,9 +660,7 @@ def check_window(
             propagator_class=propagator_class,
         )
         candidates = qv.concatenate([candidates, candidates_healpixel])
-        frame_candidates = qv.concatenate(
-            [frame_candidates, frame_candidates_healpixel]
-        )
+        frame_candidates = qv.concatenate([frame_candidates, frame_candidates_healpixel])
     return candidates, frame_candidates
 
 
@@ -758,9 +742,7 @@ class PrecoveryDatabase:
                         )
                     return
                 except Exception as e:
-                    logger.warning(
-                        f"Failed to read limiting magnitudes parquet cache file: {e}"
-                    )
+                    logger.warning(f"Failed to read limiting magnitudes parquet cache file: {e}")
 
     @classmethod
     def from_dir(
@@ -794,9 +776,7 @@ class PrecoveryDatabase:
         frame_idx = FrameIndex(frame_idx_db, mode=mode)
 
         data_path = os.path.join(directory, "data")
-        frame_db = FrameDB(
-            frame_idx, data_path, config.data_file_max_size, config.nside, mode=mode
-        )
+        frame_db = FrameDB(frame_idx, data_path, config.data_file_max_size, config.nside, mode=mode)
         db = cls(frame_db, directory, config)
         db._load_limiting_magnitudes_cache()
         return db
@@ -880,9 +860,7 @@ class PrecoveryDatabase:
         orbit_id = orbit.orbit_id[0].as_py()
 
         # Normalize the orbit timescale to utc for comparisons
-        orbit = orbit.set_column(
-            "coordinates.time", orbit.coordinates.time.rescale("utc")
-        )
+        orbit = orbit.set_column("coordinates.time", orbit.coordinates.time.rescale("utc"))
 
         if datasets is not None:
             self._warn_for_missing_datasets(datasets)
@@ -895,12 +873,11 @@ class PrecoveryDatabase:
                 end_mjd = last
 
         logger.info(
-            f"precovering orbit {orbit_id} from {start_mjd} to {end_mjd}, window={window_size}, datasets={datasets or 'all'}"
+            f"precovering orbit {orbit_id} from {start_mjd} to {end_mjd}, window={window_size}, "
+            f"datasets={datasets or 'all'}"
         )
 
-        windows = self.frames.idx.window_centers(
-            start_mjd, end_mjd, window_size, datasets=datasets
-        )
+        windows = self.frames.idx.window_centers(start_mjd, end_mjd, window_size, datasets=datasets)
         logger.info(f"Searching {len(windows)} windows")
         if len(windows) == 0:
             return PrecoveryCandidates.empty(), FrameCandidates.empty()
@@ -972,9 +949,7 @@ class PrecoveryDatabase:
                     vy=pa.nulls(len(frame_candidates), type=pa.float64()),
                     vz=pa.nulls(len(frame_candidates), type=pa.float64()),
                     time=frame_candidates.exposure_time_mid,
-                    origin=Origin.from_kwargs(
-                        code=pa.repeat("SUN", len(frame_candidates))
-                    ),
+                    origin=Origin.from_kwargs(code=pa.repeat("SUN", len(frame_candidates))),
                     frame="ecliptic",
                 ),
             )
@@ -985,16 +960,10 @@ class PrecoveryDatabase:
     # table type (PrecoveryCandidates in -> PrecoveryCandidates out; FrameCandidates in ->
     # FrameCandidates out). These overloads are for static typing only; no runtime effect.
     @overload
-    def _attach_magnitudes(
-        self, table: PrecoveryCandidates, orbit: Orbits
-    ) -> PrecoveryCandidates:
-        ...
+    def _attach_magnitudes(self, table: PrecoveryCandidates, orbit: Orbits) -> PrecoveryCandidates: ...
 
     @overload
-    def _attach_magnitudes(
-        self, table: FrameCandidates, orbit: Orbits
-    ) -> FrameCandidates:
-        ...
+    def _attach_magnitudes(self, table: FrameCandidates, orbit: Orbits) -> FrameCandidates: ...
 
     def _attach_magnitudes(
         self, table: Union[PrecoveryCandidates, FrameCandidates], orbit: Orbits
@@ -1054,9 +1023,7 @@ class PrecoveryDatabase:
             exposures.filter,
             allow_fallback_filters=True,
         )
-        exposures = exposures.set_column(
-            "filter", pa.array(canonical, type=pa.large_string())
-        )
+        exposures = exposures.set_column("filter", pa.array(canonical, type=pa.large_string()))
 
         # predict_magnitudes expects object_coords and exposures to be the same length.
         pred_mag = predict_magnitudes(
@@ -1068,18 +1035,14 @@ class PrecoveryDatabase:
         )
 
         if isinstance(table, PrecoveryCandidates):
-            out_candidates = PrecoveryCandidates.from_pyarrow(
-                table.set_column("pred_mag", pred_mag).table
-            )
+            out_candidates = PrecoveryCandidates.from_pyarrow(table.set_column("pred_mag", pred_mag).table)
             mag_residual = pc.subtract(out_candidates.mag, pred_mag)
             out_candidates = PrecoveryCandidates.from_pyarrow(
                 out_candidates.set_column("mag_residual", mag_residual).table
             )
             return out_candidates
 
-        out_frames = FrameCandidates.from_pyarrow(
-            table.set_column("pred_mag", pred_mag).table
-        )
+        out_frames = FrameCandidates.from_pyarrow(table.set_column("pred_mag", pred_mag).table)
         return out_frames
 
     def _check_windows(
@@ -1096,11 +1059,10 @@ class PrecoveryDatabase:
         Find all observations that match orbit within a list of windows
         """
         assert len(orbit) == 1, "_check_windows only support one orbit for now"
-        windows = windows.sort_by(
-            [("time.days", "descending"), ("time.nanos", "descending")]
-        )
+        windows = windows.sort_by([("time.days", "descending"), ("time.nanos", "descending")])
         logger.info(
-            f"_check_windows orbit: {orbit.orbit_id[0].as_py()} windows: {len(windows)} obscode: {windows.obscode.unique().to_pylist()}"
+            f"_check_windows orbit: {orbit.orbit_id[0].as_py()} windows: {len(windows)} "
+            f"obscode: {windows.obscode.unique().to_pylist()}, datasets={datasets or 'all'}"
         )
 
         precovery_candidates = PrecoveryCandidates.empty()
@@ -1129,27 +1091,15 @@ class PrecoveryDatabase:
 
                 if len(futures) >= max_processes * 2:
                     finished, futures = ray.wait(futures, num_returns=1)
-                    precovery_candidates_window, frame_candidates_window = ray.get(
-                        finished[0]
-                    )
-                    precovery_candidates = qv.concatenate(
-                        [precovery_candidates, precovery_candidates_window]
-                    )
-                    frame_candidates = qv.concatenate(
-                        [frame_candidates, frame_candidates_window]
-                    )
+                    precovery_candidates_window, frame_candidates_window = ray.get(finished[0])
+                    precovery_candidates = qv.concatenate([precovery_candidates, precovery_candidates_window])
+                    frame_candidates = qv.concatenate([frame_candidates, frame_candidates_window])
 
             while len(futures) > 0:
                 finished, futures = ray.wait(futures, num_returns=1)
-                precovery_candidates_window, frame_candidates_window = ray.get(
-                    finished[0]
-                )
-                precovery_candidates = qv.concatenate(
-                    [precovery_candidates, precovery_candidates_window]
-                )
-                frame_candidates = qv.concatenate(
-                    [frame_candidates, frame_candidates_window]
-                )
+                precovery_candidates_window, frame_candidates_window = ray.get(finished[0])
+                precovery_candidates = qv.concatenate([precovery_candidates, precovery_candidates_window])
+                frame_candidates = qv.concatenate([frame_candidates, frame_candidates_window])
         else:
             propagator = propagator_class()
             for window in windows:
@@ -1167,12 +1117,8 @@ class PrecoveryDatabase:
                     datasets=datasets,
                     config_overrides=config_overrides,
                 )
-                precovery_candidates = qv.concatenate(
-                    [precovery_candidates, candidates_window]
-                )
-                frame_candidates = qv.concatenate(
-                    [frame_candidates, frame_candidates_window]
-                )
+                precovery_candidates = qv.concatenate([precovery_candidates, candidates_window])
+                frame_candidates = qv.concatenate([frame_candidates, frame_candidates_window])
         return precovery_candidates, frame_candidates
 
     def _check_frames(
@@ -1215,21 +1161,11 @@ class PrecoveryDatabase:
         # Prefer the generated cache file (loaded once at DB open), falling back to config dicts.
         limit_codefid_keys = self._limit_codefid_keys
         limit_codefid_vals = self._limit_codefid_vals
-        faint_margin = float(
-            getattr(self.config, "faint_frame_skip_margin_mag", 0.0) or 0.0
-        )
+        faint_margin = float(getattr(self.config, "faint_frame_skip_margin_mag", 0.0) or 0.0)
         # Magnitudes are only computable if the orbit has H (and a defaultable G).
         try:
-            H = (
-                orbit.physical_parameters.H_v[0].as_py()
-                if orbit.physical_parameters is not None
-                else None
-            )
-            G = (
-                orbit.physical_parameters.G[0].as_py()
-                if orbit.physical_parameters is not None
-                else None
-            )
+            H = orbit.physical_parameters.H_v[0].as_py() if orbit.physical_parameters is not None else None
+            G = orbit.physical_parameters.G[0].as_py() if orbit.physical_parameters is not None else None
         except Exception:
             H = None
             G = None
@@ -1238,13 +1174,9 @@ class PrecoveryDatabase:
             G = 0.15
 
         enable_faint_skip = (
-            compute_pred_mags
-            and limit_codefid_keys is not None
-            and len(limit_codefid_keys) > 0
+            compute_pred_mags and limit_codefid_keys is not None and len(limit_codefid_keys) > 0
         )
-        ephemeris = propagator.generate_ephemeris(
-            orbit, observers, predict_magnitudes=compute_pred_mags
-        )
+        ephemeris = propagator.generate_ephemeris(orbit, observers, predict_magnitudes=compute_pred_mags)
 
         # Align ephemeris rows to frames by exposure-midpoint time (vectorized),
         # then iterate row-wise without repeated time masking.
@@ -1290,12 +1222,8 @@ class PrecoveryDatabase:
                 if enable_faint_skip:
                     # Build per-frame limiting magnitude (require obscode|filter_id cache).
                     sep = pa.scalar("|", type=pa.large_string())
-                    codefid = pc.binary_join_element_wise(
-                        frames.obscode, canon_arr, sep
-                    )
-                    limit = self._arrow_lookup(
-                        codefid, limit_codefid_keys, limit_codefid_vals
-                    )
+                    codefid = pc.binary_join_element_wise(frames.obscode, canon_arr, sep)
+                    limit = self._arrow_lookup(codefid, limit_codefid_keys, limit_codefid_vals)
 
                     # Too faint if predicted magnitude is greater (numerically) than limit+margin.
                     limit_with_margin = pc.add(limit, faint_margin)
@@ -1312,9 +1240,7 @@ class PrecoveryDatabase:
         for i, (f, matching_ephem) in enumerate(zip(frames, ephem_for_frames)):
             is_too_faint = bool(too_faint[i].as_py())
             pred_mag_frame_py = pred_mag_band[i].as_py()
-            pred_mag_frame = (
-                None if pred_mag_frame_py is None else float(pred_mag_frame_py)
-            )
+            pred_mag_frame = None if pred_mag_frame_py is None else float(pred_mag_frame_py)
 
             if is_too_faint:
                 frame_candidates = qv.concatenate(
@@ -1340,12 +1266,8 @@ class PrecoveryDatabase:
                 tolerance,
                 propagator,
                 compute_pred_mags=compute_pred_mags,
-                max_mag_residual_fainter_mag=getattr(
-                    self.config, "max_mag_residual_fainter_mag", None
-                ),
-                max_mag_residual_brighter_mag=getattr(
-                    self.config, "max_mag_residual_brighter_mag", None
-                ),
+                max_mag_residual_fainter_mag=getattr(self.config, "max_mag_residual_fainter_mag", None),
+                max_mag_residual_brighter_mag=getattr(self.config, "max_mag_residual_brighter_mag", None),
                 pred_mag_delta=delta_i,
             )
             # If no observations were found in this frame then we
@@ -1419,9 +1341,7 @@ class PrecoveryDatabase:
         pred_mag = pa.nulls(len(matching_observations), type=pa.float64())
         mag_residual = pa.nulls(len(matching_observations), type=pa.float64())
         rejected = pa.repeat(False, len(matching_observations))
-        rejected_reason = pa.array(
-            [None] * len(matching_observations), type=pa.large_string()
-        )
+        rejected_reason = pa.array([None] * len(matching_observations), type=pa.large_string())
 
         if (
             compute_pred_mags
@@ -1468,9 +1388,7 @@ class PrecoveryDatabase:
         )
         return candidates
 
-    def find_observations_in_region(
-        self, ra: float, dec: float, obscode: str
-    ) -> ObservationsTable:
+    def find_observations_in_region(self, ra: float, dec: float, obscode: str) -> ObservationsTable:
         """Gets all the Observations within the same Healpixel as a
         given RA, Dec for a particular observatory (specified as an obscode).
 
@@ -1478,9 +1396,7 @@ class PrecoveryDatabase:
         frames = self.frames.get_frames_for_ra_dec(ra, dec, obscode)
         observations = ObservationsTable.empty()
         for f in frames:
-            observations = qv.concatenate(
-                [observations, self.frames.get_observations(f)]
-            )
+            observations = qv.concatenate([observations, self.frames.get_observations(f)])
         return observations
 
     def find_observations_in_radius(
@@ -1496,9 +1412,7 @@ class PrecoveryDatabase:
         """
         obs_in_region = self.find_observations_in_region(ra, dec, obscode)
         mask = pc.less_equal(
-            haversine_distance_deg(
-                obs_in_region.ra.to_numpy(), ra, obs_in_region.dec.to_numpy(), dec
-            ),
+            haversine_distance_deg(obs_in_region.ra.to_numpy(), ra, obs_in_region.dec.to_numpy(), dec),
             tolerance,
         )
         return obs_in_region.apply_mask(mask)

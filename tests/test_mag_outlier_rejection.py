@@ -1,5 +1,6 @@
 import pyarrow.compute as pc
 from adam_assist import ASSISTPropagator
+
 from precovery.config import Config
 from precovery.precovery_db import PrecoveryDatabase
 from precovery.sourcecatalog import bundle_into_frames
@@ -72,4 +73,3 @@ def test_detection_mag_outlier_rejected_fainter(tmp_path, sample_orbits):
     assert len(matches) == 1
     assert bool(matches.rejected[0].as_py()) is True
     assert matches.rejected_reason[0].as_py() == "mag_residual"
-

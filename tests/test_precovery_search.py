@@ -1,7 +1,6 @@
 from adam_assist import ASSISTPropagator
 
 from precovery.main import precover
-from precovery.precovery_db import PrecoveryDatabase
 from precovery.sourcecatalog import bundle_into_frames
 
 from .testutils import make_sourceobs, make_sourceobs_of_orbit
@@ -13,15 +12,10 @@ def test_precover(precovery_db, sample_orbits):
     orbit = sample_orbits[0]
     timestamps = [50000.0, 50001.0, 50002.0]
 
-    object_observations = [
-        make_sourceobs_of_orbit(orbit, "I41", mjd) for mjd in timestamps
-    ]
+    object_observations = [make_sourceobs_of_orbit(orbit, "I41", mjd) for mjd in timestamps]
 
     # Include some stuff we're not looking for.
-    extra_observations = [
-        make_sourceobs(obscode="I41", mjd=mjd, exposure_duration=30)
-        for mjd in timestamps
-    ]
+    extra_observations = [make_sourceobs(obscode="I41", mjd=mjd, exposure_duration=30) for mjd in timestamps]
 
     frames = list(bundle_into_frames(object_observations + extra_observations))
 
@@ -46,12 +40,8 @@ def test_precover_dataset_filter(precovery_db, sample_orbits):
     orbit = sample_orbits[0]
     timestamps = [50000.0, 50001.0, 50002.0]
 
-    ds1_observations = [
-        make_sourceobs_of_orbit(orbit, "I41", mjd) for mjd in timestamps
-    ]
-    ds2_observations = [
-        make_sourceobs_of_orbit(orbit, "I41", mjd) for mjd in timestamps
-    ]
+    ds1_observations = [make_sourceobs_of_orbit(orbit, "I41", mjd) for mjd in timestamps]
+    ds2_observations = [make_sourceobs_of_orbit(orbit, "I41", mjd) for mjd in timestamps]
 
     ds1_id = "test_dataset_1"
     precovery_db.frames.add_dataset(ds1_id)
@@ -71,11 +61,7 @@ def test_precover_dataset_filter(precovery_db, sample_orbits):
 
     # Now repeat the search, but filter to just one dataset. We should
     # only find that dataset's observations.
-    matches, _ = list(
-        precovery_db.precover(
-            orbit, datasets={ds1_id}, propagator_class=ASSISTPropagator
-        )
-    )
+    matches, _ = list(precovery_db.precover(orbit, datasets={ds1_id}, propagator_class=ASSISTPropagator))
     assert len(matches) == 3
 
     have_ids = set(matches.observation_id.to_pylist())

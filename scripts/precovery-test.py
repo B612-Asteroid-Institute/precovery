@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import List
 
 import numpy as np
-import pandas as pd
 import quivr as qv
 from adam_assist import ASSISTPropagator
 from adam_core.orbits import Orbits
@@ -22,9 +21,7 @@ OUTPUT_FILE = "test_orbits_matches.csv"
 
 if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser(
-        description="Run precovery using test_orbits.csv in this directory"
-    )
+    parser = argparse.ArgumentParser(description="Run precovery using test_orbits.csv in this directory")
     parser.add_argument("--database_dir", default=DATABASE_DIR, type=str)
     parser.add_argument("--orbits_file", default=ORBITS_FILE, type=str)
     parser.add_argument("--out_file", default=OUTPUT_FILE, type=str)
@@ -32,10 +29,7 @@ if __name__ == "__main__":
         "--tolerance",
         default=1 / 3600,
         type=float,
-        help=(
-            "Astrometric tolerance to within which observations are considered"
-            " precoveries."
-        ),
+        help=("Astrometric tolerance to within which observations are considered" " precoveries."),
     )
     parser.add_argument(
         "--num_orbits",
@@ -59,9 +53,7 @@ if __name__ == "__main__":
             orbit, tolerance=1 / 3600, propagator_class=ASSISTPropagator
         )
 
-        print(
-            f"Found {len(candidates)} potential matches for orbit ID: {orbit.object_id[0].as_py()}"
-        )
+        print(f"Found {len(candidates)} potential matches for orbit ID: {orbit.object_id[0].as_py()}")
 
     precovery_candidates = qv.concatenate(all_matches)
     precovery_candidates.to_parquet(args.out_file)

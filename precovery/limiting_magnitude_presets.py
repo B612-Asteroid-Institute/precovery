@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+import argparse
+import math
+import os
+from typing import Iterable
+
+from .filter_limiting_magnitudes import FilterLimitingMagnitudes
+
 """
 Preset limiting magnitude tables for precovery.
 
@@ -35,13 +42,6 @@ Primary sources used
   e.g. MNRAS 499(1)1005
   `https://academic.oup.com/mnras/article/499/1/1005/5905421`
 """
-
-import argparse
-import math
-import os
-from typing import Iterable
-
-from .filter_limiting_magnitudes import FilterLimitingMagnitudes
 
 
 def _snr_mag_offset(snr_from: float, snr_to: float) -> float:
@@ -132,4 +132,3 @@ def _main(argv: Iterable[str] | None = None) -> None:
 
 if __name__ == "__main__":
     _main()
-

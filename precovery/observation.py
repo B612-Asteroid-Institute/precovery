@@ -54,7 +54,7 @@ class ObservationsTable(qv.Table):
         if len(srcobs) == 0:
             return ObservationsTable.empty()
 
-        (mjds, ras, decs, ra_sigmas, dec_sigmas, mags, mag_sigmas, ids) = zip(
+        mjds, ras, decs, ra_sigmas, dec_sigmas, mags, mag_sigmas, ids = zip(
             *[
                 (
                     so.mjd,

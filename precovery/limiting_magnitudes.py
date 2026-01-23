@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import os
-from typing import Optional
 
 from .config import Config
 from .filter_limiting_magnitudes import FilterLimitingMagnitudes
@@ -93,18 +92,14 @@ def main() -> None:
     db_dir = args.db_dir
     in_file = args.in_file
     if not os.path.exists(os.path.join(db_dir, "index.db")):
-        raise SystemExit(
-            f"{db_dir} does not look like a precovery DB (missing index.db)"
-        )
+        raise SystemExit(f"{db_dir} does not look like a precovery DB (missing index.db)")
 
     if not in_file.lower().endswith(".parquet"):
         raise SystemExit("--in-file must be .parquet")
     table = FilterLimitingMagnitudes.from_parquet(in_file)
 
     import_limiting_magnitudes(db_dir=db_dir, table=table)
-    out_path = generate_limiting_magnitudes_parquet_cache(
-        db_dir=db_dir, out_file=args.cache_file
-    )
+    out_path = generate_limiting_magnitudes_parquet_cache(db_dir=db_dir, out_file=args.cache_file)
 
     # Update the DB's config.json so precovery loads the cache file automatically.
     cfg_path = os.path.join(db_dir, "config.json")

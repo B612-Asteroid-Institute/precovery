@@ -75,14 +75,12 @@ def index(
 
     files = glob.glob(os.path.join(data_dir, "**", "*.csv"), recursive=True)
     files = sorted(set(files))
-    logger.info(f"Found {len(files)} observation files in {data_dir}:")
+    logger.info(f"Found {len(files)} observation files in {data_dir}: ")
     for f in files:
         logger.info(f"\t{os.path.basename(f)}")
 
     # Ensure database is initialized in main thread before starting
-    PrecoveryDatabase.create(
-        out_dir, nside=nside, data_file_max_size=data_file_max_size
-    )
+    PrecoveryDatabase.create(out_dir, nside=nside, data_file_max_size=data_file_max_size)
 
     time_start = datetime.datetime.now()
 
@@ -129,21 +127,15 @@ if __name__ == "__main__":
         type=str,
     )
     parser.add_argument("dataset_id", help="Dataset ID for this file.", type=str)
-    parser.add_argument(
-        "--nside", default=DefaultConfig.nside, type=int, help="Healpix nside parameter"
-    )
-    parser.add_argument(
-        "--cpu_count", default=None, type=int, help="Number of CPUs to use"
-    )
+    parser.add_argument("--nside", default=DefaultConfig.nside, type=int, help="Healpix nside parameter")
+    parser.add_argument("--cpu_count", default=None, type=int, help="Number of CPUs to use")
     parser.add_argument(
         "--data_file_max_size",
         default=DefaultConfig.data_file_max_size,
         type=int,
         help="Maximum size in bytes of the binary indexed observation files.",
     )
-    parser.add_argument(
-        "--dataset_name", help="Dataset name for this file.", type=str, default=None
-    )
+    parser.add_argument("--dataset_name", help="Dataset name for this file.", type=str, default=None)
     parser.add_argument(
         "--reference_doi",
         help="DOI of the reference paper for this dataset.",
@@ -155,9 +147,7 @@ if __name__ == "__main__":
         help="URL of any documentation available for this dataset.",
         type=str,
     )
-    parser.add_argument(
-        "--sia_url", help="Simple Image Access URL for this dataset.", type=str
-    )
+    parser.add_argument("--sia_url", help="Simple Image Access URL for this dataset.", type=str)
 
     args = parser.parse_args()
 

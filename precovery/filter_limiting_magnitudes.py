@@ -28,7 +28,4 @@ class FilterLimitingMagnitudes(qv.Table):
         """
         sep = pa.scalar("|", type=pa.large_string())
         keys = pc.binary_join_element_wise(self.obscode, self.filter_id, sep)
-        return {
-            str(k): float(v)
-            for k, v in zip(keys.to_pylist(), self.limiting_mag.to_pylist())
-        }
+        return {str(k): float(v) for k, v in zip(keys.to_pylist(), self.limiting_mag.to_pylist())}
