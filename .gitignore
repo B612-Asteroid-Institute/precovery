@@ -125,3 +125,4 @@ pdm.lock
 .pdm-python
 precovery/_version.py
 .pdm-build/
+.cursor/
