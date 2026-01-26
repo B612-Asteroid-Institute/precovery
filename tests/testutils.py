@@ -1,10 +1,8 @@
-import os
 import random
 import string
 from typing import Optional, Tuple
 
 import healpy
-import pytest
 from adam_assist import ASSISTPropagator
 from adam_core.observers import Observers
 from adam_core.orbits import Orbits
@@ -23,6 +21,7 @@ def make_sourceobs(
     dec: float = 2.0,
     mjd: float = 50000.5,
     exposure_duration: float = 30,
+    filter: str = "V",
 ) -> SourceObservation:
     """Constructor for SourceObservations which provides default
     values for anything unspecified, which makes test setup less
@@ -54,7 +53,7 @@ def make_sourceobs(
         dec_sigma=4.0,
         mag=5.0,
         mag_sigma=6.0,
-        filter="filter",
+        filter=filter,
         exposure_mjd_start=exposure_mjd_start,
         exposure_mjd_mid=exposure_mjd_mid,
         exposure_duration=exposure_duration,
@@ -112,7 +111,7 @@ def make_sourceframe_with_observations(
     return SourceFrame(
         exposure_id=exposure_id,
         obscode=obscode,
-        filter="filter",
+        filter="V",
         exposure_mjd_start=exposure_mjd_start,
         exposure_mjd_mid=exposure_mjd_mid,
         exposure_duration=exposure_duration,

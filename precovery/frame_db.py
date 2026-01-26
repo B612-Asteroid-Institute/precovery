@@ -117,9 +117,7 @@ class WindowCenters(qv.Table):
         )
 
     def window_end(self):
-        return self.time.add_fractional_days(
-            pc.divide(pc.cast(self.window_size_days, pa.float64()), 2)
-        )
+        return self.time.add_fractional_days(pc.divide(pc.cast(self.window_size_days, pa.float64()), 2))
 
 
 class FrameIndex:
@@ -151,18 +149,48 @@ class FrameIndex:
         self._metadata.reflect(bind=self.db)
         self.frames = self._metadata.tables["frames"]
         self.datasets = self._metadata.tables["datasets"]
+        # Optional table (newer DBs): per-observatory limiting magnitudes used for
+        # faint-frame skipping heuristics.
+        self.limiting_magnitudes = self._metadata.tables.get("limiting_magnitudes")
+
+    def migrate(self) -> None:
+        """
+        Apply lightweight, additive schema migrations for existing DBs.
+
+        This is designed to be safe to run on production DBs: it only creates
+        missing tables/indexes and does not rewrite existing frame data.
+        """
+        # Keep migrations as explicit SQL to avoid relying on SQLAlchemy reflection.
+        self.dbconn.execute(sq.text("""
+                CREATE TABLE IF NOT EXISTS limiting_magnitudes (
+                    obscode TEXT NOT NULL,
+                    filter_id TEXT NOT NULL,
+                    limiting_mag REAL NOT NULL,
+                    mag_system TEXT,
+                    PRIMARY KEY (obscode, filter_id)
+                );
+                """))
+        self.dbconn.execute(sq.text("""
+                CREATE INDEX IF NOT EXISTS limiting_magnitudes_lookup
+                ON limiting_magnitudes (obscode, filter_id);
+                """))
+        self.dbconn.commit()
+        # Refresh reflected table handles if we were opened in read mode and reflected already.
+        try:
+            self._metadata = sq.MetaData()
+            self._metadata.reflect(bind=self.db)
+            self.limiting_magnitudes = self._metadata.tables.get("limiting_magnitudes")
+        except Exception:
+            # Not fatal; the caller can still use the DB, but table handles may be stale.
+            pass
 
     def _check_fast_query(self):
         curs = self.dbconn.execute(
-            sq.text(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='frames';"
-            )
+            sq.text("SELECT name FROM sqlite_master WHERE type='table' AND name='frames';")
         )
         table_names = [row[0] for row in curs.fetchall()]
         if "frames" in table_names:
-            curs = self.dbconn.execute(
-                sq.text("SELECT name FROM sqlite_master WHERE type = 'index';")
-            )
+            curs = self.dbconn.execute(sq.text("SELECT name FROM sqlite_master WHERE type = 'index';"))
             index_names = [row[0] for row in curs.fetchall()]
             if "fast_query" not in index_names:
                 warning = (
@@ -184,15 +212,11 @@ class FrameIndex:
         datasets: Optional[set[str]] = None,
     ) -> WindowCenters:
         """Return the midpoint and obscode of all time windows with data in them."""
-
         # Build base query with minimal columns
         query = sq.select(
             self.frames.c.obscode,
             self.frames.c.exposure_mjd_mid,
-        ).where(
-            (self.frames.c.exposure_mjd_mid < end_mjd)
-            & (self.frames.c.exposure_mjd_mid >= start_mjd)
-        )
+        ).where((self.frames.c.exposure_mjd_mid < end_mjd) & (self.frames.c.exposure_mjd_mid >= start_mjd))
 
         if datasets is not None:
             query = query.where(self.frames.c.dataset_id.in_(list(datasets)))
@@ -218,9 +242,7 @@ class FrameIndex:
         # Process results using PyArrow for better performance
         mjds_arr = pa.array(mjds)
         window_ids = pc.floor(
-            pc.divide(
-                pc.subtract(mjds_arr, pa.scalar(start_mjd)), pa.scalar(window_size_days)
-            )
+            pc.divide(pc.subtract(mjds_arr, pa.scalar(start_mjd)), pa.scalar(window_size_days))
         )
 
         # Group by obscode and window_id using PyArrow
@@ -289,9 +311,7 @@ class FrameIndex:
             )
         )
         if datasets is not None and len(datasets) > 0:
-            select_stmt = select_stmt.where(
-                self.frames.c.dataset_id.in_(list(datasets))
-            )
+            select_stmt = select_stmt.where(self.frames.c.dataset_id.in_(list(datasets)))
 
         rows = self.dbconn.execute(select_stmt).fetchall()
         if len(rows) == 0:
@@ -341,9 +361,7 @@ class FrameIndex:
             self.frames.c.exposure_mjd_mid <= mjd + 1e-7,
         )
         if datasets is not None:
-            select_stmt = select_stmt.where(
-                self.frames.c.dataset_id.in_(list(datasets))
-            )
+            select_stmt = select_stmt.where(self.frames.c.dataset_id.in_(list(datasets)))
 
         result = self.dbconn.execute(select_stmt)
 
@@ -380,8 +398,8 @@ class FrameIndex:
         if len(pc.unique(healpixel_frames.exposure_mjd_mid)) > 1:
 
             logger.warning(
-                f"Query returned non-unique MJDs for mjd: {mjd}, healpix:"
-                f" {int(healpixel)}, obscode: {obscode}."
+                f"Query returned non-unique MJDs for mjd: {mjd}, healpix: "
+                f"{int(healpixel)}, obscode: {obscode}."
             )
 
         return healpixel_frames
@@ -493,9 +511,7 @@ class FrameIndex:
             sqlfunc.max(self.frames.c.exposure_mjd_mid, type=sq.Float),
         )
         if datasets is not None:
-            select_stmt = select_stmt.where(
-                self.frames.c.dataset_id.in_(list(datasets))
-            )
+            select_stmt = select_stmt.where(self.frames.c.dataset_id.in_(list(datasets)))
         bounds = self.dbconn.execute(select_stmt).fetchone()
         if bounds is None:
             raise Exception("No frames in the index")
@@ -632,7 +648,75 @@ class FrameIndex:
             sq.Column("documentation_url", sq.String, nullable=True),
             sq.Column("sia_url", sq.String, nullable=True),
         )
+
+        self.limiting_magnitudes = sq.Table(
+            "limiting_magnitudes",
+            self._metadata,
+            sq.Column("obscode", sq.String, nullable=False),
+            # Canonical bandpass filter_id (e.g. "DECam_g", "LSST_r", "V")
+            sq.Column("filter_id", sq.String, nullable=False),
+            sq.Column("limiting_mag", sq.Float, nullable=False),
+            sq.Column("mag_system", sq.String, nullable=True),
+            sq.PrimaryKeyConstraint("obscode", "filter_id", name="pk_limiting_magnitudes"),
+            sq.Index("limiting_magnitudes_lookup", "obscode", "filter_id"),
+        )
         self._metadata.create_all(self.db)
+
+    def upsert_limiting_magnitude(
+        self,
+        *,
+        obscode: str,
+        filter_id: str,
+        limiting_mag: float,
+        mag_system: str | None = None,
+    ) -> None:
+        """
+        Insert or update a limiting magnitude row.
+
+        Notes
+        -----
+        `filter_id` must be a canonical bandpass filter ID as used by `adam_core.photometry`.
+        """
+        if getattr(self, "limiting_magnitudes", None) is None:
+            raise RuntimeError(
+                "Database missing limiting_magnitudes table. Create a new DB or migrate schema."
+            )
+        insert = sqlite_insert(self.limiting_magnitudes).values(
+            obscode=obscode,
+            filter_id=filter_id,
+            limiting_mag=float(limiting_mag),
+            mag_system=mag_system,
+        )
+        # Upsert behavior for SQLite (update limiting_mag + mag_system on conflict).
+        insert = insert.on_conflict_do_update(
+            index_elements=["obscode", "filter_id"],
+            set_={
+                "limiting_mag": float(limiting_mag),
+                "mag_system": mag_system,
+            },
+        )
+        self.dbconn.execute(insert)
+        self.dbconn.commit()
+
+    def limiting_magnitude_rows(
+        self,
+        *,
+        obscode: str | None = None,
+    ) -> list[Row]:
+        """
+        Return limiting magnitude rows (optionally filtered).
+        """
+        if getattr(self, "limiting_magnitudes", None) is None:
+            return []
+        stmt = sq.select(
+            self.limiting_magnitudes.c.obscode,
+            self.limiting_magnitudes.c.filter_id,
+            self.limiting_magnitudes.c.limiting_mag,
+            self.limiting_magnitudes.c.mag_system,
+        )
+        if obscode is not None:
+            stmt = stmt.where(self.limiting_magnitudes.c.obscode == obscode)
+        return list(self.dbconn.execute(stmt))
 
     def frames_for_healpixel(self, healpixel: int, obscode: str) -> HealpixFrame:
         """
@@ -687,9 +771,7 @@ class FrameDB:
         self.data_root = data_root
         self.data_file_max_size = data_file_max_size
         # self.data_files: dict = {}  # basename -> open file
-        self.n_data_files: dict = (
-            {}
-        )  # Dictionary map of how many files for each dataset, and month
+        self.n_data_files: dict = {}  # Dictionary map of how many files for each dataset, and month
         self.mode = mode
         self._open_data_files()
         self.healpix_nside = healpix_nside
@@ -731,9 +813,7 @@ class FrameDB:
 
         """
         if self.has_dataset(dataset_id):
-            logger.info(
-                f"{dataset_id} dataset already has an entry in the datasets table."
-            )
+            logger.info(f"{dataset_id} dataset already has an entry in the datasets table.")
             return
 
         logger.info(f"Adding new entry into datasets table for dataset {dataset_id}.")
@@ -749,9 +829,7 @@ class FrameDB:
     def has_dataset(self, dataset_id: str) -> bool:
         return dataset_id in self.idx.get_dataset_ids()
 
-    def add_frames(
-        self, dataset_id: str, src_frames: Iterator[sourcecatalog.SourceFrame]
-    ):
+    def add_frames(self, dataset_id: str, src_frames: Iterator[sourcecatalog.SourceFrame]):
         """Adds many SourceFrames to the database. This includes both
         writing binary observation data and storing frames in the
         FrameIndex.
@@ -759,15 +837,11 @@ class FrameDB:
         """
         healpix_frames = HealpixFrame.empty()
         for src_frame in src_frames:
-            observations: ObservationsTable = ObservationsTable.from_srcobs(
-                src_frame.observations
-            )
+            observations: ObservationsTable = ObservationsTable.from_srcobs(src_frame.observations)
             year_month_str = self._compute_year_month_str(src_frame)
 
             # Write observations to disk
-            data_uri, offset, length = self.store_observations(
-                observations, dataset_id, year_month_str
-            )
+            data_uri, offset, length = self.store_observations(observations, dataset_id, year_month_str)
             frame = HealpixFrame.from_kwargs(
                 id=[None],
                 dataset_id=[dataset_id],
@@ -847,9 +921,7 @@ class FrameDB:
 
     def _current_data_file_full(self, dataset_id: str, year_month_str: str):
         return os.path.abspath(
-            os.path.join(
-                self.data_root, self._current_data_file_name(dataset_id, year_month_str)
-            )
+            os.path.join(self.data_root, self._current_data_file_name(dataset_id, year_month_str))
         )
 
     def _current_data_file_size(self, dataset_id: str, year_month_str: str):
@@ -891,12 +963,8 @@ class FrameDB:
                 ) = data_layout.unpack(raw)
                 id = f.read(id_size)
                 bytes_read += datagram_size + id_size
-                observations.append(
-                    (mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id)
-                )
-            (mjds, ras, decs, ra_sigmas, dec_sigmas, mags, mag_sigmas, ids) = zip(
-                *observations
-            )
+                observations.append((mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id))
+            mjds, ras, decs, ra_sigmas, dec_sigmas, mags, mag_sigmas, ids = zip(*observations)
 
             return ObservationsTable.from_kwargs(
                 id=ids,
@@ -914,16 +982,12 @@ class FrameDB:
         obscode, using nside for the healpix resolution.
 
         """
-        logger.debug(
-            f"checking frames for ra={ra} dec={dec} obscode={obscode} nside={self.healpix_nside}"
-        )
+        logger.debug(f"checking frames for ra={ra} dec={dec} obscode={obscode} nside={self.healpix_nside}")
         healpixel = healpix_geom.radec_to_healpixel(ra, dec, self.healpix_nside)
         for frame in self.idx.frames_for_healpixel(healpixel, obscode):
             yield frame
 
-    def store_observations(
-        self, observations: ObservationsTable, dataset_id: str, year_month_str: str
-    ):
+    def store_observations(self, observations: ObservationsTable, dataset_id: str, year_month_str: str):
         """
         Write observations in exp_data to disk. The write goes to the latest (or
         "current") file in the database. Data is written as a sequence of

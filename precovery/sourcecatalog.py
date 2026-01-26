@@ -71,9 +71,7 @@ class SourceFrame:
         )
 
 
-def bundle_into_frames(
-    observations: Iterator[SourceObservation], nside: int = 32
-) -> Iterator[SourceFrame]:
+def bundle_into_frames(observations: Iterator[SourceObservation], nside: int = 32) -> Iterator[SourceFrame]:
     """Groups SourceObservations into SourceFrames, suitable for
     loading into the database. The observations iterator should be
     sorted by exposure_id so that all SourceObservations for a frame
@@ -87,9 +85,7 @@ def bundle_into_frames(
     # the exposure's data into frames, and yield each frame out
     # one-by-one.
     cur_exposure_id: Optional[str] = None
-    observations_by_healpixel: DefaultDict[int, List[SourceObservation]] = defaultdict(
-        list
-    )
+    observations_by_healpixel: DefaultDict[int, List[SourceObservation]] = defaultdict(list)
     for obs in observations:
         if cur_exposure_id is None:
             # first iteration

@@ -8,9 +8,7 @@ from adam_core.observers import Observers
 from adam_core.orbits import Orbits
 from adam_core.time import Timestamp
 
-SAMPLE_ORBITS_FILE = os.path.join(
-    os.path.dirname(__file__), "data", "sample_orbits.parquet"
-)
+SAMPLE_ORBITS_FILE = os.path.join(os.path.dirname(__file__), "data", "sample_orbits.parquet")
 TEST_OBSERVATIONS_DIR = os.path.join(os.path.dirname(__file__), "data/index")
 
 
@@ -56,9 +54,7 @@ def make_observations(
 
     # Four observations daily for 2 weeks
     dts = np.linspace(0, 14, 14 * 2)
-    dts = np.concatenate(
-        [dts, dts + 1 / 24 / 2, dts + 1 / 24, dts + 1 / 24 + 1 / 24 / 2]
-    )
+    dts = np.concatenate([dts, dts + 1 / 24 / 2, dts + 1 / 24, dts + 1 / 24 + 1 / 24 / 2])
     dts.sort()
 
     # Define different uncertainties for different observatories
@@ -82,9 +78,6 @@ def make_observations(
     num_obs = int(len(dts) / len(unique_exposure_durations))
     exposure_duration = np.hstack([unique_exposure_durations for i in range(num_obs)])
 
-    # Set random seed
-    rng = np.random.default_rng(seed=2023)
-
     ephemeris_dfs = []
     for i in range(len(orbits)):
         # initial_epoch = Time(orbit._epoch, scale="tt", format="mjd")
@@ -93,9 +86,7 @@ def make_observations(
             observatory_code,
             observatory_nightly_offset,
             observatory_window_offset,
-        ) in zip(
-            observatory_codes, observatory_nightly_offsets, observatory_window_offsets
-        ):
+        ) in zip(observatory_codes, observatory_nightly_offsets, observatory_window_offsets):
             # Calculate a random offset from the start of the exposure
             # to give each observation a unique obervation time
             exposure_start_times = (
@@ -126,15 +117,9 @@ def make_observations(
             ephemeris_df.insert(0, "object_id", orbits[i].object_id[0].as_py())
             # We don't use magnitudes anywhere in our tests right now
             ephemeris_df.insert(3, "mag", 18.0)
-            ephemeris_df.insert(
-                4, "ra_sigma", astrometric_uncertainties[observatory_code]
-            )
-            ephemeris_df.insert(
-                5, "dec_sigma", astrometric_uncertainties[observatory_code]
-            )
-            ephemeris_df.insert(
-                6, "mag_sigma", photometric_uncertainties[observatory_code]
-            )
+            ephemeris_df.insert(4, "ra_sigma", astrometric_uncertainties[observatory_code])
+            ephemeris_df.insert(5, "dec_sigma", astrometric_uncertainties[observatory_code])
+            ephemeris_df.insert(6, "mag_sigma", photometric_uncertainties[observatory_code])
             ephemeris_df.insert(7, "filter", "V")
 
             ephemeris_df["observatory_code"] = observatory_code
@@ -152,16 +137,12 @@ def make_observations(
         ] = f"dataset_{observatory_code}"
 
     # Combine I41 and F51 into one dataset
-    observations.loc[
-        observations["observatory_code"].isin(["I41", "F51"]), "dataset_id"
-    ] = "dataset_I41+F51"
+    observations.loc[observations["observatory_code"].isin(["I41", "F51"]), "dataset_id"] = "dataset_I41+F51"
 
-    observations["exposure_id"] = observations[
-        ["observatory_code", "exposure_mjd_mid"]
-    ].apply(lambda x: f"{x[0]}_{x[1]:.5f}", axis=1)
-    observations.sort_values(
-        by=["dataset_id", "exposure_mjd_mid", "exposure_id"], inplace=True
+    observations["exposure_id"] = observations[["observatory_code", "exposure_mjd_mid"]].apply(
+        lambda x: f"{x[0]}_{x[1]:.5f}", axis=1
     )
+    observations.sort_values(by=["dataset_id", "exposure_mjd_mid", "exposure_id"], inplace=True)
 
     return observations
 

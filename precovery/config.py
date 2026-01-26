@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import inspect
 import json
 
 try:
@@ -12,6 +15,14 @@ class Config:
         nside: int = 32,
         data_file_max_size: int = int(1e9),
         build_version: str = __version__,
+        limiting_magnitudes_parquet_file: str | None = "limiting_magnitudes.parquet",
+        faint_frame_skip_margin_mag: float = 0.0,
+        # Asymmetric magnitude residual thresholds (in magnitudes).
+        # mag_residual = observed_mag - predicted_mag
+        # - If mag_residual > max_mag_residual_fainter_mag => too faint => reject
+        # - If mag_residual < -max_mag_residual_brighter_mag => too bright => reject
+        max_mag_residual_fainter_mag: float | None = None,
+        max_mag_residual_brighter_mag: float | None = None,
     ):
         """
         Precovery Database Configuration
@@ -28,6 +39,14 @@ class Config:
         self.build_version = build_version
         self.nside = nside
         self.data_file_max_size = data_file_max_size
+        # Generated-once cache file stored in the DB directory (Parquet).
+        # If present, it will be loaded once at DB open and used for fast faint-frame
+        # skipping without any subsequent SQL queries.
+        self.limiting_magnitudes_parquet_file = limiting_magnitudes_parquet_file
+        # If predicted_mag > (limit + margin), treat it as too faint to be detectable.
+        self.faint_frame_skip_margin_mag = faint_frame_skip_margin_mag
+        self.max_mag_residual_fainter_mag = max_mag_residual_fainter_mag
+        self.max_mag_residual_brighter_mag = max_mag_residual_brighter_mag
 
         return
 
@@ -56,7 +75,11 @@ class Config:
         """
         with open(in_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return cls(**data)
+        # Allow forward/backward compatible config.json by ignoring unknown keys.
+        # (Useful during migrations when older DBs may have extra config entries.)
+        params = set(inspect.signature(cls.__init__).parameters.keys()) - {"self"}
+        filtered = {k: v for k, v in data.items() if k in params}
+        return cls(**filtered)
 
 
 DefaultConfig = Config()

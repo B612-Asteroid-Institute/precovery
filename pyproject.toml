@@ -34,11 +34,13 @@ dependencies = [
     "pandas",
     "healpy",
     "requests",
-    "adam-core>=0.3.1",
+    "adam-core @ git+https://github.com/B612-Asteroid-Institute/adam_core.git@main",
 ]
 [dependency-groups]
 test = [
-    "adam-assist>=0.2.0",
+    # Pin to a commit SHA (instead of a branch with `/`) because some PDM/unearth
+    # codepaths treat the revision as a filename during lock creation on Linux.
+    "adam-assist @ git+https://github.com/B612-Asteroid-Institute/adam-assist.git@ea0aa4949ca23bc7a8a93245365b48035f66c29b",
     "pytest",
     "black",
     "isort",
@@ -57,6 +59,8 @@ test = [
 
 [project.scripts]
 precovery-index = "precovery.ingest:index"
+precovery-limitmags = "precovery.limiting_magnitudes:main"
+precovery-migrate = "precovery.migrate:main"
 
 [tool.pdm.version]
 source = "scm"
@@ -85,10 +89,11 @@ profile = "pytest -s -m 'profile' {args}"
 distribution = true
 
 [tool.black]
-line-length = 88
+line-length = 110
 
 [tool.flake8]
-line-length = 88
+max-line-length = 110
+extend-ignore = ["E231"]
 
 [tool.isort]
 profile = "black"
@@ -106,8 +111,8 @@ ignore_missing_imports = true
 module = "healpy"
 ignore_missing_imports = true
 
-[tool.pytest]
-filterwarnings = "ignore::DeprecationWarning:astropy"
+[tool.pytest.ini_options]
+filterwarnings = ["ignore::DeprecationWarning:astropy"]
 
 [tool.ruff]
 line-length = 110
