@@ -1221,6 +1221,9 @@ class PrecoveryDatabase:
                 max_processes=max_processes,
                 match_method=match_method,
                 n_sigma=n_sigma,
+                covariance_polygon_vertices=covariance_polygon_vertices,
+                covariance_mc_num_samples=covariance_mc_num_samples,
+                covariance_mc_seed=covariance_mc_seed,
             )
             candidates = qv.concatenate([candidates, candidates_obscode])
             frame_candidates = qv.concatenate(
@@ -1240,6 +1243,9 @@ class PrecoveryDatabase:
         max_processes: Optional[int] = None,
         match_method: str = "circle",
         n_sigma: float = 3.0,
+        covariance_polygon_vertices: int = 32,
+        covariance_mc_num_samples: int = 64,
+        covariance_mc_seed: int = 0,
     ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
         """
         Find all observations that match orbit within a list of windows
