@@ -51,6 +51,7 @@ test = [
     "astroquery",
     "pytest-mock>=3.14.0",
     "snakeviz>=2.2.2",
+    "mpcq>=0.4.0",
 ]
 notebooks = [
     "matplotlib>=3.10.8",

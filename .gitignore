@@ -126,3 +126,8 @@ pdm.lock
 precovery/_version.py
 .pdm-build/
 .cursor/
+
+# precovery experiment harness outputs
+experiments/covariance_precovery/results/
+experiments/covariance_precovery/local_db/
+experiments/covariance_precovery/tmp/
