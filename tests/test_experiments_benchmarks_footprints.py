@@ -2,10 +2,12 @@ import numpy as np
 import pytest
 
 from experiments.covariance_precovery.methods.footprints import (
+    SamplePerimeterPolygonFootprint,
     corridor_pixels_from_samples,
     disc_pixels_from_cov,
     ellipse_polygon_pixels_from_cov,
     mc_pixels_from_cov,
+    sample_pixels_direct,
 )
 
 
@@ -63,6 +65,39 @@ def test_benchmark_corridor_pixels(benchmark):
             radius_arcsec=30.0,
             step_arcsec=30.0,
         )
+
+    benchmark(case)
+
+
+@pytest.mark.benchmark(group="exp_footprints")
+def test_benchmark_sample_direct_pixels(benchmark):
+    lon0, lat0 = 10.0, 20.0
+    lon = lon0 + np.linspace(0.0, 0.2, 256)
+    lat = lat0 + 0.01 * np.sin(np.linspace(0.0, 2.0 * np.pi, 256))
+
+    def case():
+        sample_pixels_direct(lon_deg=lon, lat_deg=lat, nside=256)
+
+    benchmark(case)
+
+
+@pytest.mark.benchmark(group="exp_footprints")
+def test_benchmark_sample_polygon_pixels_convex_hull(benchmark):
+    lon0, lat0 = 10.0, 20.0
+    rng = np.random.default_rng(0)
+    lon = lon0 + 0.05 * rng.standard_normal(256)
+    lat = lat0 + 0.03 * rng.standard_normal(256)
+    fp = SamplePerimeterPolygonFootprint(
+        lon0_deg=lon0,
+        lat0_deg=lat0,
+        sample_lon_deg=lon,
+        sample_lat_deg=lat,
+        polygon_mode="convex_hull",
+        buffer_arcsec=0.0,
+    )
+
+    def case():
+        fp.pixels(nside=256)
 
     benchmark(case)
 

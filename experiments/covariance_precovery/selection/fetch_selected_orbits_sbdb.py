@@ -26,6 +26,23 @@ class SbdbOrbitFetchResult:
     meta_json: Path
 
 
+def _designation_from_object_id(object_id: str) -> str:
+    s = str(object_id).strip()
+    if s.startswith("(") and s.endswith(")") and len(s) >= 3:
+        return s[1:-1].strip()
+    return s.split()[0].strip()
+
+
+def _ensure_unique_orbit_ids(orbits: Orbits) -> Orbits:
+    """
+    `query_sbdb()` returns `orbit_id` values that are not globally unique across calls.
+    Normalize to a stable, unique identifier derived from `object_id`.
+    """
+    object_id = [str(x) for x in orbits.object_id.to_pylist()]
+    orbit_id = [_designation_from_object_id(x) for x in object_id]
+    return orbits.set_column("orbit_id", pa.array(orbit_id, type=pa.large_string()))
+
+
 def fetch_selected_orbits_via_sbdb(
     *,
     subset_dir: Path,
@@ -46,13 +63,13 @@ def fetch_selected_orbits_via_sbdb(
     for i0 in range(0, len(designations), int(batch_size)):
         batch = designations[i0 : i0 + int(batch_size)]
         try:
-            o = query_sbdb(batch)
+            o = _ensure_unique_orbit_ids(query_sbdb(batch))
             out_orbits = qv.concatenate([out_orbits, o])
         except Exception as e:  # noqa: BLE001
             # Fall back to per-designation so one bad name doesn't poison the batch.
             for d in batch:
                 try:
-                    o1 = query_sbdb([d])
+                    o1 = _ensure_unique_orbit_ids(query_sbdb([d]))
                     out_orbits = qv.concatenate([out_orbits, o1])
                 except Exception as e1:  # noqa: BLE001
                     failures = qv.concatenate(
@@ -64,6 +81,10 @@ def fetch_selected_orbits_via_sbdb(
                             ),
                         ]
                     )
+
+    # De-duplicate just in case SBDB returns duplicates across queries.
+    if len(out_orbits) > 0:
+        out_orbits = out_orbits.drop_duplicates(subset=["orbit_id"])
 
     out_orbits_path = win.artifacts_dir / "orbits_selected_sbdb.parquet"
     out_orbits.to_parquet(str(out_orbits_path))

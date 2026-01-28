@@ -67,7 +67,10 @@ def _run_2body_ephemeris(*, orbits: Orbits, window_observers_tdb: Observers) -> 
     times = window_observers_tdb.coordinates.time
     prop = propagate_2body(orbits, times)  # (N_orbits * N_times)
     obs_nm = _pair_observers_for_propagated_orbits(observers=window_observers_tdb, n_orbits=int(len(orbits)))
-    return generate_ephemeris_2body(prop, obs_nm)
+    ephem = generate_ephemeris_2body(prop, obs_nm)
+    # Store ephemeris in UTC for downstream joins (Stage 3), even if propagation
+    # is performed in TDB internally.
+    return _ephem_to_utc(ephem)
 
 
 def _run_assist_window_then_2body(*, orbits: Orbits, window_observers_tdb: Observers) -> Ephemeris:
@@ -81,6 +84,26 @@ def _run_assist_window_then_2body(*, orbits: Orbits, window_observers_tdb: Obser
     orb_ref = prop_assist.propagate_orbits(orbits, t_ref, covariance=False)
     return _run_2body_ephemeris(orbits=orb_ref, window_observers_tdb=window_observers_tdb)
 
+
+def _ephem_to_utc(ephem: Ephemeris) -> Ephemeris:
+    """
+    Normalize ephemeris timestamps to UTC so downstream joins can be performed in a
+    single timescale (Stage 3 is keyed on exposure midpoints in UTC MJD).
+
+    We intentionally keep this as a "best-effort" transformation: if a given column path
+    is absent (or already UTC), we simply leave it unchanged.
+    """
+    try:
+        ephem = ephem.set_column("coordinates.time", ephem.coordinates.time.rescale("utc"))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        ephem = ephem.set_column(
+            "aberrated_coordinates.time", ephem.aberrated_coordinates.time.rescale("utc")
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return ephem
 
 def _parse_strategies_arg(s: str | None) -> list[str] | None:
     if s is None:
@@ -171,6 +194,7 @@ def run_stage2_propagation_bench(
     strategies: list[str] | None = None,
     mc_samples: list[int] | None = None,
     time_chunk_size: int = 2048,
+    max_processes: int | None = 8,
     mean_with_covariance: bool = False,
     write_ephemeris: bool = True,
     write_variants_orbits: bool = True,
@@ -363,7 +387,12 @@ def run_stage2_propagation_bench(
 
             assist = ASSISTPropagator()
             t_compute0 = time.perf_counter()
-            orbits_at_centers = assist.propagate_orbits(orbits_mean, center_times_utc, covariance=False)  # (N*T)
+            orbits_at_centers = assist.propagate_orbits(
+                orbits_mean,
+                center_times_utc,
+                covariance=False,
+                max_processes=max_processes,
+            )  # (N*T)
             compute_sec += time.perf_counter() - t_compute0
 
             # Map center time -> index in center_times_utc via (days,nanos)
@@ -410,7 +439,7 @@ def run_stage2_propagation_bench(
                     prop = propagate_2body(orbits_center, times_tdb)
                     obs_tdb = Observers.from_codes([obscode] * len(times_tdb), times_tdb)
                     obs_nm = _pair_observers_for_propagated_orbits(observers=obs_tdb, n_orbits=n_orb)
-                    ephem = generate_ephemeris_2body(prop, obs_nm)
+                    ephem = _ephem_to_utc(generate_ephemeris_2body(prop, obs_nm))
                     compute_sec += time.perf_counter() - t_compute0
                     total_rows += int(len(ephem))
                     if write_ephemeris:
@@ -458,6 +487,166 @@ def run_stage2_propagation_bench(
             )
         )
 
+    # Mixed strategy with covariance carried via persistent particles:
+    #  - pre-sample (sigma points / MC) once at the input epoch,
+    #  - propagate those same particles with ASSIST to each window center,
+    #  - then propagate those particles with 2-body to all exposure times within the window.
+    #
+    # This is the intended "C" behavior when we want covariance-aware footprints while still
+    # using windows to reduce n-body work.
+    mixed_variant_specs: list[tuple[str, str, int | None]] = [("sigma_points", "sigma-point", None)]
+    mixed_variant_specs.extend([(f"mc_{int(n)}", "monte-carlo", int(n)) for n in mc_samples])
+    for variant_kind, method, num_samples in mixed_variant_specs:
+        strat_name = f"assist_window_then_2body_variants:{variant_kind}"
+        if not _enabled(strat_name):
+            continue
+        name = "assist_window_then_2body_variants"
+        strat_dir = strategies_dir / name / variant_kind
+        err = None
+        n_rows: int | None = None
+        n_var: int | None = None
+        compute_sec = 0.0
+        io_sec = 0.0
+        try:
+            if n_cov_ok == 0:
+                raise ValueError("No orbits have fully-defined 6x6 covariance; cannot generate variants.")
+            _ensure_dir(strat_dir)
+
+            # Prepare center times (unique) and propagate variants to centers with ASSIST.
+            center_times_utc = windows.time.unique().sort_by(["days", "nanos"])
+            T = int(len(center_times_utc))
+            if T == 0:
+                raise ValueError("No window centers found; cannot run mixed strategy.")
+
+            t_compute0 = time.perf_counter()
+            variants = (
+                VariantOrbits.create(orbits_covok, method=method)
+                if num_samples is None
+                else VariantOrbits.create(
+                    orbits_covok, method=method, num_samples=int(num_samples), seed=0
+                )
+            )
+            compute_sec += time.perf_counter() - t_compute0
+            n_var = int(len(variants))
+
+            if write_variants_orbits:
+                t_io0 = time.perf_counter()
+                variants.to_parquet(str(strat_dir / "variants_orbits.parquet"))
+                io_sec += time.perf_counter() - t_io0
+
+            assist = ASSISTPropagator()
+            t_compute0 = time.perf_counter()
+            # NOTE: Upstream limitation/bug: `ASSISTPropagator.propagate_orbits` fails with
+            # `ValueError: No values to concatenate` when called with VariantOrbits and
+            # max_processes > 1 (reproducible). Force to single-process for this step.
+            variants_at_centers = assist.propagate_orbits(
+                variants,
+                center_times_utc,
+                covariance=False,
+                max_processes=1,
+            )  # (n_var * T)
+            compute_sec += time.perf_counter() - t_compute0
+
+            # Map center time -> index in center_times_utc via (days,nanos)
+            center_days = center_times_utc.days.to_numpy(zero_copy_only=False)
+            center_nanos = center_times_utc.nanos.to_numpy(zero_copy_only=False)
+            center_key_to_idx = {(int(d), int(n)): i for i, (d, n) in enumerate(zip(center_days, center_nanos))}
+
+            # Target mjds (UTC) for window membership tests.
+            target_mjd = target_times_utc.mjd().to_numpy(zero_copy_only=False).astype(np.float64)
+            target_code = target_codes.to_numpy(zero_copy_only=False)
+
+            out_ephem_dir = strat_dir / "variants_ephemeris"
+            _ensure_dir(out_ephem_dir)
+
+            total_rows = 0
+            part = 0
+
+            # Loop over windows (small) but do vectorized propagation within each.
+            for w in windows:
+                obscode = str(w.obscode[0].as_py())
+                w0 = float(w.window_start().mjd()[0].as_py())
+                w1 = float(w.window_end().mjd()[0].as_py())
+                mask = (target_code == obscode) & (target_mjd >= w0) & (target_mjd <= w1)
+                idx = np.nonzero(mask)[0]
+                if idx.size == 0:
+                    continue
+
+                key = (int(w.time.days[0].as_py()), int(w.time.nanos[0].as_py()))
+                cidx = center_key_to_idx.get(key)
+                if cidx is None:
+                    continue
+
+                # Slice variants at this center: positions are cidx + arange(n_var)*T
+                take_idx = (cidx + np.arange(n_var, dtype=np.int64) * T).tolist()
+                variants_center = variants_at_centers.take(take_idx)
+
+                # Chunk within window targets to bound memory.
+                for j0 in range(0, int(idx.size), int(time_chunk_size)):
+                    j1 = min(j0 + int(time_chunk_size), int(idx.size))
+                    sub = idx[j0:j1].tolist()
+                    times_tdb = target_times_utc.take(sub).rescale("tdb")
+
+                    t_compute0 = time.perf_counter()
+                    prop = propagate_2body(variants_center, times_tdb)
+                    obs_tdb = Observers.from_codes([obscode] * len(times_tdb), times_tdb)
+                    obs_nm = _pair_observers_for_propagated_orbits(observers=obs_tdb, n_orbits=int(n_var))
+                    ephem = _ephem_to_utc(generate_ephemeris_2body(prop, obs_nm))
+                    compute_sec += time.perf_counter() - t_compute0
+
+                    total_rows += int(len(ephem))
+                    if write_ephemeris:
+                        t_io0 = time.perf_counter()
+                        _write_quivr_part(out_ephem_dir, qt=ephem, part_idx=part)
+                        io_sec += time.perf_counter() - t_io0
+                    part += 1
+
+            n_rows = total_rows
+        except Exception as e:  # noqa: BLE001
+            err = f"{type(e).__name__}: {e}"
+        _write_strategy_meta(
+            strat_dir,
+            dict(
+                strategy=name,
+                variant_kind=variant_kind,
+                variant_method=str(method),
+                n_variant_orbits=n_var,
+                kind="variants_ephemeris",
+                window_size_days=int(window_size_days),
+                n_orbits=int(len(orbits)),
+                n_orbits_covok=n_cov_ok,
+                n_time_targets=int(len(target_observers_utc)),
+                n_window_centers=int(len(windows)),
+                n_rows=n_rows,
+                time_chunk_size=int(time_chunk_size),
+                layout_note="Carry the same particles through ASSIST-to-centers then 2-body-to-targets; each ephemeris part is a cross product (variants_center × time_chunk).",
+                assist_max_processes=None if max_processes is None else int(max_processes),
+                assist_max_processes_variants_propagate_orbits=1,
+                runtime_sec=float(compute_sec),
+                io_sec=float(io_sec),
+                runtime_total_sec=float(compute_sec + io_sec),
+                error=err,
+            ),
+        )
+        metrics_rows.append(
+            dict(
+                subset_dir=str(subset_dir),
+                strategy=name,
+                variant_kind=variant_kind,
+                n_orbits=int(len(orbits)),
+                n_orbits_covok=n_cov_ok,
+                n_time_targets=int(len(target_observers_utc)),
+                n_window_centers=int(len(windows)),
+                n_ephem_rows_mean=None,
+                n_variant_orbits=n_var,
+                n_ephem_rows_variants=n_rows,
+                runtime_sec=float(compute_sec),
+                io_sec=float(io_sec),
+                runtime_total_sec=float(compute_sec + io_sec),
+                error=err,
+            )
+        )
+
     # ASSIST mean (no covariance) for all orbits.
     if _enabled("assist_mean"):
         assist_dir = strategies_dir / "assist_mean"
@@ -479,7 +668,12 @@ def run_stage2_propagation_bench(
                 i1 = min(i0 + int(time_chunk_size), n_targets)
                 obs_utc = target_observers_utc[i0:i1]
                 t_compute0 = time.perf_counter()
-                ephem = assist.generate_ephemeris(orbits_mean, obs_utc, covariance=False)
+                ephem = assist.generate_ephemeris(
+                    orbits_mean,
+                    obs_utc,
+                    covariance=False,
+                    max_processes=max_processes,
+                )
                 compute_sec += time.perf_counter() - t_compute0
                 total_rows += int(len(ephem))
                 if write_ephemeris:
@@ -570,7 +764,12 @@ def run_stage2_propagation_bench(
                 i1 = min(i0 + int(time_chunk_size), n_targets)
                 obs_utc = target_observers_utc[i0:i1]
                 t_compute0 = time.perf_counter()
-                ephem = assist.generate_ephemeris(variants, obs_utc, covariance=False)
+                ephem = assist.generate_ephemeris(
+                    variants,
+                    obs_utc,
+                    covariance=False,
+                    max_processes=max_processes,
+                )
                 compute_sec += time.perf_counter() - t_compute0
                 total_rows += int(len(ephem))
                 if write_ephemeris:
@@ -632,6 +831,7 @@ def run_stage2_propagation_bench(
         "strategies_requested": None if strategies is None else list(strategies),
         "mc_samples": [int(x) for x in mc_samples],
         "time_chunk_size": int(time_chunk_size),
+        "max_processes": None if max_processes is None else int(max_processes),
         "mean_with_covariance": bool(mean_with_covariance),
         "write_ephemeris": bool(write_ephemeris),
         "write_variants_orbits": bool(write_variants_orbits),
@@ -661,6 +861,12 @@ def main() -> None:
     )
     p.add_argument("--time-chunk-size", type=int, default=2048)
     p.add_argument(
+        "--max-processes",
+        type=int,
+        default=8,
+        help="Max processes for ASSISTPropagator calls (propagate_orbits/generate_ephemeris). Use 0 to disable.",
+    )
+    p.add_argument(
         "--mean-with-covariance",
         action="store_true",
         help="Include covariance propagation costs in mean-only strategies (default: off).",
@@ -687,7 +893,8 @@ def main() -> None:
         default=None,
         help=(
             "Comma-separated list. Examples: '2body_only', 'assist_window_then_2body', 'assist_mean', "
-            "'assist_variants:sigma_points', 'assist_variants:mc_256', 'assist_variants:mc_1024'. "
+            "'assist_variants:sigma_points', 'assist_variants:mc_256', 'assist_variants:mc_1024', "
+            "'assist_window_then_2body_variants:sigma_points', 'assist_window_then_2body_variants:mc_256'. "
             "If omitted, runs all."
         ),
     )
@@ -702,6 +909,7 @@ def main() -> None:
         strategies=_parse_strategies_arg(args.strategies),
         mc_samples=_parse_mc_samples_arg(args.mc_samples, default=[]),
         time_chunk_size=int(args.time_chunk_size),
+        max_processes=(None if int(args.max_processes) <= 0 else int(args.max_processes)),
         mean_with_covariance=bool(args.mean_with_covariance),
         write_ephemeris=not bool(args.no_write_ephemeris),
         write_variants_orbits=not bool(args.no_write_variants_orbits),
