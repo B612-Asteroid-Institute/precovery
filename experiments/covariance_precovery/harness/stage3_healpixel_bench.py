@@ -12,8 +12,6 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import quivr as qv
 
-from adam_core.coordinates.origin import Origin
-from adam_core.coordinates.spherical import SphericalCoordinates
 from adam_core.orbits.ephemeris import Ephemeris
 from adam_core.orbits.variants import VariantEphemeris
 from adam_core.time import Timestamp
