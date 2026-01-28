@@ -33,11 +33,218 @@ def _safe_sqrtm_2x2(c: np.ndarray) -> np.ndarray:
     return v @ np.diag(np.sqrt(w)) @ v.T
 
 
+def _normalize_unit(v: np.ndarray) -> np.ndarray:
+    n = np.linalg.norm(v, axis=-1, keepdims=True)
+    n = np.where(n > 0, n, 1.0)
+    return v / n
+
+
+def _local_tangent_basis(lon0_deg: float, lat0_deg: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Return (center, east, north) unit vectors at (lon0, lat0) on the unit sphere.
+    """
+    c = np.asarray(hp.ang2vec(float(lon0_deg), float(lat0_deg), lonlat=True), dtype=np.float64)
+    c = _normalize_unit(c)
+    z = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    e = np.cross(z, c)
+    if float(np.linalg.norm(e)) < 1e-12:
+        # Near the poles, pick a different reference axis.
+        x = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        e = np.cross(x, c)
+    e = _normalize_unit(e)
+    n = _normalize_unit(np.cross(c, e))
+    return c, e, n
+
+
+def _ellipse_boundary_lonlat_deg_from_cov(
+    *,
+    lon0_deg: float,
+    lat0_deg: float,
+    cov_ll_deg2: np.ndarray,
+    n_sigma: float,
+    num_vertices: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Generate ellipse boundary vertices on the sphere (lon/lat in deg).
+
+    We compute the N-sigma ellipse in the local tangent plane, then map those offsets
+    to the unit sphere using the exponential map. This avoids longitude wrap issues and
+    guarantees lat stays within [-90, 90].
+    """
+    V = max(int(num_vertices), 8)
+    angles = np.linspace(0.0, 2.0 * np.pi, V, endpoint=False)
+    unit = np.stack([np.cos(angles), np.sin(angles)], axis=1)  # (V, 2)
+
+    cos_lat = float(np.cos(np.deg2rad(lat0_deg)))
+    cos_lat = cos_lat if np.isfinite(cos_lat) and abs(cos_lat) > 1e-12 else 1e-12
+    A = np.array([[cos_lat, 0.0], [0.0, 1.0]], dtype=np.float64)
+    cov_xy = A @ cov_ll_deg2 @ A.T
+    S = _safe_sqrtm_2x2(cov_xy)
+    pts_xy_deg = (unit @ S.T) * float(n_sigma)  # (V,2) in tangent-plane degrees
+
+    # Exponential map from tangent plane to sphere.
+    c, e, n = _local_tangent_basis(float(lon0_deg), float(lat0_deg))
+    d = (np.deg2rad(pts_xy_deg[:, 0])[:, None] * e[None, :]) + (
+        np.deg2rad(pts_xy_deg[:, 1])[:, None] * n[None, :]
+    )  # (V,3) in radians along tangent basis
+    r = np.linalg.norm(d, axis=1)
+    r_safe = np.where(r > 0, r, 1.0)
+    dir_u = d / r_safe[:, None]
+    v = (np.cos(r)[:, None] * c[None, :]) + (np.sin(r)[:, None] * dir_u)
+    v = _normalize_unit(v)
+
+    lon_poly, lat_poly = hp.vec2ang(v, lonlat=True)
+    lon_poly = np.asarray(lon_poly, dtype=np.float64) % 360.0
+    lat_poly = np.asarray(lat_poly, dtype=np.float64)
+    return lon_poly, lat_poly
+
+
 def _major_axis_sigma_deg(cov_xy_deg2: np.ndarray) -> float:
     cov_xy_deg2 = 0.5 * (cov_xy_deg2 + cov_xy_deg2.T)
     w = np.linalg.eigvalsh(cov_xy_deg2)
     lam_max = float(np.max(w))
     return float(np.sqrt(max(lam_max, 0.0)))
+
+
+def _is_convex_spherical_polygon(verts: np.ndarray) -> bool:
+    """
+    Best-effort convexity check for a spherical polygon given as unit vectors (N,3).
+
+    This exists because `healpy.query_polygon` can hard-error/abort when the polygon is not convex.
+    We prefer to raise a Python exception *before* calling into healpy so callers can record errors.
+    """
+    v = np.asarray(verts, dtype=np.float64)
+    if v.ndim != 2 or v.shape[1] != 3 or v.shape[0] < 3:
+        return False
+
+    # Reject non-unit / non-finite inputs.
+    nrm = np.linalg.norm(v, axis=1)
+    if not np.isfinite(nrm).all():
+        return False
+    if np.any(nrm <= 0.0):
+        return False
+    v = v / nrm[:, None]
+
+    # Reject degenerate edges (duplicate/near-duplicate consecutive vertices).
+    v_next = np.roll(v, -1, axis=0)
+    dot = np.sum(v * v_next, axis=1)
+    if not np.isfinite(dot).all():
+        return False
+    # Reject only *truly* near-duplicate vertices. For small footprints the edges can be
+    # very short (dot extremely close to 1) and that is still a valid polygon.
+    if np.any(dot > (1.0 - 1e-15)):
+        return False
+
+    # Conservative convexity test on the sphere:
+    # For each edge, all vertices must lie strictly on the same side of the great-circle plane.
+    # This is O(N^2) but N is small (<=64).
+    eps = 1e-10
+    for i in range(v.shape[0]):
+        a = v[i]
+        b = v[(i + 1) % v.shape[0]]
+        n = np.cross(a, b)
+        nn = float(np.linalg.norm(n))
+        if not np.isfinite(nn) or nn < 1e-12:
+            return False
+        n = n / nn
+
+        s = v @ n  # signed distance to edge plane
+        if not np.isfinite(s).all():
+            return False
+
+        # Exclude the endpoints themselves from the strict test.
+        s = s.copy()
+        s[i] = 0.0
+        s[(i + 1) % v.shape[0]] = 0.0
+
+        pos = np.any(s > eps)
+        neg = np.any(s < -eps)
+        if pos and neg:
+            return False
+
+        # If everything is ~0, polygon is degenerate (colinear on great circle).
+        if (not pos) and (not neg):
+            return False
+
+    return True
+
+
+def _healpix_order_from_nside(nside: int) -> int:
+    """
+    MOC/HEALPix "order" is log2(nside) and requires power-of-two nside.
+    """
+    n = int(nside)
+    if n <= 0:
+        raise ValueError("nside must be > 0")
+    if (n & (n - 1)) != 0:
+        raise ValueError(f"nside must be a power of two, got {nside}")
+    return int(np.log2(n))
+
+
+def _moc_pixels_from_polygon(
+    *,
+    lon_deg: np.ndarray,
+    lat_deg: np.ndarray,
+    nside: int,
+    include_center_disc: bool = True,
+    lon0_deg: float | None = None,
+    lat0_deg: float | None = None,
+) -> np.ndarray:
+    """
+    Rasterize a spherical polygon to HEALPix pixels using MOC.
+
+    This is a robust alternative to `healpy.query_polygon`:
+    - concave and even self-intersecting polygons are accepted by mocpy
+    - avoids healpy's hard abort behavior on invalid polygons
+    """
+    from astropy.coordinates import SkyCoord
+    from mocpy import MOC
+
+    if lon_deg.size < 3:
+        return np.array([], dtype=np.int64)
+
+    lon_deg = np.asarray(lon_deg, dtype=np.float64)
+    lat_deg = np.asarray(lat_deg, dtype=np.float64)
+    if lon_deg.shape != lat_deg.shape:
+        raise ValueError("lon_deg and lat_deg must have the same shape")
+    if not np.isfinite(lon_deg).all() or not np.isfinite(lat_deg).all():
+        raise ValueError("polygon vertices contain non-finite lon/lat")
+
+    lon_deg = lon_deg % 360.0
+    # Defensive: ensure lat is in [-90, 90]. Some upstream values can be NaN or slightly
+    # outside range due to numeric transforms; mocpy/cdshealpix will panic on invalid lat.
+    lat_deg = np.clip(lat_deg, -89.999999, 89.999999)
+
+    order = _healpix_order_from_nside(int(nside))
+
+    # mocpy expects RA/Dec in degrees. Our lon/lat are already in degrees in equatorial frame
+    # (Stage 3 uses ephemeris.coordinates lon/lat).
+    sc = SkyCoord(lon_deg, lat_deg, unit="deg", frame="icrs")
+    try:
+        moc = MOC.from_polygon_skycoord(sc, max_depth=int(order))
+    except BaseException as e:  # noqa: BLE001
+        # mocpy can raise a pyo3 PanicException if cdshealpix asserts; normalize to ValueError.
+        raise ValueError(f"moc polygon rasterization failed: {type(e).__name__}: {e}") from e
+
+    # Convert to the exact order we need; uniq_hpx are HEALPix cell indices at nside=2**order.
+    pix = moc.to_order(int(order)).uniq_hpx.astype(np.int64, copy=False)
+    pix_set: set[int] = set(pix.tolist())
+
+    # Match the existing healpy polygon behavior: always include a minimal disc at the center
+    # to protect against discretization edge cases.
+    if include_center_disc and lon0_deg is not None and lat0_deg is not None:
+        center_vec = hp.ang2vec(float(lon0_deg), float(lat0_deg), lonlat=True)
+        pix_set.update(
+            hp.query_disc(
+                int(nside),
+                center_vec,
+                float(hp.max_pixrad(int(nside))),
+                inclusive=True,
+                nest=True,
+            ).tolist()
+        )
+
+    return np.unique(np.fromiter(pix_set, dtype=np.int64))
 
 
 def disc_pixels_from_cov(
@@ -74,23 +281,16 @@ def ellipse_polygon_pixels_from_cov(
     """
     Approximate N-sigma ellipse boundary in tangent plane and rasterize via `query_polygon`.
     """
-    V = max(int(num_vertices), 8)
-    angles = np.linspace(0.0, 2.0 * np.pi, V, endpoint=False)
-    unit = np.stack([np.cos(angles), np.sin(angles)], axis=1)  # (V, 2)
-
-    cos_lat = float(np.cos(np.deg2rad(lat0_deg)))
-    cos_lat = cos_lat if np.isfinite(cos_lat) and abs(cos_lat) > 1e-12 else 1e-12
-    A = np.array([[cos_lat, 0.0], [0.0, 1.0]], dtype=np.float64)
-    cov_xy = A @ cov_ll_deg2 @ A.T
-    S = _safe_sqrtm_2x2(cov_xy)
-    pts = (unit @ S.T) * float(n_sigma)  # (V, 2) in degrees
-
-    dlon = pts[:, 0] / cos_lat
-    dlat = pts[:, 1]
-    lon_poly = (float(lon0_deg) + dlon) % 360.0
-    lat_poly = np.clip(float(lat0_deg) + dlat, -89.999999, 89.999999)
-
+    lon_poly, lat_poly = _ellipse_boundary_lonlat_deg_from_cov(
+        lon0_deg=float(lon0_deg),
+        lat0_deg=float(lat0_deg),
+        cov_ll_deg2=cov_ll_deg2,
+        n_sigma=float(n_sigma),
+        num_vertices=int(num_vertices),
+    )
     verts = hp.ang2vec(lon_poly, lat_poly, lonlat=True)
+    if not _is_convex_spherical_polygon(verts):
+        raise ValueError("ellipse polygon is not convex (precheck)")
     pix = hp.query_polygon(nside, verts, inclusive=True, nest=True)
     pix_set = set(np.asarray(pix, dtype=np.int64).tolist())
 
@@ -100,6 +300,39 @@ def ellipse_polygon_pixels_from_cov(
         hp.query_disc(nside, center_vec, float(hp.max_pixrad(nside)), inclusive=True, nest=True).tolist()
     )
     return np.unique(np.fromiter(pix_set, dtype=np.int64))
+
+
+def ellipse_polygon_pixels_from_cov_moc(
+    *,
+    lon0_deg: float,
+    lat0_deg: float,
+    cov_ll_deg2: np.ndarray,
+    nside: int,
+    n_sigma: float = 3.0,
+    num_vertices: int = 32,
+) -> np.ndarray:
+    """
+    Approximate N-sigma ellipse boundary in tangent plane and rasterize with mocpy (MOC).
+
+    This is intended as a more robust alternative to `ellipse_polygon_pixels_from_cov`
+    for benchmarking/experiments.
+    """
+    lon_poly, lat_poly = _ellipse_boundary_lonlat_deg_from_cov(
+        lon0_deg=float(lon0_deg),
+        lat0_deg=float(lat0_deg),
+        cov_ll_deg2=cov_ll_deg2,
+        n_sigma=float(n_sigma),
+        num_vertices=int(num_vertices),
+    )
+
+    return _moc_pixels_from_polygon(
+        lon_deg=lon_poly.astype(np.float64, copy=False),
+        lat_deg=lat_poly.astype(np.float64, copy=False),
+        nside=int(nside),
+        include_center_disc=True,
+        lon0_deg=float(lon0_deg),
+        lat0_deg=float(lat0_deg),
+    )
 
 
 def mc_pixels_from_cov(
@@ -232,6 +465,45 @@ def perimeter_polygon_from_samples(
     lon_poly = lon_deg[order]
     lat_poly = lat_deg[order]
     return np.stack([lon_poly, lat_poly], axis=1)
+
+
+def sample_perimeter_polygon_pixels_moc(
+    *,
+    lon0_deg: float,
+    lat0_deg: float,
+    lon_deg: np.ndarray,
+    lat_deg: np.ndarray,
+    nside: int,
+    mode: Literal["angle_sort", "convex_hull"] = "convex_hull",
+    include_center_disc: bool = True,
+) -> np.ndarray:
+    """
+    Build a perimeter polygon from samples (tangent-plane heuristic) and rasterize with mocpy.
+
+    Unlike `healpy.query_polygon`, mocpy accepts concave and self-intersecting polygons, so
+    this is more robust for "boundary polygon" experiments.
+    """
+    poly = perimeter_polygon_from_samples(
+        lon0_deg=float(lon0_deg),
+        lat0_deg=float(lat0_deg),
+        lon_deg=lon_deg,
+        lat_deg=lat_deg,
+        mode=mode,
+    )
+    if poly.shape[0] < 3:
+        return sample_pixels_direct(lon_deg=lon_deg, lat_deg=lat_deg, nside=int(nside))
+
+    lon_poly = float(lon0_deg) + _wrap_delta_lon_deg(poly[:, 0].astype(np.float64), float(lon0_deg))
+    lat_poly = poly[:, 1].astype(np.float64, copy=False)
+
+    return _moc_pixels_from_polygon(
+        lon_deg=lon_poly.astype(np.float64),
+        lat_deg=lat_poly.astype(np.float64),
+        nside=int(nside),
+        include_center_disc=bool(include_center_disc),
+        lon0_deg=float(lon0_deg),
+        lat0_deg=float(lat0_deg),
+    )
 
 
 def corridor_pixels_from_samples(
@@ -396,7 +668,12 @@ class SamplePerimeterPolygonFootprint:
             return sample_pixels_direct(
                 lon_deg=self.sample_lon_deg, lat_deg=self.sample_lat_deg, nside=nside
             )
-        verts = hp.ang2vec(poly[:, 0], poly[:, 1], lonlat=True)
+        # Avoid 0/360 wrap creating a non-convex polygon in 3D.
+        lon = float(self.lon0_deg) + _wrap_delta_lon_deg(poly[:, 0].astype(np.float64), float(self.lon0_deg))
+        lat = poly[:, 1]
+        verts = hp.ang2vec(lon, lat, lonlat=True)
+        if not _is_convex_spherical_polygon(verts):
+            raise ValueError("sample perimeter polygon is not convex (precheck)")
         pix = hp.query_polygon(nside, verts, inclusive=True, nest=True)
         pix_set = set(np.asarray(pix, dtype=np.int64).tolist())
         # Add safety margin for buffer/pixelization.

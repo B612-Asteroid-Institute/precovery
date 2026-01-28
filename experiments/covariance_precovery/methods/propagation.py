@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal, NamedTuple
 
 import numpy as np
 from adam_assist import ASSISTPropagator
@@ -15,135 +14,106 @@ from adam_core.propagator import Propagator
 from adam_core.time import Timestamp
 
 
-@dataclass(frozen=True)
-class PropagationInputs:
-    orbit: Orbits  # (N)
-    obscode: str
-    times: Timestamp  # (M)
-
-
-@dataclass(frozen=True)
-class PropagationOutput:
+class PropagationOutput(NamedTuple):
     mean_ephem: Ephemeris  # (M)
     variants_ephem: Ephemeris | None  # (M * K) depending on propagator behavior
     variant_kind: str | None
-
-
-class PropagationStrategy(Protocol):
-    name: str
-
-    def run(self, inp: PropagationInputs) -> PropagationOutput: ...
 
 
 def _observers(obscode: str, times: Timestamp) -> Observers:
     return Observers.from_code(obscode, times)
 
 
-class TwoBodyOnly(PropagationStrategy):
-    name = "2body_only"
-
-    def run(self, inp: PropagationInputs) -> PropagationOutput:
-        # Propagate mean (with covariance if present) using 2-body.
-        prop = propagate_2body(inp.orbit, inp.times)
-        ephem = generate_ephemeris_2body(prop, _observers(inp.obscode, inp.times))
-        return PropagationOutput(mean_ephem=ephem, variants_ephem=None, variant_kind=None)
-
-
-class AssistToWindowThen2Body(PropagationStrategy):
+def run_2body_only(*, orbit: Orbits, obscode: str, times: Timestamp) -> PropagationOutput:
     """
-    Mirrors precovery's approach: n-body to a reference epoch, then 2-body within the window.
+    Propagate mean orbit(s) with 2-body and generate ephemeris for (orbit × times).
     """
-
-    name = "assist_window_then_2body"
-
-    def __init__(self, propagator: Propagator | None = None):
-        self._prop = propagator or ASSISTPropagator()
-
-    def run(self, inp: PropagationInputs) -> PropagationOutput:
-        # Choose a reference epoch: mean of the times.
-        mean_mjd = float(np.mean(inp.times.mjd().to_numpy(zero_copy_only=False)))
-        t_ref = Timestamp.from_mjd([mean_mjd], scale="utc")
-        use_cov = inp.orbit.coordinates.covariance is not None and not inp.orbit.coordinates.covariance.is_all_nan()
-        orb_ref = self._prop.propagate_orbits(inp.orbit, t_ref, covariance=use_cov)
-        prop = propagate_2body(orb_ref, inp.times)
-        ephem = generate_ephemeris_2body(prop, _observers(inp.obscode, inp.times))
-        return PropagationOutput(mean_ephem=ephem, variants_ephem=None, variant_kind=None)
+    prop = propagate_2body(orbit, times)
+    ephem = generate_ephemeris_2body(prop, _observers(obscode, times))
+    return PropagationOutput(mean_ephem=ephem, variants_ephem=None, variant_kind=None)
 
 
-class AssistVariants(PropagationStrategy):
+def run_assist_window_then_2body(
+    *,
+    orbit: Orbits,
+    obscode: str,
+    times: Timestamp,
+    propagator: Propagator | None = None,
+) -> PropagationOutput:
+    """
+    Mirror precovery's approach: n-body to a reference epoch, then 2-body within the window.
+    """
+    prop_assist = propagator or ASSISTPropagator()
+    mean_mjd = float(np.mean(times.mjd().to_numpy(zero_copy_only=False)))
+    t_ref = Timestamp.from_mjd([mean_mjd], scale="utc")
+    use_cov = orbit.coordinates.covariance is not None and not orbit.coordinates.covariance.is_all_nan()
+    orb_ref = prop_assist.propagate_orbits(orbit, t_ref, covariance=use_cov)
+    prop = propagate_2body(orb_ref, times)
+    ephem = generate_ephemeris_2body(prop, _observers(obscode, times))
+    return PropagationOutput(mean_ephem=ephem, variants_ephem=None, variant_kind=None)
+
+
+def run_assist_variants(
+    *,
+    orbit: Orbits,
+    obscode: str,
+    times: Timestamp,
+    variant_mode: Literal["sigma_points", "mc"] = "sigma_points",
+    mc_num_samples: int = 256,
+    seed: int = 0,
+    propagator: Propagator | None = None,
+) -> PropagationOutput:
     """
     Generate a cloud of variant orbits (sigma points or MC) and run n-body ephemeris generation.
     """
+    prop_assist = propagator or ASSISTPropagator()
+    obs = _observers(obscode, times)
 
-    name = "assist_variants"
+    use_cov = orbit.coordinates.covariance is not None and not orbit.coordinates.covariance.is_all_nan()
+    mean_ephem = prop_assist.generate_ephemeris(orbit, obs, covariance=use_cov)
 
-    def __init__(
-        self,
-        *,
-        variant_mode: Literal["sigma_points", "mc"] = "sigma_points",
-        mc_num_samples: int = 256,
-        seed: int = 0,
-        scale: float = 1.0,
-        propagator: Propagator | None = None,
-    ):
-        self.variant_mode = variant_mode
-        self.mc_num_samples = int(mc_num_samples)
-        self.seed = int(seed)
-        self.scale = float(scale)
-        self._prop = propagator or ASSISTPropagator()
+    if not use_cov:
+        raise ValueError("run_assist_variants requires an input orbit covariance to generate variants.")
 
-    def run(self, inp: PropagationInputs) -> PropagationOutput:
-        obs = _observers(inp.obscode, inp.times)
+    if variant_mode == "sigma_points":
+        variants = VariantOrbits.create(orbit, method="sigma-point")
+        kind = "sigma_points"
+    else:
+        variants = VariantOrbits.create(
+            orbit,
+            method="monte-carlo",
+            num_samples=int(mc_num_samples),
+            seed=int(seed),
+        )
+        kind = f"mc_{int(mc_num_samples)}"
 
-        use_cov = inp.orbit.coordinates.covariance is not None and not inp.orbit.coordinates.covariance.is_all_nan()
-        mean_ephem = self._prop.generate_ephemeris(inp.orbit, obs, covariance=use_cov)
-
-        if not use_cov:
-            raise ValueError("AssistVariants requires an input orbit covariance to generate variants.")
-
-        if self.variant_mode == "sigma_points":
-            if self.scale != 1.0:
-                raise ValueError("scale != 1.0 not supported for sigma-point variants in this benchmark")
-            variants = VariantOrbits.create(inp.orbit, method="sigma-point")
-            kind = "sigma_points"
-        else:
-            if self.scale != 1.0:
-                raise ValueError("scale != 1.0 not supported for monte-carlo variants in this benchmark")
-            variants = VariantOrbits.create(
-                inp.orbit,
-                method="monte-carlo",
-                num_samples=int(self.mc_num_samples),
-                seed=int(self.seed),
-            )
-            kind = f"mc_{self.mc_num_samples}"
-
-        variants_ephem = self._prop.generate_ephemeris(variants, obs, covariance=False)
-        return PropagationOutput(mean_ephem=mean_ephem, variants_ephem=variants_ephem, variant_kind=kind)
+    variants_ephem = prop_assist.generate_ephemeris(variants, obs, covariance=False)
+    return PropagationOutput(mean_ephem=mean_ephem, variants_ephem=variants_ephem, variant_kind=kind)
 
 
-class TwoBodyWithRegimeTrigger(PropagationStrategy):
+def run_2body_with_trigger(
+    *,
+    orbit: Orbits,
+    obscode: str,
+    times: Timestamp,
+    max_dt_days: float = 30.0,
+    propagator: Propagator | None = None,
+) -> PropagationOutput:
     """
     2-body by default, with an upgrade path when the regime looks risky.
 
-    Initial trigger (cheap): if max |Δt| from orbit epoch exceeds a threshold, use
+    Trigger (cheap): if max |Δt| from orbit epoch exceeds threshold, use
     the hybrid ASSIST-to-window + 2-body-in-window strategy.
-
-    This is deliberately conservative; we will refine triggers later using the
-    stress-test suite (close approaches, perturbation-sensitive objects).
     """
-
-    name = "2body_with_trigger"
-
-    def __init__(self, *, max_dt_days: float = 30.0, propagator: Propagator | None = None):
-        self.max_dt_days = float(max_dt_days)
-        self._fallback = TwoBodyOnly()
-        self._upgrade = AssistToWindowThen2Body(propagator=propagator)
-
-    def run(self, inp: PropagationInputs) -> PropagationOutput:
-        t0s = inp.orbit.coordinates.time.mjd().to_numpy(zero_copy_only=False).astype(np.float64)
-        ts = inp.times.mjd().to_numpy(zero_copy_only=False).astype(np.float64)
-        dt = np.max(np.abs(ts[None, :] - t0s[:, None]))
-        if float(dt) > self.max_dt_days:
-            return self._upgrade.run(inp)
-        return self._fallback.run(inp)
+    t0s = orbit.coordinates.time.mjd().to_numpy(zero_copy_only=False).astype(np.float64)
+    ts = times.mjd().to_numpy(zero_copy_only=False).astype(np.float64)
+    dt = np.max(np.abs(ts[None, :] - t0s[:, None]))
+    if float(dt) > float(max_dt_days):
+        return run_assist_window_then_2body(
+            orbit=orbit,
+            obscode=obscode,
+            times=times,
+            propagator=propagator,
+        )
+    return run_2body_only(orbit=orbit, obscode=obscode, times=times)
 

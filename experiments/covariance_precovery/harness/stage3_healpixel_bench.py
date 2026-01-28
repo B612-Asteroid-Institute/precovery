@@ -12,7 +12,6 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import quivr as qv
 
-from adam_core.coordinates.covariances import weighted_mean
 from adam_core.coordinates.origin import Origin
 from adam_core.coordinates.spherical import SphericalCoordinates
 from adam_core.orbits.ephemeris import Ephemeris
@@ -24,8 +23,10 @@ from ..methods.footprints import (
     corridor_pixels_from_samples,
     disc_pixels_from_cov,
     ellipse_polygon_pixels_from_cov,
+    ellipse_polygon_pixels_from_cov_moc,
     mc_pixels_from_cov,
     sample_pixels_direct,
+    sample_perimeter_polygon_pixels_moc,
 )
 
 
@@ -82,6 +83,8 @@ class Stage3Metrics(qv.Table):
     sum_frame_pixels = qv.Int64Column()
     sum_intersection = qv.Int64Column()
     runtime_sec = qv.Float64Column()
+    n_errors = qv.Int64Column(nullable=True)
+    error = qv.LargeStringColumn(nullable=True)
 
 
 class Stage3Coverage(qv.Table):
@@ -312,6 +315,22 @@ def _read_truth_observations_table(*, subset_dir: Path, targets: pa.Table) -> pa
         healpixel=[int(x) for x in t_hpix[ok].tolist()],
     ).table
 
+
+def _filter_truth_to_orbit_ids(truth_obs: pa.Table, orbit_ids: set[str]) -> pa.Table:
+    """
+    Restrict truth observations to a strategy's orbit_id set.
+
+    This is critical for smoke tests where Stage 2 is run on a subset of orbits: the
+    Stage 3 coverage denominator should only include truth rows relevant to those orbits.
+    """
+    if truth_obs.num_rows == 0 or not orbit_ids:
+        return TruthObservations.empty().table
+    mask = pc.is_in(
+        truth_obs["orbit_id"],
+        value_set=pa.array(sorted(orbit_ids), type=pa.large_string()),
+    )
+    return truth_obs.filter(mask)
+
 def _ephem_key_table(ephem: Ephemeris) -> pa.Table:
     # Use `object_id` (SBDB name) when present; stage2's `orbit_id` historically was not unique.
     obj = ephem.object_id.to_pylist() if getattr(ephem, "object_id", None) is not None else None
@@ -424,6 +443,15 @@ def _predicted_pixels_from_mean_row(
         return disc_pixels_from_cov(lon0_deg=float(lon_deg), lat0_deg=float(lat_deg), cov_ll_deg2=cov_ll_deg2, nside=int(nside), n_sigma=float(n_sigma))
     if footprint == "cov_polygon":
         return ellipse_polygon_pixels_from_cov(lon0_deg=float(lon_deg), lat0_deg=float(lat_deg), cov_ll_deg2=cov_ll_deg2, nside=int(nside), n_sigma=float(n_sigma), num_vertices=int(polygon_vertices))
+    if footprint == "cov_polygon_moc":
+        return ellipse_polygon_pixels_from_cov_moc(
+            lon0_deg=float(lon_deg),
+            lat0_deg=float(lat_deg),
+            cov_ll_deg2=cov_ll_deg2,
+            nside=int(nside),
+            n_sigma=float(n_sigma),
+            num_vertices=int(polygon_vertices),
+        )
     if footprint == "cov_mc":
         return mc_pixels_from_cov(lon0_deg=float(lon_deg), lat0_deg=float(lat_deg), cov_ll_deg2=cov_ll_deg2, nside=int(nside), n_sigma=float(n_sigma), num_samples=int(mc_num_samples), seed=int(mc_seed))
     raise ValueError(f"Unknown footprint for mean ephemeris: {footprint}")
@@ -455,6 +483,16 @@ def _predicted_pixels_from_samples(
             buffer_arcsec=0.0,
         )
         return fp.pixels(int(nside))
+    if footprint == "sample_polygon_moc":
+        return sample_perimeter_polygon_pixels_moc(
+            lon0_deg=float(lon_deg[0]),
+            lat0_deg=float(lat_deg[0]),
+            lon_deg=lon_deg.astype(np.float64, copy=False),
+            lat_deg=lat_deg.astype(np.float64, copy=False),
+            nside=int(nside),
+            mode=("convex_hull" if str(polygon_mode) == "convex_hull" else "angle_sort"),
+            include_center_disc=True,
+        )
     if footprint == "sample_corridor":
         return corridor_pixels_from_samples(
             lon0_deg=float(lon_deg[0]),
@@ -468,105 +506,23 @@ def _predicted_pixels_from_samples(
     raise ValueError(f"Unknown footprint for sample ephemeris: {footprint}")
 
 
-def _wrap_delta_lon_deg(lon_deg: np.ndarray, lon0_deg: float) -> np.ndarray:
-    """
-    Wrap Δlon into [-180, 180) degrees.
-    """
-    return (lon_deg - float(lon0_deg) + 180.0) % 360.0 - 180.0
-
-
-def _mean_lon_lat_deg(lon_deg: np.ndarray, lat_deg: np.ndarray) -> tuple[float, float]:
-    """
-    Robust-ish mean on the sphere for small clouds: compute mean in a wrapped lon frame.
-    """
-    if lon_deg.size == 0:
-        return 0.0, 0.0
-    lon0 = float(lon_deg[0])
-    dlon = _wrap_delta_lon_deg(lon_deg.astype(np.float64), lon0)
-    lon_mean = (lon0 + float(np.mean(dlon))) % 360.0
-    lat_mean = float(np.mean(lat_deg.astype(np.float64)))
-    return lon_mean, lat_mean
-
-
-def _weighted_mean(x: np.ndarray, w: np.ndarray) -> float:
-    if x.size == 0:
-        return 0.0
-    ww = w.astype(np.float64)
-    s = float(np.sum(ww))
-    if not np.isfinite(s) or s <= 0:
-        return float(np.mean(x))
-    ww = ww / s
-    return float(np.sum(ww * x))
-
-
-def _weighted_cov_2d(xy: np.ndarray, w: np.ndarray) -> np.ndarray:
-    """
-    Weighted covariance for xy with shape (2, K) and weights shape (K,).
-    """
-    if xy.shape[1] <= 1:
-        return np.zeros((2, 2), dtype=np.float64)
-    ww = w.astype(np.float64)
-    s = float(np.sum(ww))
-    if not np.isfinite(s) or s <= 0:
-        return np.cov(xy, bias=True).astype(np.float64)
-    ww = ww / s
-    mu = (xy * ww[None, :]).sum(axis=1, keepdims=True)
-    d = xy - mu
-    cov = (d * ww[None, :]) @ d.T
-    cov = 0.5 * (cov + cov.T)
-    return cov.astype(np.float64)
-
-
 def _collapse_variant_ephemeris_group(
     *,
     variants: VariantEphemeris,
-    orbit_id: str,
-    object_id: str | None,
-    time_days: int,
-    time_nanos: int,
-    obscode: str,
-    frame: str,
 ) -> Ephemeris:
     """
-    Use `adam_core.orbits.variants.VariantEphemeris.collapse()` to compute a covariance-bearing
-    `Ephemeris` row for one (orbit,time) group.
+    Collapse a single grouped `VariantEphemeris` into one covariance-bearing `Ephemeris` row.
 
-    This uses mean reconstructed from the variants (via `weighted_mean`), then delegates
-    covariance reconstruction to `VariantEphemeris.collapse` (weights_cov-aware).
-
-    TODO: If/when `VariantEphemeris.collapse_by_object_id()` exists upstream, switch to it
-    so we don’t need to construct a 1-row mean `Ephemeris` here.
+    Upstream now provides `VariantEphemeris.collapse_by_object_id()`, which groups by
+    (object_id, time, origin code) and reconstructs mean + covariance.
     """
-    samples = variants.coordinates.values  # (K,6)
-    w = variants.weights.to_numpy(zero_copy_only=False)
-    # If weights are missing/invalid, fall back to uniform.
-    if w is None or (not np.isfinite(w).all()) or float(np.sum(w)) == 0.0:
-        w = np.ones(len(samples), dtype=np.float64) / max(len(samples), 1)
-    else:
-        w = w.astype(np.float64, copy=False)
-    # Ensure weights sum to 1 for weighted_mean's dot-product semantics.
-    s = float(np.sum(w))
-    if s != 0.0:
-        w = w / s
-
-    mean6 = weighted_mean(samples, w).astype(np.float64)  # (6,)
-    mean_ephem = Ephemeris.from_kwargs(
-        orbit_id=[str(orbit_id)],
-        object_id=[None if object_id is None else str(object_id)],
-        coordinates=SphericalCoordinates.from_kwargs(
-            rho=[float(mean6[0])],
-            lon=[float(mean6[1])],
-            lat=[float(mean6[2])],
-            vrho=[float(mean6[3])],
-            vlon=[float(mean6[4])],
-            vlat=[float(mean6[5])],
-            time=Timestamp.from_kwargs(days=[int(time_days)], nanos=[int(time_nanos)], scale="utc"),
-            origin=Origin.from_kwargs(code=pa.array([str(obscode)], pa.large_string())),
-            frame=str(frame),
-        ),
-    )
-    # Collapse uses weights_cov stored in `variants` internally.
-    return variants.collapse(mean_ephem)
+    collapsed = variants.collapse_by_object_id()
+    if len(collapsed) != 1:
+        raise ValueError(
+            "Expected exactly one collapsed ephemeris row for a grouped VariantEphemeris; "
+            f"got {len(collapsed)}"
+        )
+    return collapsed
 
 
 def _group_slices_by_orbit_target(
@@ -623,11 +579,8 @@ def run_stage3_healpixel_bench(
     frames_pixels = _read_frames_pixels_table(subset_dir=subset_dir, targets=targets_tbl)
     truth_obs_tbl = _read_truth_observations_table(subset_dir=subset_dir, targets=targets_tbl)
     truth_keys_tbl = _truth_keys_from_truth_observations(truth_obs_tbl)
-    truth_unique_tbl: pa.Table | None = None
-    if bool(compute_extra_frames) and truth_obs_tbl.num_rows > 0:
-        truth_unique_tbl = TruthObservations.from_pyarrow(truth_obs_tbl).drop_duplicates(
-            subset=["orbit_id", "target_idx", "healpixel"]
-        ).table
+    # NOTE: truth_unique tables are computed per-strategy after filtering to the
+    # orbits present in that strategy's Stage 2 outputs.
 
     metrics_rows: list[dict[str, object]] = []
     coverage_rows: list[dict[str, object]] = []
@@ -661,6 +614,21 @@ def run_stage3_healpixel_bench(
         if not part_files:
             continue
 
+        # Filter truth to the orbits actually present in this Stage 2 strategy output.
+        orbit_ids_in_strategy: set[str] = set()
+        try:
+            ep_first = Ephemeris.from_parquet(str(part_files[0]))
+            orbit_ids_in_strategy = set(_ephem_key_table(ep_first)["orbit_id"].to_pylist())
+        except Exception:  # noqa: BLE001
+            orbit_ids_in_strategy = set()
+        truth_obs_tbl_strategy = _filter_truth_to_orbit_ids(truth_obs_tbl, orbit_ids_in_strategy)
+        truth_keys_tbl_strategy = _truth_keys_from_truth_observations(truth_obs_tbl_strategy)
+        truth_unique_tbl_strategy: pa.Table | None = None
+        if bool(compute_extra_frames) and truth_obs_tbl_strategy.num_rows > 0:
+            truth_unique_tbl_strategy = TruthObservations.from_pyarrow(truth_obs_tbl_strategy).drop_duplicates(
+                subset=["orbit_id", "target_idx", "healpixel"]
+            ).table
+
         # Determine whether covariance is present for this strategy.
         try:
             ep0 = _ephem_to_utc(Ephemeris.from_parquet(str(part_files[0])))
@@ -672,6 +640,9 @@ def run_stage3_healpixel_bench(
             has_cov = False
 
         active_footprints = ["point"] + ([] if not has_cov else ["cov_disc", "cov_polygon", "cov_mc"])
+        # Optional robust polygon rasterization via MOC.
+        if has_cov:
+            active_footprints.append("cov_polygon_moc")
         if not active_footprints:
             continue
 
@@ -684,6 +655,8 @@ def run_stage3_healpixel_bench(
             sum_pred_pixels = 0
             sum_intersection = 0
             covered_total = 0
+            n_errors = 0
+            first_error: str | None = None
             selected_parts: list[pa.Table] = []
             meta = json.loads((strat_dir / "meta.json").read_text())
             n_orbits = int(meta["n_orbits"])
@@ -694,13 +667,17 @@ def run_stage3_healpixel_bench(
             # - assist_window_then_2body writes variable-sized parts; we map by (obscode,time)->target_idx
             needs_time_map = (name == "assist_window_then_2body")
             dt_days = float(60.0) / 86400.0
-            truth_obs = truth_obs_tbl
-            truth_unique = truth_unique_tbl if truth_unique_tbl is not None else pa.table(
-                {
-                    "orbit_id": pa.array([], pa.large_string()),
-                    "target_idx": pa.array([], pa.int64()),
-                    "healpixel": pa.array([], pa.int64()),
-                }
+            truth_obs = truth_obs_tbl_strategy
+            truth_unique = (
+                truth_unique_tbl_strategy
+                if truth_unique_tbl_strategy is not None
+                else pa.table(
+                    {
+                        "orbit_id": pa.array([], pa.large_string()),
+                        "target_idx": pa.array([], pa.int64()),
+                        "healpixel": pa.array([], pa.int64()),
+                    }
+                )
             )
             for pf in part_files:
                 ephem = Ephemeris.from_parquet(str(pf))
@@ -730,7 +707,7 @@ def run_stage3_healpixel_bench(
                     target_idx = target_idx[: int(len(ephem))]
                 if bool(only_truth):
                     mask = _filter_ephem_to_truth(
-                        ephem=ephem, target_idx=target_idx, truth_keys=truth_keys_tbl
+                        ephem=ephem, target_idx=target_idx, truth_keys=truth_keys_tbl_strategy
                     )
                     hit = np.nonzero(mask)[0]
                     if hit.size == 0:
@@ -766,17 +743,25 @@ def run_stage3_healpixel_bench(
                     pix_list: list[np.ndarray] = []
                     lens = np.empty(int(len(ephem)), dtype=np.int64)
                     for i in range(int(len(ephem))):
-                        pix_i = _predicted_pixels_from_mean_row(
-                            lon_deg=float(lon[i]),
-                            lat_deg=float(lat[i]),
-                            cov_ll_deg2=cov_ll[i],
-                            nside=int(healpix_nside),
-                            footprint=str(footprint),
-                            n_sigma=float(n_sigma),
-                            polygon_vertices=int(polygon_vertices),
-                            mc_num_samples=int(cov_mc_num_samples),
-                            mc_seed=int(cov_mc_seed),
-                        )
+                        try:
+                            pix_i = _predicted_pixels_from_mean_row(
+                                lon_deg=float(lon[i]),
+                                lat_deg=float(lat[i]),
+                                cov_ll_deg2=cov_ll[i],
+                                nside=int(healpix_nside),
+                                footprint=str(footprint),
+                                n_sigma=float(n_sigma),
+                                polygon_vertices=int(polygon_vertices),
+                                mc_num_samples=int(cov_mc_num_samples),
+                                mc_seed=int(cov_mc_seed),
+                            )
+                        except BaseException as e:  # noqa: BLE001
+                            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                                raise
+                            n_errors += 1
+                            if first_error is None:
+                                first_error = f"{type(e).__name__}: {e}"
+                            pix_i = np.array([], dtype=np.int64)
                         pix_list.append(pix_i)
                         lens[i] = int(len(pix_i))
                     if int(np.sum(lens)) == 0:
@@ -816,9 +801,11 @@ def run_stage3_healpixel_bench(
                     sum_frame_pixels=0,
                     sum_intersection=int(sum_intersection),
                     runtime_sec=float(dt),
+                    n_errors=(None if n_errors == 0 else int(n_errors)),
+                    error=first_error,
                 )
             )
-            tt = int(truth_obs_tbl.num_rows)
+            tt = int(truth_obs_tbl_strategy.num_rows)
             th = int(covered_total)
             n_selected = None
             n_extra = None
@@ -875,24 +862,45 @@ def run_stage3_healpixel_bench(
             if not part_files:
                 continue
 
+            orbit_ids_in_strategy: set[str] = set()
+            try:
+                ep_first = VariantEphemeris.from_parquet(str(part_files[0]))
+                orbit_ids_in_strategy = set(_ephem_key_table(ep_first)["orbit_id"].to_pylist())
+            except Exception:  # noqa: BLE001
+                orbit_ids_in_strategy = set()
+            truth_obs_tbl_strategy = _filter_truth_to_orbit_ids(truth_obs_tbl, orbit_ids_in_strategy)
+            truth_keys_tbl_strategy = _truth_keys_from_truth_observations(truth_obs_tbl_strategy)
+            truth_unique_tbl_strategy: pa.Table | None = None
+            if bool(compute_extra_frames) and truth_obs_tbl_strategy.num_rows > 0:
+                truth_unique_tbl_strategy = TruthObservations.from_pyarrow(truth_obs_tbl_strategy).drop_duplicates(
+                    subset=["orbit_id", "target_idx", "healpixel"]
+                ).table
+
             # Always map target_idx by (obscode,time) for variant outputs (parts can be irregular).
             dt_days = float(60.0) / 86400.0
-            truth_obs = truth_obs_tbl
-            truth_unique = truth_unique_tbl if truth_unique_tbl is not None else pa.table(
-                {
-                    "orbit_id": pa.array([], pa.large_string()),
-                    "target_idx": pa.array([], pa.int64()),
-                    "healpixel": pa.array([], pa.int64()),
-                }
+            truth_obs = truth_obs_tbl_strategy
+            truth_unique = (
+                truth_unique_tbl_strategy
+                if truth_unique_tbl_strategy is not None
+                else pa.table(
+                    {
+                        "orbit_id": pa.array([], pa.large_string()),
+                        "target_idx": pa.array([], pa.int64()),
+                        "healpixel": pa.array([], pa.int64()),
+                    }
+                )
             )
 
             variant_footprints = [
                 ("sample_direct", None),
                 ("sample_polygon", "angle_sort"),
                 ("sample_polygon", "convex_hull"),
+                ("sample_polygon_moc", "angle_sort"),
+                ("sample_polygon_moc", "convex_hull"),
                 ("sample_corridor", None),
                 ("cov_disc_reconstructed", None),
                 ("cov_polygon_reconstructed", None),
+                ("cov_polygon_reconstructed_moc", None),
                 ("cov_mc_reconstructed", None),
             ]
 
@@ -904,6 +912,8 @@ def run_stage3_healpixel_bench(
                 sum_pred_pixels = 0
                 sum_intersection = 0
                 covered_total = 0
+                n_errors = 0
+                first_error: str | None = None
                 selected_parts: list[pa.Table] = []
 
                 for pf in part_files:
@@ -921,7 +931,9 @@ def run_stage3_healpixel_bench(
                         target_idx = target_idx[hit]
 
                     if bool(only_truth):
-                        mask = _filter_ephem_to_truth(ephem=ephem, target_idx=target_idx, truth_keys=truth_keys_tbl)
+                        mask = _filter_ephem_to_truth(
+                            ephem=ephem, target_idx=target_idx, truth_keys=truth_keys_tbl_strategy
+                        )
                         hit = np.nonzero(mask)[0]
                         if hit.size == 0:
                             continue
@@ -955,49 +967,60 @@ def run_stage3_healpixel_bench(
                         lon_g = lon[idx]
                         lat_g = lat[idx]
 
-                        if footprint.endswith("_reconstructed"):
+                        if "_reconstructed" in footprint:
                             vsub = ephem.take(idx.tolist())
-                            # One group corresponds to a single time + obscode by construction.
-                            days = int(vsub.coordinates.time.days[0].as_py())
-                            nanos = int(vsub.coordinates.time.nanos[0].as_py())
-                            code = str(vsub.coordinates.origin.code[0].as_py())
-                            frame = str(vsub.coordinates.frame)
-
-                            collapsed = _collapse_variant_ephemeris_group(
-                                variants=vsub,
-                                orbit_id=oid,
-                                object_id=(str(vsub.object_id[0].as_py()) if vsub.object_id[0].as_py() is not None else None),
-                                time_days=days,
-                                time_nanos=nanos,
-                                obscode=code,
-                                frame=frame,
-                            )
-                            lon0 = float(collapsed.coordinates.lon[0].as_py())
-                            lat0 = float(collapsed.coordinates.lat[0].as_py())
-                            cov6 = collapsed.coordinates.covariance.to_matrix()[0].astype(np.float64)
-                            cov_ll = cov6[1:3, 1:3]
-                            base = footprint.replace("_reconstructed", "")
-                            pix = _predicted_pixels_from_mean_row(
-                                lon_deg=float(lon0),
-                                lat_deg=float(lat0),
-                                cov_ll_deg2=cov_ll,
-                                nside=int(healpix_nside),
-                                footprint=str(base),
-                                n_sigma=float(n_sigma),
-                                polygon_vertices=int(polygon_vertices),
-                                mc_num_samples=int(cov_mc_num_samples),
-                                mc_seed=int(cov_mc_seed),
-                            )
+                            try:
+                                collapsed = _collapse_variant_ephemeris_group(
+                                    variants=vsub,
+                                )
+                                lon0 = float(collapsed.coordinates.lon[0].as_py())
+                                lat0 = float(collapsed.coordinates.lat[0].as_py())
+                                cov6 = collapsed.coordinates.covariance.to_matrix()[0].astype(np.float64)
+                                cov_ll = cov6[1:3, 1:3]
+                                if footprint.endswith("_reconstructed_moc"):
+                                    base = footprint.replace("_reconstructed_moc", "_moc")
+                                else:
+                                    base = footprint.replace("_reconstructed", "")
+                                pix = _predicted_pixels_from_mean_row(
+                                    lon_deg=float(lon0),
+                                    lat_deg=float(lat0),
+                                    cov_ll_deg2=cov_ll,
+                                    nside=int(healpix_nside),
+                                    footprint=str(base),
+                                    n_sigma=float(n_sigma),
+                                    polygon_vertices=int(polygon_vertices),
+                                    mc_num_samples=int(cov_mc_num_samples),
+                                    mc_seed=int(cov_mc_seed),
+                                )
+                            except BaseException as e:  # noqa: BLE001
+                                if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                                    raise
+                                n_errors += 1
+                                if first_error is None:
+                                    first_error = f"{type(e).__name__}: {e}"
+                                pix = np.array([], dtype=np.int64)
                         else:
-                            pix = _predicted_pixels_from_samples(
-                                lon_deg=lon_g,
-                                lat_deg=lat_g,
-                                nside=int(healpix_nside),
-                                footprint=str(footprint),
-                                polygon_mode=("convex_hull" if polygon_mode == "convex_hull" else "angle_sort"),
-                                corridor_radius_arcsec=float(corridor_radius_arcsec),
-                                corridor_step_arcsec=float(corridor_step_arcsec),
-                            )
+                            try:
+                                pix = _predicted_pixels_from_samples(
+                                    lon_deg=lon_g,
+                                    lat_deg=lat_g,
+                                    nside=int(healpix_nside),
+                                    footprint=str(footprint),
+                                    polygon_mode=(
+                                        "convex_hull"
+                                        if polygon_mode == "convex_hull"
+                                        else "angle_sort"
+                                    ),
+                                    corridor_radius_arcsec=float(corridor_radius_arcsec),
+                                    corridor_step_arcsec=float(corridor_step_arcsec),
+                                )
+                            except BaseException as e:  # noqa: BLE001
+                                if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                                    raise
+                                n_errors += 1
+                                if first_error is None:
+                                    first_error = f"{type(e).__name__}: {e}"
+                                pix = np.array([], dtype=np.int64)
                         if pix.size == 0:
                             continue
                         sum_pred_pixels += int(pix.size)
@@ -1027,7 +1050,9 @@ def run_stage3_healpixel_bench(
 
                 dt = time.perf_counter() - t0
                 out_fp = (
-                    f"{footprint}:{polygon_mode}" if (footprint == "sample_polygon" and polygon_mode is not None) else footprint
+                    f"{footprint}:{polygon_mode}"
+                    if (footprint in {"sample_polygon", "sample_polygon_moc"} and polygon_mode is not None)
+                    else footprint
                 )
                 metrics_rows.append(
                     dict(
@@ -1044,9 +1069,11 @@ def run_stage3_healpixel_bench(
                         sum_frame_pixels=0,
                         sum_intersection=int(sum_intersection),
                         runtime_sec=float(dt),
+                        n_errors=(None if n_errors == 0 else int(n_errors)),
+                        error=first_error,
                     )
                 )
-                tt = int(truth_obs_tbl.num_rows)
+                tt = int(truth_obs_tbl_strategy.num_rows)
                 th = int(covered_total)
                 n_selected = None
                 n_extra = None

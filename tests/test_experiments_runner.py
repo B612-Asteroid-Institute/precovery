@@ -9,7 +9,6 @@ from experiments.covariance_precovery.harness.stage3_healpixel_bench import (
 )
 from adam_core.coordinates.origin import Origin
 from adam_core.coordinates.spherical import SphericalCoordinates
-from adam_core.orbits.ephemeris import Ephemeris
 from adam_core.orbits.variants import VariantEphemeris
 from adam_core.time import Timestamp
 
@@ -57,26 +56,7 @@ def test_stage3_cov_disc_contains_point_pixel() -> None:
 
 
 def test_stage3_variant_ephemeris_collapse_smoke() -> None:
-    # Two samples around a mean point; weights are uniform.
-    t = Timestamp.from_kwargs(days=[60000], nanos=[0], scale="utc")
-    origin = Origin.from_kwargs(code=pa.array(["500"], pa.large_string()))
     frame = "equatorial"
-
-    mean_ephem = Ephemeris.from_kwargs(
-        orbit_id=pa.array(["o1"], pa.large_string()),
-        object_id=pa.array(["o1"], pa.large_string()),
-        coordinates=SphericalCoordinates.from_kwargs(
-            rho=[1.0],
-            lon=[10.0],
-            lat=[20.0],
-            vrho=[0.0],
-            vlon=[0.0],
-            vlat=[0.0],
-            time=t,
-            origin=origin,
-            frame=frame,
-        ),
-    )
 
     variants = VariantEphemeris.from_kwargs(
         orbit_id=pa.array(["o1", "o1"], pa.large_string()),
@@ -97,7 +77,7 @@ def test_stage3_variant_ephemeris_collapse_smoke() -> None:
         ),
     )
 
-    collapsed = variants.collapse(mean_ephem)
+    collapsed = variants.collapse_by_object_id()
     cov = collapsed.coordinates.covariance.to_matrix()[0]
     assert cov.shape == (6, 6)
     assert np.isfinite(cov).all()
@@ -105,12 +85,6 @@ def test_stage3_variant_ephemeris_collapse_smoke() -> None:
     # Also exercise our Stage3 helper that wraps collapse and builds the mean ephemeris row.
     collapsed2 = _collapse_variant_ephemeris_group(
         variants=variants,
-        orbit_id="o1",
-        object_id="o1",
-        time_days=60000,
-        time_nanos=0,
-        obscode="500",
-        frame=frame,
     )
     cov2 = collapsed2.coordinates.covariance.to_matrix()[0]
     assert np.isfinite(cov2).all()

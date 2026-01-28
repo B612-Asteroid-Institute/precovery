@@ -59,6 +59,35 @@ def _cov_ok_mask(orbits: Orbits) -> np.ndarray:
     return np.isfinite(m).all(axis=(1, 2))
 
 
+def _designation_from_object_id(object_id: str) -> str:
+    s = str(object_id).strip()
+    if s.startswith("(") and s.endswith(")") and len(s) >= 3:
+        return s[1:-1].strip()
+    return s.split()[0].strip()
+
+
+def _truth_orbit_ids_in_subset(subset_dir: Path) -> set[str]:
+    """
+    Return orbit_ids (designation-normalized) that have matched truth detections in this subset window.
+    """
+    truth_path = subset_dir / "artifacts" / "truth_precovery_crossmatch.parquet"
+    orbits_path = subset_dir / "artifacts" / "orbits_selected_sbdb.parquet"
+    if not truth_path.exists() or not orbits_path.exists():
+        return set()
+
+    truth = pq.read_table(str(truth_path), columns=["matched", "designation"])
+    truth = truth.filter(pc.equal(truth["matched"], True))
+    truth_des = set(str(x) for x in pc.unique(truth["designation"]).to_pylist())
+
+    orbits = pq.read_table(str(orbits_path), columns=["orbit_id", "object_id"])
+    orbit_id = [str(x) for x in orbits["orbit_id"].to_pylist()]
+    object_id = [str(x) for x in orbits["object_id"].to_pylist()]
+    des = [_designation_from_object_id(x) for x in object_id]
+    des_to_orbit = {d: oid for d, oid in zip(des, orbit_id)}
+
+    return {des_to_orbit[d] for d in truth_des if d in des_to_orbit}
+
+
 def _run_2body_ephemeris(*, orbits: Orbits, window_observers_tdb: Observers) -> Ephemeris:
     """
     2-body ephemeris for all (orbit, window_center) pairs with a single vectorized
@@ -195,6 +224,7 @@ def run_stage2_propagation_bench(
     mc_samples: list[int] | None = None,
     time_chunk_size: int = 2048,
     max_processes: int | None = 8,
+    only_truth_orbits: bool = False,
     mean_with_covariance: bool = False,
     write_ephemeris: bool = True,
     write_variants_orbits: bool = True,
@@ -223,6 +253,13 @@ def run_stage2_propagation_bench(
     sbdb_default = win.artifacts_dir / "orbits_selected_sbdb.parquet"
     orbits_path = sbdb_default if sbdb_default.exists() else orbits_parquet
     orbits = Orbits.from_parquet(str(orbits_path))
+    truth_orbit_ids: set[str] | None = None
+    if bool(only_truth_orbits):
+        truth_orbit_ids = _truth_orbit_ids_in_subset(subset_dir)
+        if truth_orbit_ids:
+            mask = pc.is_in(orbits.orbit_id, value_set=pa.array(sorted(truth_orbit_ids), pa.large_string()))
+            idx = np.nonzero(mask.to_numpy(zero_copy_only=False).astype(bool))[0]
+            orbits = orbits.take(idx.tolist())
     if max_orbits is not None:
         orbits = orbits[: int(max_orbits)]
     cov_ok = _cov_ok_mask(orbits)
@@ -536,9 +573,16 @@ def run_stage2_propagation_bench(
 
             assist = ASSISTPropagator()
             t_compute0 = time.perf_counter()
-            # NOTE: Upstream limitation/bug: `ASSISTPropagator.propagate_orbits` fails with
-            # `ValueError: No values to concatenate` when called with VariantOrbits and
-            # max_processes > 1 (reproducible). Force to single-process for this step.
+            # NOTE: Upstream limitation/bug in `adam_core.propagator.Propagator.propagate_orbits`
+            # when `max_processes > 1` AND the input is a `VariantOrbits`.
+            #
+            # The Ray worker returns a `VariantOrbits` chunk, but the parallel dispatcher treats
+            # all `VariantOrbits` results as "internal covariance variants", leaving the main
+            # `propagated_list` empty, then calling `qv.concatenate(propagated_list)` which raises
+            # `ValueError: No values to concatenate`.
+            #
+            # This is reproducible even with `covariance=False`. Until fixed upstream, force
+            # single-process for this specific call.
             variants_at_centers = assist.propagate_orbits(
                 variants,
                 center_times_utc,
@@ -832,6 +876,8 @@ def run_stage2_propagation_bench(
         "mc_samples": [int(x) for x in mc_samples],
         "time_chunk_size": int(time_chunk_size),
         "max_processes": None if max_processes is None else int(max_processes),
+        "only_truth_orbits": bool(only_truth_orbits),
+        "n_orbits_truth_matched": None if truth_orbit_ids is None else int(len(truth_orbit_ids)),
         "mean_with_covariance": bool(mean_with_covariance),
         "write_ephemeris": bool(write_ephemeris),
         "write_variants_orbits": bool(write_variants_orbits),
@@ -865,6 +911,11 @@ def main() -> None:
         type=int,
         default=8,
         help="Max processes for ASSISTPropagator calls (propagate_orbits/generate_ephemeris). Use 0 to disable.",
+    )
+    p.add_argument(
+        "--only-truth-orbits",
+        action="store_true",
+        help="Filter input orbits to those with ≥1 matched truth detection in this subset window.",
     )
     p.add_argument(
         "--mean-with-covariance",
@@ -910,6 +961,7 @@ def main() -> None:
         mc_samples=_parse_mc_samples_arg(args.mc_samples, default=[]),
         time_chunk_size=int(args.time_chunk_size),
         max_processes=(None if int(args.max_processes) <= 0 else int(args.max_processes)),
+        only_truth_orbits=bool(args.only_truth_orbits),
         mean_with_covariance=bool(args.mean_with_covariance),
         write_ephemeris=not bool(args.no_write_ephemeris),
         write_variants_orbits=not bool(args.no_write_variants_orbits),
