@@ -249,9 +249,9 @@ def run_stage2_propagation_bench(
         target_codes = target_codes.slice(0, n)
         target_times_utc = target_times_utc[:n]
 
-    # Use SBDB-provided orbits by default if present.
-    sbdb_default = win.artifacts_dir / "orbits_selected_sbdb.parquet"
-    orbits_path = sbdb_default if sbdb_default.exists() else orbits_parquet
+    # Use the provided orbits parquet path (do not silently replace it with a subset default).
+    # This lets callers run controlled samples (e.g., 20 truth-matched orbits) for benchmarking.
+    orbits_path = orbits_parquet
     orbits = Orbits.from_parquet(str(orbits_path))
     truth_orbit_ids: set[str] | None = None
     if bool(only_truth_orbits):

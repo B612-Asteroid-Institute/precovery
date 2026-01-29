@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -48,14 +49,11 @@ def build_matrix_table(*, stage2_run_dir: Path, stage3_run_dir: Path) -> pd.Data
     m3_path = stage3_run_dir / "metrics.parquet"
     c3_path = stage3_run_dir / "coverage.parquet"
 
-    if not m2_path.exists():
-        raise FileNotFoundError(f"Missing Stage 2 metrics: {m2_path}")
     if not m3_path.exists():
         raise FileNotFoundError(f"Missing Stage 3 metrics: {m3_path}")
     if not c3_path.exists():
         raise FileNotFoundError(f"Missing Stage 3 coverage: {c3_path}")
 
-    m2 = pq.read_table(m2_path).to_pandas()
     m3 = pq.read_table(m3_path).to_pandas()
     c3 = pq.read_table(c3_path).to_pandas()
 
@@ -73,36 +71,68 @@ def build_matrix_table(*, stage2_run_dir: Path, stage3_run_dir: Path) -> pd.Data
     )
 
     # Attach Stage 2 timing + shapes per (strategy, variant_kind).
-    m2_key = m2[
-        [
-            "strategy",
-            "variant_kind",
-            "runtime_total_sec",
-            "runtime_sec",
-            "io_sec",
-            "n_orbits",
-            "n_orbits_covok",
-            "n_time_targets",
-            "n_ephem_rows_mean",
-            "n_variant_orbits",
-            "n_ephem_rows_variants",
-            "error",
-        ]
-    ].copy()
-    m2_key = m2_key.rename(
-        columns={
-            "runtime_total_sec": "stage2_runtime_total_sec",
-            "runtime_sec": "stage2_runtime_sec",
-            "io_sec": "stage2_io_sec",
-            "n_orbits": "stage2_n_orbits",
-            "n_orbits_covok": "stage2_n_orbits_covok",
-            "n_time_targets": "stage2_n_time_targets",
-            "n_ephem_rows_mean": "stage2_n_ephem_rows_mean",
-            "n_variant_orbits": "stage2_n_variant_orbits",
-            "n_ephem_rows_variants": "stage2_n_ephem_rows_variants",
-            "error": "stage2_error",
-        }
-    )
+    if m2_path.exists():
+        m2 = pq.read_table(m2_path).to_pandas()
+        m2_key = m2[
+            [
+                "strategy",
+                "variant_kind",
+                "runtime_total_sec",
+                "runtime_sec",
+                "io_sec",
+                "n_orbits",
+                "n_orbits_covok",
+                "n_time_targets",
+                "n_ephem_rows_mean",
+                "n_variant_orbits",
+                "n_ephem_rows_variants",
+                "error",
+            ]
+        ].copy()
+        m2_key = m2_key.rename(
+            columns={
+                "runtime_total_sec": "stage2_runtime_total_sec",
+                "runtime_sec": "stage2_runtime_sec",
+                "io_sec": "stage2_io_sec",
+                "n_orbits": "stage2_n_orbits",
+                "n_orbits_covok": "stage2_n_orbits_covok",
+                "n_time_targets": "stage2_n_time_targets",
+                "n_ephem_rows_mean": "stage2_n_ephem_rows_mean",
+                "n_variant_orbits": "stage2_n_variant_orbits",
+                "n_ephem_rows_variants": "stage2_n_ephem_rows_variants",
+                "error": "stage2_error",
+            }
+        )
+    else:
+        # Incremental mode: Stage 2 may still be running, so the combined metrics parquet
+        # isn't written yet. Fall back to the per-strategy meta.json files.
+        rows: list[dict[str, object]] = []
+        strategies_dir = stage2_run_dir / "strategies"
+        for meta_path in strategies_dir.glob("**/meta.json") if strategies_dir.exists() else []:
+            try:
+                meta = json.loads(meta_path.read_text())
+            except Exception:  # noqa: BLE001
+                continue
+            rows.append(
+                dict(
+                    strategy=meta.get("strategy"),
+                    variant_kind=meta.get("variant_kind"),
+                    stage2_runtime_total_sec=meta.get("runtime_total_sec"),
+                    stage2_runtime_sec=meta.get("runtime_sec"),
+                    stage2_io_sec=meta.get("io_sec"),
+                    stage2_n_orbits=meta.get("n_orbits"),
+                    stage2_n_orbits_covok=meta.get("n_orbits_covok"),
+                    stage2_n_time_targets=meta.get("n_time_targets"),
+                    stage2_n_ephem_rows_mean=meta.get("n_rows") if meta.get("kind") == "mean_ephemeris" else None,
+                    stage2_n_variant_orbits=meta.get("n_variant_orbits"),
+                    stage2_n_ephem_rows_variants=meta.get("n_rows")
+                    if meta.get("kind") == "variants_ephemeris"
+                    else None,
+                    stage2_error=meta.get("error"),
+                )
+            )
+        m2_key = pd.DataFrame.from_records(rows)
+
     df = df.merge(m2_key, on=["strategy", "variant_kind"], how="left")
 
     # Derived metrics
