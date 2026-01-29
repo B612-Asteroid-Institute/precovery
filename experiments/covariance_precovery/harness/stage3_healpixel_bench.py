@@ -12,6 +12,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import quivr as qv
 
+from adam_core.coordinates.cartesian import CartesianCoordinates
 from adam_core.orbits.ephemeris import Ephemeris
 from adam_core.orbits.variants import VariantEphemeris
 from adam_core.time import Timestamp
@@ -514,6 +515,18 @@ def _collapse_variant_ephemeris_group(
     Upstream now provides `VariantEphemeris.collapse_by_object_id()`, which groups by
     (object_id, time, origin code) and reconstructs mean + covariance.
     """
+    # Our Stage 2 VariantEphemeris rows can include `aberrated_coordinates` that are:
+    # - in a different frame/origin than topocentric spherical coords, and
+    # - not constant within a (object_id, time, origin) group.
+    #
+    # `VariantEphemeris.collapse_by_object_id()` currently asserts that aberrated coords (if present)
+    # are consistent within each group. For our Stage 3 reconstructed-cov footprints we only need the
+    # topocentric spherical covariance, so we explicitly drop aberrated coords by nulling them.
+    try:
+        variants = variants.set_column("aberrated_coordinates", CartesianCoordinates.nulls(len(variants)))
+    except Exception:  # noqa: BLE001
+        pass
+
     collapsed = variants.collapse_by_object_id()
     if len(collapsed) != 1:
         raise ValueError(

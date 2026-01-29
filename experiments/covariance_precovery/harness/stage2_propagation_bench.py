@@ -573,21 +573,11 @@ def run_stage2_propagation_bench(
 
             assist = ASSISTPropagator()
             t_compute0 = time.perf_counter()
-            # NOTE: Upstream limitation/bug in `adam_core.propagator.Propagator.propagate_orbits`
-            # when `max_processes > 1` AND the input is a `VariantOrbits`.
-            #
-            # The Ray worker returns a `VariantOrbits` chunk, but the parallel dispatcher treats
-            # all `VariantOrbits` results as "internal covariance variants", leaving the main
-            # `propagated_list` empty, then calling `qv.concatenate(propagated_list)` which raises
-            # `ValueError: No values to concatenate`.
-            #
-            # This is reproducible even with `covariance=False`. Until fixed upstream, force
-            # single-process for this specific call.
             variants_at_centers = assist.propagate_orbits(
                 variants,
                 center_times_utc,
                 covariance=False,
-                max_processes=1,
+                max_processes=max_processes,
             )  # (n_var * T)
             compute_sec += time.perf_counter() - t_compute0
 
@@ -665,7 +655,7 @@ def run_stage2_propagation_bench(
                 time_chunk_size=int(time_chunk_size),
                 layout_note="Carry the same particles through ASSIST-to-centers then 2-body-to-targets; each ephemeris part is a cross product (variants_center × time_chunk).",
                 assist_max_processes=None if max_processes is None else int(max_processes),
-                assist_max_processes_variants_propagate_orbits=1,
+                assist_max_processes_variants_propagate_orbits=None if max_processes is None else int(max_processes),
                 runtime_sec=float(compute_sec),
                 io_sec=float(io_sec),
                 runtime_total_sec=float(compute_sec + io_sec),
