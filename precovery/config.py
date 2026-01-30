@@ -1,4 +1,5 @@
 import json
+import inspect
 
 try:
     from ._version import __version__
@@ -56,7 +57,16 @@ class Config:
         """
         with open(in_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return cls(**data)
+        # Be permissive about extra keys so newer DBs can be opened by older code.
+        # Unknown keys are preserved as attributes on the returned Config instance.
+        sig = inspect.signature(cls.__init__)
+        allowed = {k for k in sig.parameters.keys() if k != "self"}
+        filtered = {k: v for k, v in data.items() if k in allowed}
+        cfg = cls(**filtered)
+        for k, v in data.items():
+            if k not in allowed:
+                setattr(cfg, k, v)
+        return cfg
 
 
 DefaultConfig = Config()

@@ -12,6 +12,8 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import quivr as qv
 
+from adam_core.coordinates.cartesian import CartesianCoordinates
+from adam_core.coordinates.spherical import SphericalCoordinates
 from adam_core.orbits.ephemeris import Ephemeris
 from adam_core.orbits.variants import VariantEphemeris
 from adam_core.time import Timestamp
@@ -331,11 +333,21 @@ def _filter_truth_to_orbit_ids(truth_obs: pa.Table, orbit_ids: set[str]) -> pa.T
 
 def _ephem_key_table(ephem: Ephemeris) -> pa.Table:
     # Use `object_id` (SBDB name) when present; stage2's `orbit_id` historically was not unique.
-    obj = ephem.object_id.to_pylist() if getattr(ephem, "object_id", None) is not None else None
+    orbit = [str(x) for x in ephem.orbit_id.to_pylist()]
+    obj_col = getattr(ephem, "object_id", None)
+    obj = obj_col.to_pylist() if obj_col is not None else None
     if obj is None:
-        keys = [str(x) for x in ephem.orbit_id.to_pylist()]
+        keys = orbit
     else:
-        keys = [_designation_from_object_id(str(x)) for x in obj]
+        # Be robust to Ephemeris tables that have an `object_id` column but contain nulls:
+        # fall back to orbit_id on a per-row basis.
+        keys: list[str] = []
+        for i, x in enumerate(obj):
+            s = "" if x is None else str(x).strip()
+            if s:
+                keys.append(_designation_from_object_id(s))
+            else:
+                keys.append(orbit[i] if i < len(orbit) else "")
     orbit_id = pa.array(keys, type=pa.large_string())
     return pa.table({"orbit_id": orbit_id})
 
@@ -511,10 +523,72 @@ def _collapse_variant_ephemeris_group(
     """
     Collapse a single grouped `VariantEphemeris` into one covariance-bearing `Ephemeris` row.
 
-    Upstream now provides `VariantEphemeris.collapse_by_object_id()`, which groups by
+    Newer `adam_core` provides `VariantEphemeris.collapse_by_object_id()`, which groups by
     (object_id, time, origin code) and reconstructs mean + covariance.
+
+    For compatibility with older `adam_core` versions, we fall back to:
+    - computing a mean ephemeris row for this group (using `weights` when available), then
+    - calling `VariantEphemeris.collapse(mean_ephemeris)` to attach covariances.
     """
-    collapsed = variants.collapse_by_object_id()
+    if hasattr(variants, "collapse_by_object_id"):
+        collapsed = variants.collapse_by_object_id()
+    else:
+        if len(variants) == 0:
+            return Ephemeris.empty()
+
+        # Compute a weighted mean in spherical coordinates.
+        vals = variants.coordinates.values.astype(np.float64, copy=False)  # (N, 6)
+        w = variants.weights.to_numpy(zero_copy_only=False).astype(np.float64)
+        w = np.where(np.isfinite(w), w, 0.0)
+        s = float(np.sum(w))
+        if (not np.isfinite(s)) or s <= 0.0:
+            w = np.full(len(variants), 1.0 / float(len(variants)), dtype=np.float64)
+        else:
+            w = w / s
+
+        mean = np.sum(vals * w[:, None], axis=0)
+        coords = SphericalCoordinates.from_kwargs(
+            rho=[float(mean[0])],
+            lon=[float(mean[1])],
+            lat=[float(mean[2])],
+            vrho=[float(mean[3])],
+            vlon=[float(mean[4])],
+            vlat=[float(mean[5])],
+            time=variants.coordinates.time[:1],
+            origin=variants.coordinates.origin[:1],
+            frame=variants.coordinates.frame,
+        )
+
+        # If aberrated coords exist on variants, carry a compatible mean ephemeris row too.
+        try:
+            has_aberrated = not pc.all(pc.is_null(variants.aberrated_coordinates.x)).as_py()
+        except Exception:  # noqa: BLE001
+            has_aberrated = False
+        if has_aberrated:
+            ab_vals = variants.aberrated_coordinates.values.astype(np.float64, copy=False)
+            mean_ab = np.sum(ab_vals * w[:, None], axis=0)
+            ab = CartesianCoordinates.from_kwargs(
+                x=[float(mean_ab[0])],
+                y=[float(mean_ab[1])],
+                z=[float(mean_ab[2])],
+                vx=[float(mean_ab[3])],
+                vy=[float(mean_ab[4])],
+                vz=[float(mean_ab[5])],
+                time=variants.aberrated_coordinates.time[:1],
+                origin=variants.aberrated_coordinates.origin[:1],
+                frame=variants.aberrated_coordinates.frame,
+            )
+            ephem_mean = Ephemeris.from_kwargs(
+                orbit_id=[str(variants.orbit_id[0].as_py())],
+                coordinates=coords,
+                aberrated_coordinates=ab,
+            )
+        else:
+            ephem_mean = Ephemeris.from_kwargs(
+                orbit_id=[str(variants.orbit_id[0].as_py())],
+                coordinates=coords,
+            )
+        collapsed = variants.collapse(ephem_mean)
     if len(collapsed) != 1:
         raise ValueError(
             "Expected exactly one collapsed ephemeris row for a grouped VariantEphemeris; "

@@ -44,7 +44,9 @@ def _print_markdown_table(df: pd.DataFrame, cols: list[str]) -> None:
         print(md_row(r))
 
 
-def build_matrix_table(*, stage2_run_dir: Path, stage3_run_dir: Path) -> pd.DataFrame:
+def build_matrix_table(
+    *, stage2_run_dir: Path, stage3_run_dir: Path, stage4_run_dir: Path | None = None
+) -> pd.DataFrame:
     m2_path = stage2_run_dir / "metrics.parquet"
     m3_path = stage3_run_dir / "metrics.parquet"
     c3_path = stage3_run_dir / "coverage.parquet"
@@ -144,6 +146,57 @@ def build_matrix_table(*, stage2_run_dir: Path, stage3_run_dir: Path) -> pd.Data
     df["total_runtime_sec"] = df["stage2_runtime_total_sec"] + df["runtime_sec"]
     df["n_errors"] = df["n_errors"].fillna(0).astype(int)
 
+    # Optionally attach Stage 4 detection filtering metrics + recall.
+    if stage4_run_dir is not None:
+        m4_path = stage4_run_dir / "metrics.parquet"
+        c4_path = stage4_run_dir / "coverage.parquet"
+        if m4_path.exists() and c4_path.exists():
+            m4 = pq.read_table(m4_path).to_pandas()
+            c4 = pq.read_table(c4_path).to_pandas()
+            s4 = m4.merge(
+                c4,
+                on=[
+                    "stage2_run_dir",
+                    "subset_dir",
+                    "strategy",
+                    "variant_kind",
+                    "footprint",
+                    "detection_filter",
+                    "healpix_nside",
+                ],
+                how="left",
+            )
+            s4 = s4.rename(
+                columns={
+                    "runtime_total_sec": "stage4_runtime_total_sec",
+                    "io_sec": "stage4_io_sec",
+                    "filter_sec": "stage4_filter_sec",
+                    "chi2_sec": "stage4_chi2_sec",
+                    "n_truth_matched": "stage4_n_truth_matched",
+                    "n_recovered": "stage4_n_recovered",
+                    "recall": "stage4_recall",
+                    "n_errors": "stage4_n_errors",
+                    "error": "stage4_error",
+                }
+            )
+            df = df.merge(
+                s4,
+                on=[
+                    "stage2_run_dir",
+                    "subset_dir",
+                    "strategy",
+                    "variant_kind",
+                    "footprint",
+                    "healpix_nside",
+                ],
+                how="left",
+            )
+            # Pipeline runtime includes Stage 2 + Stage 3 + Stage 4 when available.
+            if "stage4_runtime_total_sec" in df.columns:
+                df["pipeline_runtime_total_sec"] = (
+                    df["stage2_runtime_total_sec"] + df["runtime_sec"] + df["stage4_runtime_total_sec"]
+                )
+
     return df
 
 
@@ -151,11 +204,13 @@ def main() -> None:
     p = argparse.ArgumentParser(
         description=(
             "Render a Stage2×Stage3 matrix table from Stage 2/3 metrics + coverage parquets.\n\n"
-            "Tip: If stage3_run_dir is omitted, it defaults to sibling stage3/<stage2_run_dir.name>."
+            "Tip: If stage3_run_dir is omitted, it defaults to sibling stage3/<stage2_run_dir.name>.\n"
+            "Tip: If stage4_run_dir is omitted, it defaults to sibling stage4/<stage2_run_dir.name>."
         )
     )
     p.add_argument("--stage2-run-dir", type=str, required=True)
     p.add_argument("--stage3-run-dir", type=str, default=None)
+    p.add_argument("--stage4-run-dir", type=str, default=None)
     p.add_argument(
         "--format",
         type=str,
@@ -181,33 +236,53 @@ def main() -> None:
         if args.stage3_run_dir is not None
         else stage2_run_dir.parent.parent / "stage3" / stage2_run_dir.name
     )
+    stage4_run_dir = (
+        None
+        if args.stage4_run_dir is None
+        else Path(args.stage4_run_dir)
+    )
+    if stage4_run_dir is None:
+        # Default sibling stage4/<stage2_run_dir.name> if it exists.
+        cand = stage2_run_dir.parent.parent / "stage4" / stage2_run_dir.name
+        stage4_run_dir = cand if cand.exists() else None
 
-    df = build_matrix_table(stage2_run_dir=stage2_run_dir, stage3_run_dir=stage3_run_dir)
+    df = build_matrix_table(stage2_run_dir=stage2_run_dir, stage3_run_dir=stage3_run_dir, stage4_run_dir=stage4_run_dir)
 
     # Column subset aimed at “what matters”: misses + runtime + (optional) extra frames.
     cols = [
         "strategy",
         "variant_kind",
         "footprint",
+        "detection_filter",
         "healpix_nside",
         "coverage",
         "n_truth",
         "n_covered",
         "n_missed",
+        "stage4_recall",
+        "stage4_n_truth_matched",
+        "stage4_n_recovered",
         "n_selected",
         "n_extra_frames",
         "runtime_sec",
         "stage2_runtime_total_sec",
         "total_runtime_sec",
+        "stage4_runtime_total_sec",
+        "stage4_io_sec",
+        "stage4_filter_sec",
+        "stage4_chi2_sec",
+        "pipeline_runtime_total_sec",
         "n_errors",
         "error",
         "stage2_error",
+        "stage4_n_errors",
+        "stage4_error",
     ]
     for c in cols:
         if c not in df.columns:
             df[c] = None
 
-    out = df[cols].sort_values(["strategy", "variant_kind", "footprint"]).reset_index(drop=True)
+    out = df[cols].sort_values(["strategy", "variant_kind", "footprint", "detection_filter"]).reset_index(drop=True)
     if bool(args.hide_errors):
         out = out[out["n_errors"] == 0].reset_index(drop=True)
     if bool(args.only_missed):

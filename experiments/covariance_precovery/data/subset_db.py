@@ -115,24 +115,27 @@ def build_trimmed_index_db(
     dest_db_dir: Path,
     spec: SubsetSpec,
     gcs_root: str = GCS_ROOT,
+    src_index_db: Path | None = None,
 ) -> Path:
     """
     Create <dest_db_dir>/index.db containing only the selected datasets/months/obscodes.
     Uses <dest_db_dir>/index_full.db as the source.
     """
-    src = dest_db_dir / "index_full.db"
+    src = src_index_db if src_index_db is not None else (dest_db_dir / "index_full.db")
     if not src.exists():
         raise FileNotFoundError(f"Missing source index db: {src}")
 
     out = dest_db_dir / "index.db"
-    if out.exists():
-        out.unlink()
+    out_tmp = dest_db_dir / "index.trimmed.db"
+    if out_tmp.exists():
+        out_tmp.unlink()
 
     time_pred = _time_predicate_sql(spec.year_months, col="exposure_mjd_mid")
     dataset_list = ",".join("?" for _ in spec.dataset_ids)
-    obscode_list = ",".join("?" for _ in spec.obscodes)
+    use_obscode_filter = len(spec.obscodes) > 0
+    obscode_list = ",".join("?" for _ in spec.obscodes) if use_obscode_filter else ""
 
-    with sqlite3.connect(out) as conn:
+    with sqlite3.connect(out_tmp) as conn:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
 
@@ -181,30 +184,58 @@ def build_trimmed_index_db(
         )
 
         # Copy frames filtered by dataset, obscode, and month-range predicate.
-        conn.execute(
-            f"""
-            INSERT INTO frames (
-              id, dataset_id, obscode, exposure_id, filter,
-              exposure_mjd_start, exposure_mjd_mid, exposure_duration,
-              healpixel, data_uri, data_offset, data_length
+        if use_obscode_filter:
+            conn.execute(
+                f"""
+                INSERT INTO frames (
+                  id, dataset_id, obscode, exposure_id, filter,
+                  exposure_mjd_start, exposure_mjd_mid, exposure_duration,
+                  healpixel, data_uri, data_offset, data_length
+                )
+                SELECT
+                  id, dataset_id, obscode, exposure_id, filter,
+                  exposure_mjd_start, exposure_mjd_mid, exposure_duration,
+                  healpixel, data_uri, data_offset, data_length
+                FROM src.frames
+                WHERE dataset_id IN ({dataset_list})
+                  AND obscode IN ({obscode_list})
+                  AND {time_pred}
+                """,
+                tuple(spec.dataset_ids) + tuple(spec.obscodes),
             )
-            SELECT
-              id, dataset_id, obscode, exposure_id, filter,
-              exposure_mjd_start, exposure_mjd_mid, exposure_duration,
-              healpixel, data_uri, data_offset, data_length
-            FROM src.frames
-            WHERE dataset_id IN ({dataset_list})
-              AND obscode IN ({obscode_list})
-              AND {time_pred}
-            """,
-            tuple(spec.dataset_ids) + tuple(spec.obscodes),
-        )
+        else:
+            conn.execute(
+                f"""
+                INSERT INTO frames (
+                  id, dataset_id, obscode, exposure_id, filter,
+                  exposure_mjd_start, exposure_mjd_mid, exposure_duration,
+                  healpixel, data_uri, data_offset, data_length
+                )
+                SELECT
+                  id, dataset_id, obscode, exposure_id, filter,
+                  exposure_mjd_start, exposure_mjd_mid, exposure_duration,
+                  healpixel, data_uri, data_offset, data_length
+                FROM src.frames
+                WHERE dataset_id IN ({dataset_list})
+                  AND {time_pred}
+                """,
+                tuple(spec.dataset_ids),
+            )
 
         # Ensure no active transaction before DETACH/ANALYZE.
         conn.commit()
         conn.execute("DETACH DATABASE src")
         conn.execute("ANALYZE;")
 
+    # If we are overwriting an existing index.db (common when a full index was copied locally),
+    # preserve it as index_full.db for reproducibility.
+    if out.exists():
+        backup = dest_db_dir / "index_full.db"
+        if not backup.exists():
+            out.replace(backup)
+        else:
+            out.unlink()
+    out_tmp.replace(out)
     return out
 
 
@@ -221,7 +252,10 @@ def write_manifest(dest_db_dir: Path, spec: SubsetSpec) -> Path:
 
 
 def _parse_csv_list(arg: str) -> tuple[str, ...]:
-    items = [x.strip() for x in arg.split(",") if x.strip()]
+    a = str(arg).strip()
+    if a.lower() in {"all", "*"}:
+        return tuple()
+    items = [x.strip() for x in a.split(",") if x.strip()]
     if not items:
         raise ValueError(f"Empty list: {arg!r}")
     return tuple(items)
@@ -249,6 +283,19 @@ def main(argv: Iterable[str] | None = None) -> None:
         required=True,
         help="Comma-separated observatory codes to include (e.g., I41,T05,T08,W84,Q05).",
     )
+    parser.add_argument(
+        "--skip-download",
+        action="store_true",
+        help="Skip GCS download step and only (re)build a trimmed index.db in-place.",
+    )
+    parser.add_argument(
+        "--index-src",
+        default=None,
+        help=(
+            "Optional path to a source index sqlite DB. If omitted, defaults to <dest>/index_full.db. "
+            "When --skip-download is used, you typically want this to be <dest>/index.db (a full index)."
+        ),
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     dest = Path(args.dest).expanduser().resolve()
@@ -258,8 +305,12 @@ def main(argv: Iterable[str] | None = None) -> None:
         obscodes=_parse_csv_list(args.obscodes),
     )
 
-    download_partition_data(dest_db_dir=dest, spec=spec)
-    build_trimmed_index_db(dest_db_dir=dest, spec=spec)
+    if not bool(args.skip_download):
+        download_partition_data(dest_db_dir=dest, spec=spec)
+        src_index_db = None
+    else:
+        src_index_db = Path(args.index_src).expanduser().resolve() if args.index_src else (dest / "index.db")
+    build_trimmed_index_db(dest_db_dir=dest, spec=spec, src_index_db=src_index_db)
     write_manifest(dest, spec)
 
 
