@@ -18,13 +18,17 @@ from adam_core.orbits.ephemeris import Ephemeris
 from adam_core.orbits.variants import VariantEphemeris
 from adam_core.time import Timestamp
 
+from ..methods.footprint_geometry_artifacts import write_geometry_artifacts
 from ..methods.footprints import (
     SamplePerimeterPolygonFootprint,
+    corridor_path_lonlat_deg_from_samples,
     corridor_pixels_from_samples,
     disc_pixels_from_cov,
+    ellipse_boundary_vertices_lonlat_deg_from_cov,
     ellipse_polygon_pixels_from_cov,
     ellipse_polygon_pixels_from_cov_moc,
     mc_pixels_from_cov,
+    perimeter_polygon_from_samples,
     sample_pixels_direct,
     sample_perimeter_polygon_pixels_moc,
 )
@@ -629,6 +633,7 @@ def run_stage3_healpixel_bench(
     cov_mc_seed: int = 0,
     corridor_radius_arcsec: float = 30.0,
     corridor_step_arcsec: float = 30.0,
+    persist_geometry: bool = True,
     out_dir: Path | None = None,
     strategies: list[str] | None = None,
     only_truth: bool = False,
@@ -640,6 +645,7 @@ def run_stage3_healpixel_bench(
     Outputs:
       - metrics.parquet: runtime + row counts by (strategy, footprint)
       - coverage.parquet: truth healpixel coverage by (strategy, footprint)
+      - footprint_geometry/**: reusable footprint geometry artifacts (optional)
     """
     if out_dir is None:
         out_dir = subset_dir / "artifacts" / "stage3"
@@ -730,6 +736,9 @@ def run_stage3_healpixel_bench(
             n_errors = 0
             first_error: str | None = None
             selected_parts: list[pa.Table] = []
+            geom_rows: list[dict[str, object]] = []
+            geom_points: list[dict[str, object]] = []
+            seen_geom: set[tuple[str, int]] = set()
             meta = json.loads((strat_dir / "meta.json").read_text())
             n_orbits = int(meta["n_orbits"])
             chunk = int(meta.get("time_chunk_size", 1024))
@@ -836,6 +845,78 @@ def run_stage3_healpixel_bench(
                             pix_i = np.array([], dtype=np.int64)
                         pix_list.append(pix_i)
                         lens[i] = int(len(pix_i))
+
+                        if bool(persist_geometry):
+                            k = (str(orbit_id_arr[i]), int(target_idx[i]))
+                            if k not in seen_geom:
+                                seen_geom.add(k)
+                                geom_id = f"{k[0]}|{k[1]}"
+                                fp = str(footprint)
+                                if fp in {"cov_disc", "cov_mc"}:
+                                    geom_rows.append(
+                                        dict(
+                                            strategy=str(name),
+                                            variant_kind=None,
+                                            footprint=str(footprint),
+                                            orbit_id=str(k[0]),
+                                            target_idx=int(k[1]),
+                                            geometry_kind="ellipse_cov",
+                                            lon0_deg=float(lon[i]),
+                                            lat0_deg=float(lat[i]),
+                                            cov_ll_00=float(cov_ll[i][0, 0]),
+                                            cov_ll_01=float(cov_ll[i][0, 1]),
+                                            cov_ll_10=float(cov_ll[i][1, 0]),
+                                            cov_ll_11=float(cov_ll[i][1, 1]),
+                                            n_sigma=float(n_sigma),
+                                            polygon_vertices=None,
+                                            polygon_mode=None,
+                                            corridor_radius_arcsec=None,
+                                            corridor_step_arcsec=None,
+                                            buffer_arcsec=None,
+                                            geom_id=None,
+                                        )
+                                    )
+                                elif fp in {"cov_polygon", "cov_polygon_moc"}:
+                                    lonv, latv = ellipse_boundary_vertices_lonlat_deg_from_cov(
+                                        lon0_deg=float(lon[i]),
+                                        lat0_deg=float(lat[i]),
+                                        cov_ll_deg2=np.asarray(cov_ll[i], dtype=np.float64),
+                                        n_sigma=float(n_sigma),
+                                        num_vertices=int(polygon_vertices),
+                                    )
+                                    geom_rows.append(
+                                        dict(
+                                            strategy=str(name),
+                                            variant_kind=None,
+                                            footprint=str(footprint),
+                                            orbit_id=str(k[0]),
+                                            target_idx=int(k[1]),
+                                            geometry_kind="polygon_vertices",
+                                            lon0_deg=float(lon[i]),
+                                            lat0_deg=float(lat[i]),
+                                            cov_ll_00=float(cov_ll[i][0, 0]),
+                                            cov_ll_01=float(cov_ll[i][0, 1]),
+                                            cov_ll_10=float(cov_ll[i][1, 0]),
+                                            cov_ll_11=float(cov_ll[i][1, 1]),
+                                            n_sigma=float(n_sigma),
+                                            polygon_vertices=int(polygon_vertices),
+                                            polygon_mode=None,
+                                            corridor_radius_arcsec=None,
+                                            corridor_step_arcsec=None,
+                                            buffer_arcsec=0.0,
+                                            geom_id=str(geom_id),
+                                        )
+                                    )
+                                    for j in range(len(lonv)):
+                                        geom_points.append(
+                                            dict(
+                                                geom_id=str(geom_id),
+                                                kind="polygon_vertex",
+                                                idx=int(j),
+                                                lon_deg=float(lonv[j]),
+                                                lat_deg=float(latv[j]),
+                                            )
+                                        )
                     if int(np.sum(lens)) == 0:
                         continue
                     sum_pred_pixels += int(np.sum(lens))
@@ -899,6 +980,15 @@ def run_stage3_healpixel_bench(
                 _ensure_dir(keys_dir)
                 TruthObservations.from_pyarrow(sel_unique).to_parquet(
                     str(keys_dir / "selected_keys_unique.parquet")
+                )
+            if bool(compute_extra_frames) and bool(persist_geometry):
+                write_geometry_artifacts(
+                    run_dir=run_dir,
+                    strategy=str(name),
+                    variant_kind=None,
+                    footprint=str(footprint),
+                    geometry_rows=geom_rows,
+                    points_rows=geom_points,
                 )
             coverage_rows.append(
                 dict(
@@ -977,6 +1067,11 @@ def run_stage3_healpixel_bench(
             ]
 
             for footprint, polygon_mode in variant_footprints:
+                out_fp = (
+                    f"{footprint}:{polygon_mode}"
+                    if (footprint in {"sample_polygon", "sample_polygon_moc"} and polygon_mode is not None)
+                    else str(footprint)
+                )
                 t0 = time.perf_counter()
                 n_rows_total = 0
                 n_rows_used = 0
@@ -987,6 +1082,12 @@ def run_stage3_healpixel_bench(
                 n_errors = 0
                 first_error: str | None = None
                 selected_parts: list[pa.Table] = []
+                geom_rows: list[dict[str, object]] = []
+                geom_points: list[dict[str, object]] = []
+                seen_geom: set[tuple[str, int]] = set()
+                geom_rows: list[dict[str, object]] = []
+                geom_points: list[dict[str, object]] = []
+                seen_geom: set[tuple[str, int]] = set()
 
                 for pf in part_files:
                     ephem = VariantEphemeris.from_parquet(str(pf))
@@ -1049,6 +1150,76 @@ def run_stage3_healpixel_bench(
                                 lat0 = float(collapsed.coordinates.lat[0].as_py())
                                 cov6 = collapsed.coordinates.covariance.to_matrix()[0].astype(np.float64)
                                 cov_ll = cov6[1:3, 1:3]
+                                if bool(persist_geometry):
+                                    k = (str(oid), int(tidx))
+                                    if k not in seen_geom:
+                                        seen_geom.add(k)
+                                        geom_id = f"{k[0]}|{k[1]}"
+                                        if str(footprint) in {"cov_polygon_reconstructed", "cov_polygon_reconstructed_moc"}:
+                                            lonv, latv = ellipse_boundary_vertices_lonlat_deg_from_cov(
+                                                lon0_deg=float(lon0),
+                                                lat0_deg=float(lat0),
+                                                cov_ll_deg2=np.asarray(cov_ll, dtype=np.float64),
+                                                n_sigma=float(n_sigma),
+                                                num_vertices=int(polygon_vertices),
+                                            )
+                                            geom_rows.append(
+                                                dict(
+                                                    strategy=str(variant_root_name),
+                                                    variant_kind=str(variant_kind),
+                                                    footprint=str(out_fp),
+                                                    orbit_id=str(k[0]),
+                                                    target_idx=int(k[1]),
+                                                    geometry_kind="polygon_vertices",
+                                                    lon0_deg=float(lon0),
+                                                    lat0_deg=float(lat0),
+                                                    cov_ll_00=float(cov_ll[0, 0]),
+                                                    cov_ll_01=float(cov_ll[0, 1]),
+                                                    cov_ll_10=float(cov_ll[1, 0]),
+                                                    cov_ll_11=float(cov_ll[1, 1]),
+                                                    n_sigma=float(n_sigma),
+                                                    polygon_vertices=int(polygon_vertices),
+                                                    polygon_mode=None,
+                                                    corridor_radius_arcsec=None,
+                                                    corridor_step_arcsec=None,
+                                                    buffer_arcsec=0.0,
+                                                    geom_id=str(geom_id),
+                                                )
+                                            )
+                                            for j in range(len(lonv)):
+                                                geom_points.append(
+                                                    dict(
+                                                        geom_id=str(geom_id),
+                                                        kind="polygon_vertex",
+                                                        idx=int(j),
+                                                        lon_deg=float(lonv[j]),
+                                                        lat_deg=float(latv[j]),
+                                                    )
+                                                )
+                                        else:
+                                            geom_rows.append(
+                                                dict(
+                                                    strategy=str(variant_root_name),
+                                                    variant_kind=str(variant_kind),
+                                                    footprint=str(out_fp),
+                                                    orbit_id=str(k[0]),
+                                                    target_idx=int(k[1]),
+                                                    geometry_kind="ellipse_cov",
+                                                    lon0_deg=float(lon0),
+                                                    lat0_deg=float(lat0),
+                                                    cov_ll_00=float(cov_ll[0, 0]),
+                                                    cov_ll_01=float(cov_ll[0, 1]),
+                                                    cov_ll_10=float(cov_ll[1, 0]),
+                                                    cov_ll_11=float(cov_ll[1, 1]),
+                                                    n_sigma=float(n_sigma),
+                                                    polygon_vertices=None,
+                                                    polygon_mode=None,
+                                                    corridor_radius_arcsec=None,
+                                                    corridor_step_arcsec=None,
+                                                    buffer_arcsec=None,
+                                                    geom_id=None,
+                                                )
+                                            )
                                 if footprint.endswith("_reconstructed_moc"):
                                     base = footprint.replace("_reconstructed_moc", "_moc")
                                 else:
@@ -1073,6 +1244,92 @@ def run_stage3_healpixel_bench(
                                 pix = np.array([], dtype=np.int64)
                         else:
                             try:
+                                if bool(persist_geometry):
+                                    k = (str(oid), int(tidx))
+                                    if k not in seen_geom:
+                                        seen_geom.add(k)
+                                        geom_id = f"{k[0]}|{k[1]}"
+                                        if str(footprint) in {"sample_polygon", "sample_polygon_moc"}:
+                                            poly = perimeter_polygon_from_samples(
+                                                lon0_deg=float(lon_g[0]),
+                                                lat0_deg=float(lat_g[0]),
+                                                lon_deg=lon_g.astype(np.float64, copy=False),
+                                                lat_deg=lat_g.astype(np.float64, copy=False),
+                                                mode=("convex_hull" if polygon_mode == "convex_hull" else "angle_sort"),
+                                            )
+                                            geom_rows.append(
+                                                dict(
+                                                    strategy=str(variant_root_name),
+                                                    variant_kind=str(variant_kind),
+                                                    footprint=str(out_fp),
+                                                    orbit_id=str(k[0]),
+                                                    target_idx=int(k[1]),
+                                                    geometry_kind="polygon_vertices",
+                                                    lon0_deg=float(lon_g[0]),
+                                                    lat0_deg=float(lat_g[0]),
+                                                    cov_ll_00=None,
+                                                    cov_ll_01=None,
+                                                    cov_ll_10=None,
+                                                    cov_ll_11=None,
+                                                    n_sigma=None,
+                                                    polygon_vertices=int(len(poly)),
+                                                    polygon_mode=str(polygon_mode),
+                                                    corridor_radius_arcsec=None,
+                                                    corridor_step_arcsec=None,
+                                                    buffer_arcsec=0.0,
+                                                    geom_id=str(geom_id),
+                                                )
+                                            )
+                                            for j in range(len(poly)):
+                                                geom_points.append(
+                                                    dict(
+                                                        geom_id=str(geom_id),
+                                                        kind="polygon_vertex",
+                                                        idx=int(j),
+                                                        lon_deg=float(poly[j, 0]),
+                                                        lat_deg=float(poly[j, 1]),
+                                                    )
+                                                )
+                                        elif str(footprint) == "sample_corridor":
+                                            lonp, latp = corridor_path_lonlat_deg_from_samples(
+                                                lon0_deg=float(lon_g[0]),
+                                                lat0_deg=float(lat_g[0]),
+                                                lon_deg=lon_g.astype(np.float64, copy=False),
+                                                lat_deg=lat_g.astype(np.float64, copy=False),
+                                            )
+                                            geom_rows.append(
+                                                dict(
+                                                    strategy=str(variant_root_name),
+                                                    variant_kind=str(variant_kind),
+                                                    footprint=str(out_fp),
+                                                    orbit_id=str(k[0]),
+                                                    target_idx=int(k[1]),
+                                                    geometry_kind="corridor_polyline",
+                                                    lon0_deg=float(lon_g[0]),
+                                                    lat0_deg=float(lat_g[0]),
+                                                    cov_ll_00=None,
+                                                    cov_ll_01=None,
+                                                    cov_ll_10=None,
+                                                    cov_ll_11=None,
+                                                    n_sigma=None,
+                                                    polygon_vertices=None,
+                                                    polygon_mode=None,
+                                                    corridor_radius_arcsec=float(corridor_radius_arcsec),
+                                                    corridor_step_arcsec=float(corridor_step_arcsec),
+                                                    buffer_arcsec=None,
+                                                    geom_id=str(geom_id),
+                                                )
+                                            )
+                                            for j in range(len(lonp)):
+                                                geom_points.append(
+                                                    dict(
+                                                        geom_id=str(geom_id),
+                                                        kind="corridor_path",
+                                                        idx=int(j),
+                                                        lon_deg=float(lonp[j]),
+                                                        lat_deg=float(latp[j]),
+                                                    )
+                                                )
                                 pix = _predicted_pixels_from_samples(
                                     lon_deg=lon_g,
                                     lat_deg=lat_g,
@@ -1121,11 +1378,6 @@ def run_stage3_healpixel_bench(
                         selected_parts.append(selected.select(["orbit_id", "target_idx", "healpixel"]))
 
                 dt = time.perf_counter() - t0
-                out_fp = (
-                    f"{footprint}:{polygon_mode}"
-                    if (footprint in {"sample_polygon", "sample_polygon_moc"} and polygon_mode is not None)
-                    else footprint
-                )
                 metrics_rows.append(
                     dict(
                         stage2_run_dir=str(stage2_run_dir),
@@ -1163,6 +1415,25 @@ def run_stage3_healpixel_bench(
                     _ensure_dir(keys_dir)
                     TruthObservations.from_pyarrow(sel_unique).to_parquet(
                         str(keys_dir / "selected_keys_unique.parquet")
+                    )
+                if bool(compute_extra_frames) and bool(persist_geometry):
+                    write_geometry_artifacts(
+                        run_dir=run_dir,
+                        strategy=str(variant_root_name),
+                        variant_kind=str(variant_kind),
+                        footprint=str(out_fp),
+                        geometry_rows=geom_rows,
+                        points_rows=geom_points,
+                    )
+                if bool(compute_extra_frames) and bool(persist_geometry):
+                    strat_key = str(variant_root_name) if variant_kind is None else f"{variant_root_name}:{variant_kind}"
+                    write_geometry_artifacts(
+                        run_dir=run_dir,
+                        strategy=strat_key if ":" not in strat_key else str(variant_root_name),
+                        variant_kind=str(variant_kind),
+                        footprint=str(out_fp),
+                        geometry_rows=geom_rows,
+                        points_rows=geom_points,
                     )
                 coverage_rows.append(
                     dict(
@@ -1239,8 +1510,18 @@ def main() -> None:
     )
     p.add_argument(
         "--compute-extra-frames",
-        action="store_true",
-        help="Compute extra-frames metrics by materializing and de-duplicating selected frame keys.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Compute extra-frames metrics by materializing and de-duplicating selected frame keys "
+            "(default: enabled)."
+        ),
+    )
+    p.add_argument(
+        "--persist-geometry",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Persist footprint geometry artifacts for Stage 4 reuse (default: enabled).",
     )
     args = p.parse_args()
 
@@ -1259,6 +1540,7 @@ def main() -> None:
         strategies=strategies,
         only_truth=bool(args.only_truth),
         compute_extra_frames=bool(args.compute_extra_frames),
+        persist_geometry=bool(args.persist_geometry),
     )
     print(f"run_dir={run_dir}")
     print(f"metrics_parquet={run_dir / 'metrics.parquet'}")

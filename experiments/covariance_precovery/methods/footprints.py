@@ -99,6 +99,29 @@ def _ellipse_boundary_lonlat_deg_from_cov(
     return lon_poly, lat_poly
 
 
+def ellipse_boundary_vertices_lonlat_deg_from_cov(
+    *,
+    lon0_deg: float,
+    lat0_deg: float,
+    cov_ll_deg2: np.ndarray,
+    n_sigma: float,
+    num_vertices: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Public wrapper: N-sigma ellipse boundary vertices as (lon,lat) deg arrays.
+
+    This is a geometry primitive that can be persisted and reused across Stage 3/4
+    to avoid reconstructing footprints twice.
+    """
+    return _ellipse_boundary_lonlat_deg_from_cov(
+        lon0_deg=float(lon0_deg),
+        lat0_deg=float(lat0_deg),
+        cov_ll_deg2=np.asarray(cov_ll_deg2, dtype=np.float64),
+        n_sigma=float(n_sigma),
+        num_vertices=int(num_vertices),
+    )
+
+
 def _major_axis_sigma_deg(cov_xy_deg2: np.ndarray) -> float:
     cov_xy_deg2 = 0.5 * (cov_xy_deg2 + cov_xy_deg2.T)
     w = np.linalg.eigvalsh(cov_xy_deg2)
@@ -485,6 +508,36 @@ def perimeter_polygon_from_samples(
     return np.stack([lon_poly, lat_poly], axis=1)
 
 
+def corridor_path_lonlat_deg_from_samples(
+    *,
+    lon0_deg: float,
+    lat0_deg: float,
+    lon_deg: np.ndarray,
+    lat_deg: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Construct an ordered polyline (lon_path, lat_path) from unordered sample points.
+
+    Current heuristic (same as corridor rasterization):
+      - project to tangent plane
+      - order by first principal component (PCA via SVD)
+    """
+    lon_deg = np.asarray(lon_deg, dtype=np.float64)
+    lat_deg = np.asarray(lat_deg, dtype=np.float64)
+    if lon_deg.size == 0:
+        return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
+    if lon_deg.size == 1:
+        return lon_deg.astype(np.float64, copy=False), lat_deg.astype(np.float64, copy=False)
+
+    x, y = _tangent_xy_deg(lon_deg, lat_deg, float(lon0_deg), float(lat0_deg))
+    pts = np.stack([x, y], axis=1)
+    pts0 = pts - np.mean(pts, axis=0, keepdims=True)
+    _, _, vt = np.linalg.svd(pts0, full_matrices=False)
+    u = pts0 @ vt[0].T
+    order = np.argsort(u)
+    return lon_deg[order], lat_deg[order]
+
+
 def sample_perimeter_polygon_pixels_moc(
     *,
     lon0_deg: float,
@@ -540,18 +593,14 @@ def corridor_pixels_from_samples(
       - use that ordered polyline as the centerline
       - union query_disc along the polyline with radius
     """
-    x, y = _tangent_xy_deg(lon_deg, lat_deg, lon0_deg, lat0_deg)
-    pts = np.stack([x, y], axis=1)
-    if len(pts) == 0:
+    lon_s, lat_s = corridor_path_lonlat_deg_from_samples(
+        lon0_deg=float(lon0_deg),
+        lat0_deg=float(lat0_deg),
+        lon_deg=np.asarray(lon_deg, dtype=np.float64),
+        lat_deg=np.asarray(lat_deg, dtype=np.float64),
+    )
+    if lon_s.size == 0:
         return np.array([], dtype=np.int64)
-
-    # PCA via SVD.
-    pts0 = pts - np.mean(pts, axis=0, keepdims=True)
-    _, _, vt = np.linalg.svd(pts0, full_matrices=False)
-    u = pts0 @ vt[0].T
-    order = np.argsort(u)
-    lon_s = lon_deg[order]
-    lat_s = lat_deg[order]
 
     r_rad = np.deg2rad(float(radius_arcsec) / 3600.0)
     max_step_rad = np.deg2rad(float(step_arcsec) / 3600.0)
@@ -748,6 +797,79 @@ class SamplePerimeterPolygonFootprint:
             return inside
 
         # Buffer: accept points within buffer distance of any edge.
+        r2 = (float(self.buffer_arcsec) / 3600.0) ** 2
+        return inside | (min_d2 <= r2)
+
+
+@dataclass(frozen=True)
+class FixedPolygonFootprint:
+    """
+    Footprint defined by explicit polygon vertices (lon/lat degrees).
+
+    This is used when we persist polygon vertices in Stage 3 and want to reuse them in Stage 4
+    without re-running the sample->polygon construction.
+    """
+
+    lon0_deg: float
+    lat0_deg: float
+    vertex_lon_deg: np.ndarray
+    vertex_lat_deg: np.ndarray
+    buffer_arcsec: float = 0.0
+
+    def pixels(self, nside: int) -> np.ndarray:
+        # Prefer robust MOC rasterization for arbitrary polygons.
+        return _moc_pixels_from_polygon(
+            lon_deg=np.asarray(self.vertex_lon_deg, dtype=np.float64),
+            lat_deg=np.asarray(self.vertex_lat_deg, dtype=np.float64),
+            nside=int(nside),
+            include_center_disc=True,
+            lon0_deg=float(self.lon0_deg),
+            lat0_deg=float(self.lat0_deg),
+        )
+
+    def contains(self, lon_deg: np.ndarray, lat_deg: np.ndarray) -> np.ndarray:
+        # Point-in-polygon in tangent plane; optional buffer by distance-to-edges.
+        poly = np.stack(
+            [np.asarray(self.vertex_lon_deg, dtype=np.float64), np.asarray(self.vertex_lat_deg, dtype=np.float64)],
+            axis=1,
+        )
+        if poly.shape[0] < 3:
+            return np.zeros(len(lon_deg), dtype=bool)
+
+        px, py = _tangent_xy_deg(poly[:, 0], poly[:, 1], float(self.lon0_deg), float(self.lat0_deg))
+        x, y = _tangent_xy_deg(np.asarray(lon_deg, dtype=np.float64), np.asarray(lat_deg, dtype=np.float64), float(self.lon0_deg), float(self.lat0_deg))
+
+        inside = np.zeros(len(x), dtype=bool)
+        j = len(px) - 1
+        for i in range(len(px)):
+            xi, yi = px[i], py[i]
+            xj, yj = px[j], py[j]
+            cond = ((yi > y) != (yj > y)) & (
+                x < (xj - xi) * (y - yi) / (yj - yi + 1e-30) + xi
+            )
+            inside ^= cond
+            j = i
+
+        # Boundary tolerance.
+        eps2 = 1e-24
+        min_d2 = np.full(len(x), np.inf, dtype=np.float64)
+        for i in range(len(px)):
+            ax, ay = px[i], py[i]
+            bx, by = px[(i + 1) % len(px)], py[(i + 1) % len(py)]
+            vx, vy = bx - ax, by - ay
+            denom = vx * vx + vy * vy
+            if denom <= 0:
+                continue
+            t = ((x - ax) * vx + (y - ay) * vy) / denom
+            t = np.clip(t, 0.0, 1.0)
+            qx = ax + t * vx
+            qy = ay + t * vy
+            d2 = (x - qx) ** 2 + (y - qy) ** 2
+            min_d2 = np.minimum(min_d2, d2)
+        inside = inside | (min_d2 <= eps2)
+
+        if float(self.buffer_arcsec) <= 0:
+            return inside
         r2 = (float(self.buffer_arcsec) / 3600.0) ** 2
         return inside | (min_d2 <= r2)
 
