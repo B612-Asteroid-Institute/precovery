@@ -1210,6 +1210,15 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Stage 3: atomic healpixel intersection runner (consumes Stage 2 ephemerides).")
     p.add_argument("--subset-dir", type=str, required=True)
     p.add_argument("--stage2-run-dir", type=str, required=True)
+    p.add_argument(
+        "--out-dir",
+        type=str,
+        default=None,
+        help=(
+            "Output root directory (default: <subset_dir>/artifacts/stage3). "
+            "Run directory will be <out_dir>/<stage2_run_dir.name>."
+        ),
+    )
     p.add_argument("--healpix-nside", type=int, required=True)
     p.add_argument("--n-sigma", type=float, default=3.0)
     p.add_argument("--polygon-vertices", type=int, default=32)
@@ -1239,6 +1248,7 @@ def main() -> None:
     run_dir = run_stage3_healpixel_bench(
         subset_dir=Path(args.subset_dir),
         stage2_run_dir=Path(args.stage2_run_dir),
+        out_dir=None if args.out_dir is None else Path(args.out_dir),
         healpix_nside=int(args.healpix_nside),
         n_sigma=float(args.n_sigma),
         polygon_vertices=int(args.polygon_vertices),

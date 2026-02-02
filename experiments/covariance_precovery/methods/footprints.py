@@ -131,9 +131,27 @@ def _is_convex_spherical_polygon(verts: np.ndarray) -> bool:
     if not np.isfinite(dot).all():
         return False
     # Reject only *truly* near-duplicate vertices. For small footprints the edges can be
-    # very short (dot extremely close to 1) and that is still a valid polygon.
-    if np.any(dot > (1.0 - 1e-15)):
+    # very short, but `healpy.query_polygon` can hard-abort on nearly-degenerate corners.
+    # Be conservative here: if adjacent vertices are extremely close, treat as invalid.
+    if np.any(dot > (1.0 - 1e-12)):
         return False
+
+    # Reject degenerate corners: adjacent edges lie on (nearly) the same great-circle plane.
+    # This prevents `healpy.query_polygon` from aborting with "degenerate corner".
+    for i in range(v.shape[0]):
+        a = v[(i - 1) % v.shape[0]]
+        b = v[i]
+        c = v[(i + 1) % v.shape[0]]
+        n1 = np.cross(a, b)
+        n2 = np.cross(b, c)
+        nn1 = float(np.linalg.norm(n1))
+        nn2 = float(np.linalg.norm(n2))
+        if (not np.isfinite(nn1)) or (not np.isfinite(nn2)) or nn1 < 1e-12 or nn2 < 1e-12:
+            return False
+        n1 = n1 / nn1
+        n2 = n2 / nn2
+        if abs(float(np.dot(n1, n2))) > (1.0 - 1e-12):
+            return False
 
     # Conservative convexity test on the sphere:
     # For each edge, all vertices must lie strictly on the same side of the great-circle plane.
