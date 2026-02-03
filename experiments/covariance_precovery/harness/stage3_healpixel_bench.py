@@ -20,12 +20,10 @@ from adam_core.time import Timestamp
 
 from ..methods.footprint_geometry_artifacts import write_geometry_artifacts
 from ..methods.footprints import (
-    SamplePerimeterPolygonFootprint,
     corridor_path_lonlat_deg_from_samples,
     corridor_pixels_from_samples,
     disc_pixels_from_cov,
     ellipse_boundary_vertices_lonlat_deg_from_cov,
-    ellipse_polygon_pixels_from_cov,
     ellipse_polygon_pixels_from_cov_moc,
     mc_pixels_from_cov,
     perimeter_polygon_from_samples,
@@ -161,7 +159,7 @@ def _read_frames_pixels_table(
     targets: pa.Table,
 ) -> pa.Table:
     """
-    Return distinct (target_idx, healpixel) for the subset window.
+    Return distinct (target_idx, healpixel) for the Stage 2 target set.
 
     This is the vectorized join key-space Stage 3 uses (no python dict lookups).
     """
@@ -169,28 +167,51 @@ def _read_frames_pixels_table(
     if not index_db.exists():
         raise FileNotFoundError(f"Missing subset index.db: {index_db}")
 
-    # Query only obscodes and MJD range present in targets (the index is already trimmed).
-    codes = sorted({str(x) for x in pc.unique(targets["obscode"]).to_pylist()})
-    if not codes:
+    n_targets = int(targets.num_rows)
+    if n_targets == 0:
         return FramesPixels.empty().table
-    q_marks = ",".join(["?"] * len(codes))
-    mjd = pc.cast(targets["exposure_mjd_mid"], pa.float64()).to_numpy(zero_copy_only=False)
-    q0 = float(np.min(mjd)) - 1e-9
-    q1 = float(np.max(mjd)) + 1e-9
 
+    # Stage 3 should *always* be restricted to the Stage 2 target set.
+    # We implement this as an exact join (targets JOIN frames) so we never
+    # accidentally scan extra frames outside the Stage 2 workload.
     import sqlite3
+
+    codes = targets["obscode"].to_pylist()
+    mjd = pc.cast(targets["exposure_mjd_mid"], pa.float64()).to_numpy(zero_copy_only=False)
+    tidx = pc.cast(targets["target_idx"], pa.int64()).to_numpy(zero_copy_only=False)
 
     conn = sqlite3.connect(str(index_db))
     try:
+        conn.execute(
+            "CREATE TEMP TABLE stage3_targets (obscode TEXT, exposure_mjd_mid REAL, target_idx INTEGER)"
+        )
+        # Batch inserts to avoid huge single executemany payloads on large target sets.
+        batch = 100000
+        n = int(len(codes))
+        for i0 in range(0, n, batch):
+            i1 = min(i0 + batch, n)
+            conn.executemany(
+                "INSERT INTO stage3_targets (obscode, exposure_mjd_mid, target_idx) VALUES (?, ?, ?)",
+                [
+                    (str(o), float(m), int(i))
+                    for o, m, i in zip(
+                        codes[i0:i1],
+                        mjd[i0:i1].tolist(),
+                        tidx[i0:i1].tolist(),
+                    )
+                ],
+            )
+        conn.execute(
+            "CREATE INDEX stage3_targets_idx ON stage3_targets (obscode, exposure_mjd_mid)"
+        )
         rows = conn.execute(
-            f"""
-            SELECT obscode, exposure_mjd_mid, healpixel
-            FROM frames
-            WHERE obscode IN ({q_marks})
-              AND exposure_mjd_mid >= ?
-              AND exposure_mjd_mid <= ?
-            """,
-            (*codes, float(q0), float(q1)),
+            """
+            SELECT t.target_idx, f.healpixel
+            FROM frames f
+            INNER JOIN stage3_targets t
+              ON f.obscode = t.obscode
+             AND f.exposure_mjd_mid = t.exposure_mjd_mid
+            """
         ).fetchall()
     finally:
         conn.close()
@@ -198,18 +219,12 @@ def _read_frames_pixels_table(
     if not rows:
         return FramesPixels.empty().table
 
-    obsc = pa.array([r[0] for r in rows], type=pa.large_string())
-    mjd_mid = pa.array([float(r[1]) for r in rows], type=pa.float64())
-    hpix = pa.array([int(r[2]) for r in rows], type=pa.int64())
-    frames = pa.table({"obscode": obsc, "exposure_mjd_mid": mjd_mid, "healpixel": hpix})
-
-    # Join frames -> targets to map exposure_mjd_mid to target_idx.
-    joined = frames.join(
-        targets.select(["obscode", "exposure_mjd_mid", "target_idx"]),
-        keys=["obscode", "exposure_mjd_mid"],
-        join_type="inner",
-    )
-    out = joined.select(["target_idx", "healpixel"]).combine_chunks()
+    out = pa.table(
+        {
+            "target_idx": pa.array([int(r[0]) for r in rows], pa.int64()),
+            "healpixel": pa.array([int(r[1]) for r in rows], pa.int64()),
+        }
+    ).combine_chunks()
     qt = FramesPixels.from_pyarrow(out).drop_duplicates(subset=["target_idx", "healpixel"])
     return qt.table
 
@@ -455,8 +470,6 @@ def _predicted_pixels_from_mean_row(
         return np.unique(np.asarray([hp.ang2pix(int(nside), float(lon_deg), float(lat_deg), lonlat=True, nest=True)], dtype=np.int64))
     if footprint == "cov_disc":
         return disc_pixels_from_cov(lon0_deg=float(lon_deg), lat0_deg=float(lat_deg), cov_ll_deg2=cov_ll_deg2, nside=int(nside), n_sigma=float(n_sigma))
-    if footprint == "cov_polygon":
-        return ellipse_polygon_pixels_from_cov(lon0_deg=float(lon_deg), lat0_deg=float(lat_deg), cov_ll_deg2=cov_ll_deg2, nside=int(nside), n_sigma=float(n_sigma), num_vertices=int(polygon_vertices))
     if footprint == "cov_polygon_moc":
         return ellipse_polygon_pixels_from_cov_moc(
             lon0_deg=float(lon_deg),
@@ -485,18 +498,6 @@ def _predicted_pixels_from_samples(
         return np.array([], dtype=np.int64)
     if footprint == "sample_direct":
         return sample_pixels_direct(lon_deg=lon_deg, lat_deg=lat_deg, nside=int(nside))
-    if footprint == "sample_polygon":
-        lon0 = float(lon_deg[0])
-        lat0 = float(lat_deg[0])
-        fp = SamplePerimeterPolygonFootprint(
-            lon0_deg=lon0,
-            lat0_deg=lat0,
-            sample_lon_deg=lon_deg.astype(np.float64),
-            sample_lat_deg=lat_deg.astype(np.float64),
-            polygon_mode=("angle_sort" if str(polygon_mode) == "angle_sort" else "convex_hull"),
-            buffer_arcsec=0.0,
-        )
-        return fp.pixels(int(nside))
     if footprint == "sample_polygon_moc":
         return sample_perimeter_polygon_pixels_moc(
             lon0_deg=float(lon_deg[0]),
@@ -711,9 +712,16 @@ def run_stage3_healpixel_bench(
         except Exception:  # noqa: BLE001
             has_cov = False
 
-        active_footprints = ["point"] + ([] if not has_cov else ["cov_disc", "cov_polygon", "cov_mc"])
-        if has_cov:
-            active_footprints.append("cov_polygon_moc")
+        # NOTE: We intentionally avoid the non-MOC polygon rasterizers (`cov_polygon`) here.
+        #
+        # We previously evaluated both `cov_polygon` and `cov_polygon_moc`. In practice,
+        # `healpy.query_polygon` is extremely sensitive to convexity/degeneracy and can
+        # hard-abort in C++; even with our Python prechecks, it produced high error rates
+        # (e.g. in truth-only runs over subset_2019-08_*).
+        #
+        # The MOC-named variants (`*_moc`) implement polygon membership/rasterization in a
+        # more robust way and are the recommended default for coverage/recall evaluation.
+        active_footprints = ["point"] + ([] if not has_cov else ["cov_disc", "cov_mc", "cov_polygon_moc"])
         if not active_footprints:
             return
 
@@ -861,7 +869,7 @@ def run_stage3_healpixel_bench(
                                             geom_id=None,
                                         )
                                     )
-                                elif fp in {"cov_polygon", "cov_polygon_moc"}:
+                                elif fp in {"cov_polygon_moc"}:
                                     lonv, latv = ellipse_boundary_vertices_lonlat_deg_from_cov(
                                         lon0_deg=float(lon[i]),
                                         lat0_deg=float(lat[i]),
@@ -1034,15 +1042,22 @@ def run_stage3_healpixel_bench(
             )
         )
 
+        # NOTE: We intentionally avoid the non-MOC sample-perimeter and covariance-polygon
+        # rasterizers (`sample_polygon:*` and `cov_polygon_reconstructed`) here.
+        #
+        # They were evaluated early on, but in real subsets they frequently fail convexity
+        # prechecks (and historically could hard-crash healpy in C++). This was especially
+        # apparent for sigma-point variant clouds (13-point stencils), where a “perimeter”
+        # is not a meaningful uncertainty envelope.
+        #
+        # Keep the MOC variants + corridor/direct pixels + reconstructed covariance methods,
+        # which are robust and sufficient for recovery-rate comparisons.
         variant_footprints = [
             ("sample_direct", None),
-            ("sample_polygon", "angle_sort"),
-            ("sample_polygon", "convex_hull"),
             ("sample_polygon_moc", "angle_sort"),
             ("sample_polygon_moc", "convex_hull"),
             ("sample_corridor", None),
             ("cov_disc_reconstructed", None),
-            ("cov_polygon_reconstructed", None),
             ("cov_polygon_reconstructed_moc", None),
             ("cov_mc_reconstructed", None),
         ]
@@ -1050,7 +1065,7 @@ def run_stage3_healpixel_bench(
         for footprint, polygon_mode in variant_footprints:
             out_fp = (
                 f"{footprint}:{polygon_mode}"
-                if (footprint in {"sample_polygon", "sample_polygon_moc"} and polygon_mode is not None)
+                if (footprint in {"sample_polygon_moc"} and polygon_mode is not None)
                 else str(footprint)
             )
             t0 = time.perf_counter()
@@ -1127,7 +1142,7 @@ def run_stage3_healpixel_bench(
                                 if k not in seen_geom:
                                     seen_geom.add(k)
                                     geom_id = f"{k[0]}|{k[1]}"
-                                    if str(footprint) in {"cov_polygon_reconstructed", "cov_polygon_reconstructed_moc"}:
+                                    if str(footprint) in {"cov_polygon_reconstructed_moc"}:
                                         lonv, latv = ellipse_boundary_vertices_lonlat_deg_from_cov(
                                             lon0_deg=float(lon0),
                                             lat0_deg=float(lat0),
@@ -1221,7 +1236,7 @@ def run_stage3_healpixel_bench(
                                 if k not in seen_geom:
                                     seen_geom.add(k)
                                     geom_id = f"{k[0]}|{k[1]}"
-                                    if str(footprint) in {"sample_polygon", "sample_polygon_moc"}:
+                                    if str(footprint) in {"sample_polygon_moc"}:
                                         poly = perimeter_polygon_from_samples(
                                             lon0_deg=float(lon_g[0]),
                                             lat0_deg=float(lat_g[0]),

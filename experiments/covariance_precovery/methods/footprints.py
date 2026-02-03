@@ -129,87 +129,6 @@ def _major_axis_sigma_deg(cov_xy_deg2: np.ndarray) -> float:
     return float(np.sqrt(max(lam_max, 0.0)))
 
 
-def _is_convex_spherical_polygon(verts: np.ndarray) -> bool:
-    """
-    Best-effort convexity check for a spherical polygon given as unit vectors (N,3).
-
-    This exists because `healpy.query_polygon` can hard-error/abort when the polygon is not convex.
-    We prefer to raise a Python exception *before* calling into healpy so callers can record errors.
-    """
-    v = np.asarray(verts, dtype=np.float64)
-    if v.ndim != 2 or v.shape[1] != 3 or v.shape[0] < 3:
-        return False
-
-    # Reject non-unit / non-finite inputs.
-    nrm = np.linalg.norm(v, axis=1)
-    if not np.isfinite(nrm).all():
-        return False
-    if np.any(nrm <= 0.0):
-        return False
-    v = v / nrm[:, None]
-
-    # Reject degenerate edges (duplicate/near-duplicate consecutive vertices).
-    v_next = np.roll(v, -1, axis=0)
-    dot = np.sum(v * v_next, axis=1)
-    if not np.isfinite(dot).all():
-        return False
-    # Reject only *truly* near-duplicate vertices. For small footprints the edges can be
-    # very short, but `healpy.query_polygon` can hard-abort on nearly-degenerate corners.
-    # Be conservative here: if adjacent vertices are extremely close, treat as invalid.
-    if np.any(dot > (1.0 - 1e-12)):
-        return False
-
-    # Reject degenerate corners: adjacent edges lie on (nearly) the same great-circle plane.
-    # This prevents `healpy.query_polygon` from aborting with "degenerate corner".
-    for i in range(v.shape[0]):
-        a = v[(i - 1) % v.shape[0]]
-        b = v[i]
-        c = v[(i + 1) % v.shape[0]]
-        n1 = np.cross(a, b)
-        n2 = np.cross(b, c)
-        nn1 = float(np.linalg.norm(n1))
-        nn2 = float(np.linalg.norm(n2))
-        if (not np.isfinite(nn1)) or (not np.isfinite(nn2)) or nn1 < 1e-12 or nn2 < 1e-12:
-            return False
-        n1 = n1 / nn1
-        n2 = n2 / nn2
-        if abs(float(np.dot(n1, n2))) > (1.0 - 1e-12):
-            return False
-
-    # Conservative convexity test on the sphere:
-    # For each edge, all vertices must lie strictly on the same side of the great-circle plane.
-    # This is O(N^2) but N is small (<=64).
-    eps = 1e-10
-    for i in range(v.shape[0]):
-        a = v[i]
-        b = v[(i + 1) % v.shape[0]]
-        n = np.cross(a, b)
-        nn = float(np.linalg.norm(n))
-        if not np.isfinite(nn) or nn < 1e-12:
-            return False
-        n = n / nn
-
-        s = v @ n  # signed distance to edge plane
-        if not np.isfinite(s).all():
-            return False
-
-        # Exclude the endpoints themselves from the strict test.
-        s = s.copy()
-        s[i] = 0.0
-        s[(i + 1) % v.shape[0]] = 0.0
-
-        pos = np.any(s > eps)
-        neg = np.any(s < -eps)
-        if pos and neg:
-            return False
-
-        # If everything is ~0, polygon is degenerate (colinear on great circle).
-        if (not pos) and (not neg):
-            return False
-
-    return True
-
-
 def _healpix_order_from_nside(nside: int) -> int:
     """
     MOC/HEALPix "order" is log2(nside) and requires power-of-two nside.
@@ -310,39 +229,6 @@ def disc_pixels_from_cov(
     return np.unique(np.asarray(pix, dtype=np.int64))
 
 
-def ellipse_polygon_pixels_from_cov(
-    *,
-    lon0_deg: float,
-    lat0_deg: float,
-    cov_ll_deg2: np.ndarray,
-    nside: int,
-    n_sigma: float = 3.0,
-    num_vertices: int = 32,
-) -> np.ndarray:
-    """
-    Approximate N-sigma ellipse boundary in tangent plane and rasterize via `query_polygon`.
-    """
-    lon_poly, lat_poly = _ellipse_boundary_lonlat_deg_from_cov(
-        lon0_deg=float(lon0_deg),
-        lat0_deg=float(lat0_deg),
-        cov_ll_deg2=cov_ll_deg2,
-        n_sigma=float(n_sigma),
-        num_vertices=int(num_vertices),
-    )
-    verts = hp.ang2vec(lon_poly, lat_poly, lonlat=True)
-    if not _is_convex_spherical_polygon(verts):
-        raise ValueError("ellipse polygon is not convex (precheck)")
-    pix = hp.query_polygon(nside, verts, inclusive=True, nest=True)
-    pix_set = set(np.asarray(pix, dtype=np.int64).tolist())
-
-    # Safety margin for discretization.
-    center_vec = hp.ang2vec(float(lon0_deg), float(lat0_deg), lonlat=True)
-    pix_set.update(
-        hp.query_disc(nside, center_vec, float(hp.max_pixrad(nside)), inclusive=True, nest=True).tolist()
-    )
-    return np.unique(np.fromiter(pix_set, dtype=np.int64))
-
-
 def ellipse_polygon_pixels_from_cov_moc(
     *,
     lon0_deg: float,
@@ -354,9 +240,6 @@ def ellipse_polygon_pixels_from_cov_moc(
 ) -> np.ndarray:
     """
     Approximate N-sigma ellipse boundary in tangent plane and rasterize with mocpy (MOC).
-
-    This is intended as a more robust alternative to `ellipse_polygon_pixels_from_cov`
-    for benchmarking/experiments.
     """
     lon_poly, lat_poly = _ellipse_boundary_lonlat_deg_from_cov(
         lon0_deg=float(lon0_deg),
@@ -688,7 +571,8 @@ class EllipseFootprint:
                 nside=nside,
                 n_sigma=self.n_sigma,
             )
-        return ellipse_polygon_pixels_from_cov(
+        # Use the MOC rasterizer for robust polygon pixels.
+        return ellipse_polygon_pixels_from_cov_moc(
             lon0_deg=self.lon0_deg,
             lat0_deg=self.lat0_deg,
             cov_ll_deg2=self.cov_ll_deg2,
@@ -709,96 +593,6 @@ class EllipseFootprint:
         d = np.stack([x, y], axis=1)
         chi2 = np.einsum("ni,ij,nj->n", d, inv, d)
         return chi2 <= float(self.n_sigma) ** 2
-
-
-@dataclass(frozen=True)
-class SamplePerimeterPolygonFootprint:
-    lon0_deg: float
-    lat0_deg: float
-    sample_lon_deg: np.ndarray
-    sample_lat_deg: np.ndarray
-    polygon_mode: Literal["angle_sort", "convex_hull"] = "convex_hull"
-    buffer_arcsec: float = 0.0
-
-    def _poly_vertices(self) -> np.ndarray:
-        return perimeter_polygon_from_samples(
-            lon0_deg=self.lon0_deg,
-            lat0_deg=self.lat0_deg,
-            lon_deg=self.sample_lon_deg,
-            lat_deg=self.sample_lat_deg,
-            mode=self.polygon_mode,
-        )
-
-    def pixels(self, nside: int) -> np.ndarray:
-        poly = self._poly_vertices()
-        if poly.shape[0] < 3:
-            return sample_pixels_direct(
-                lon_deg=self.sample_lon_deg, lat_deg=self.sample_lat_deg, nside=nside
-            )
-        # Avoid 0/360 wrap creating a non-convex polygon in 3D.
-        lon = float(self.lon0_deg) + _wrap_delta_lon_deg(poly[:, 0].astype(np.float64), float(self.lon0_deg))
-        lat = poly[:, 1]
-        verts = hp.ang2vec(lon, lat, lonlat=True)
-        if not _is_convex_spherical_polygon(verts):
-            raise ValueError("sample perimeter polygon is not convex (precheck)")
-        pix = hp.query_polygon(nside, verts, inclusive=True, nest=True)
-        pix_set = set(np.asarray(pix, dtype=np.int64).tolist())
-        # Add safety margin for buffer/pixelization.
-        if float(self.buffer_arcsec) > 0:
-            r_rad = np.deg2rad(float(self.buffer_arcsec) / 3600.0) + float(hp.max_pixrad(nside))
-            for lon, lat in poly:
-                v = hp.ang2vec(float(lon), float(lat), lonlat=True)
-                pix_set.update(
-                    hp.query_disc(nside, v, r_rad, inclusive=True, nest=True).tolist()
-                )
-        return np.unique(np.fromiter(pix_set, dtype=np.int64))
-
-    def contains(self, lon_deg: np.ndarray, lat_deg: np.ndarray) -> np.ndarray:
-        # Point-in-polygon in tangent plane; optional buffer by distance-to-edges.
-        poly = self._poly_vertices()
-        if poly.shape[0] < 3:
-            return np.zeros(len(lon_deg), dtype=bool)
-
-        px, py = _tangent_xy_deg(poly[:, 0], poly[:, 1], self.lon0_deg, self.lat0_deg)
-        x, y = _tangent_xy_deg(lon_deg, lat_deg, self.lon0_deg, self.lat0_deg)
-
-        inside = np.zeros(len(x), dtype=bool)
-        j = len(px) - 1
-        for i in range(len(px)):
-            xi, yi = px[i], py[i]
-            xj, yj = px[j], py[j]
-            cond = ((yi > y) != (yj > y)) & (
-                x < (xj - xi) * (y - yi) / (yj - yi + 1e-30) + xi
-            )
-            inside ^= cond
-            j = i
-
-        # Always treat boundary points as inside (robustness for discrete catalogs).
-        eps2 = 1e-24  # (deg^2) ~ 1e-12 deg tolerance
-        min_d2 = np.full(len(x), np.inf, dtype=np.float64)
-        for i in range(len(px)):
-            ax, ay = px[i], py[i]
-            bx, by = px[(i + 1) % len(px)], py[(i + 1) % len(py)]
-            vx, vy = bx - ax, by - ay
-            denom = vx * vx + vy * vy
-            if denom <= 0:
-                continue
-            t = ((x - ax) * vx + (y - ay) * vy) / denom
-            t = np.clip(t, 0.0, 1.0)
-            qx = ax + t * vx
-            qy = ay + t * vy
-            d2 = (x - qx) ** 2 + (y - qy) ** 2
-            min_d2 = np.minimum(min_d2, d2)
-
-        on_boundary = min_d2 <= eps2
-        inside = inside | on_boundary
-
-        if float(self.buffer_arcsec) <= 0:
-            return inside
-
-        # Buffer: accept points within buffer distance of any edge.
-        r2 = (float(self.buffer_arcsec) / 3600.0) ** 2
-        return inside | (min_d2 <= r2)
 
 
 @dataclass(frozen=True)

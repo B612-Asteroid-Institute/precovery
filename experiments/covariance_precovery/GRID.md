@@ -23,14 +23,11 @@ Stage 3 can compute frame healpixel selections using any of:
 ### Covariance-derived (requires covariance on mean ephemeris)
 
 - `cov_disc`: major-axis bound + `query_disc`
-- `cov_polygon`: N-σ ellipse polygon + `query_polygon` (**convex only**)
 - `cov_mc`: sample 2×2 on-sky covariance → pixels
 
 ### Sample-derived (requires variant ephemeris)
 
 - `sample_direct`: pixels from samples (+ neighbor/dilation)
-- `sample_polygon:angle_sort`: perimeter polygon from samples (angle-sort)
-- `sample_polygon:convex_hull`: perimeter polygon from samples (convex hull)
 - `sample_corridor`: buffered corridor/tube from samples
 
 ### Reconstructed covariance (requires variant ephemeris)
@@ -38,7 +35,6 @@ Stage 3 can compute frame healpixel selections using any of:
 These reconstruct an `Ephemeris` covariance from `VariantEphemeris` using `VariantEphemeris.collapse(...)`, then apply the covariance-derived footprint:
 
 - `cov_disc_reconstructed`
-- `cov_polygon_reconstructed` (**convex only**)
 - `cov_mc_reconstructed`
 
 ## Validity matrix (by Stage 2 output)
@@ -51,14 +47,12 @@ Legend:
 | Stage 2 output available | Stage 3 footprint | Status |
 |---|---:|---:|
 | mean ephem (no cov) | `point` | ✅ |
-| mean ephem (no cov) | `cov_disc`, `cov_polygon`, `cov_mc` | ❌ |
+| mean ephem (no cov) | `cov_disc`, `cov_mc` | ❌ |
 | mean ephem **with** cov | `cov_disc` | ✅ |
-| mean ephem **with** cov | `cov_polygon` | ⚠️ can error if polygon not convex/degenerate (Stage 3 records error; no fallback) |
 | mean ephem **with** cov | `cov_mc` | ✅ |
 | variant ephem | `sample_direct` | ✅ |
-| variant ephem | `sample_polygon:*` | ⚠️ can error if polygon not convex/degenerate (Stage 3 records error; no fallback) |
 | variant ephem | `sample_corridor` | ✅ |
-| variant ephem | `cov_*_reconstructed` | ✅ / ⚠️ (`cov_polygon_reconstructed` has same convexity constraint) |
+| variant ephem | `cov_*_reconstructed` | ✅ |
 
 ## Implementation notes
 
