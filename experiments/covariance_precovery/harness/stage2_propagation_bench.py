@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,8 +26,102 @@ from precovery.precovery_db import PrecoveryDatabase
 from ..selection.subset_designations import read_subset_window
 
 
+_LOG = logging.getLogger(__name__)
+_PROGRESS_LOG_EVERY_SEC = 30.0
+
+
+def _progress_maybe_log(
+    *,
+    label: str,
+    i: int,
+    n: int,
+    t0: float,
+    last_log_t: float,
+    extra: str = "",
+    every_sec: float = _PROGRESS_LOG_EVERY_SEC,
+) -> float:
+    """
+    Periodic progress logging helper.
+
+    Returns updated `last_log_t`.
+    """
+    if n <= 0:
+        return last_log_t
+    now = time.perf_counter()
+    if (now - float(last_log_t)) < float(every_sec) and i < n:
+        return last_log_t
+    frac = float(i) / float(n)
+    _LOG.debug(
+        "%s progress %d/%d (%.1f%%) elapsed=%.1fs%s",
+        str(label),
+        int(i),
+        int(n),
+        100.0 * frac,
+        float(now - float(t0)),
+        ("" if not extra else f" {extra}"),
+    )
+    return float(now)
+
+
+def _run_with_strategy_logs(
+    *,
+    label: str,
+    fn: callable[[], dict[str, object]],
+) -> dict[str, object]:
+    """
+    Log start/end of a strategy run.
+
+    We keep this intentionally minimal so it's easy to track progress in long runs.
+    """
+    _LOG.info("stage2 START %s", str(label))
+    t0 = time.perf_counter()
+    out = fn()
+    dt = time.perf_counter() - t0
+    err = out.get("error")
+    extra = "" if not err else f" error={err!s}"
+
+    # Optional breakdown (currently emitted for 2body_* strategies).
+    t_prop = out.get("t_2body_propagate_sec")
+    t_rep = out.get("t_2body_observer_repeat_sec")
+    t_eph = out.get("t_2body_generate_ephemeris_sec")
+    t_utc = out.get("t_2body_rescale_utc_sec")
+    if all(x is not None for x in (t_prop, t_rep, t_eph, t_utc)):
+        try:
+            extra += (
+                f" 2body(propagate={float(t_prop):.1f}s"
+                f" repeat_obs={float(t_rep):.1f}s"
+                f" ephem={float(t_eph):.1f}s"
+                f" utc={float(t_utc):.1f}s)"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    _LOG.info("stage2 END   %s elapsed=%.1fs%s", str(label), float(dt), extra)
+    return out
+
+
 def _ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
+
+
+def _center_time_index(
+    *,
+    center_days: np.ndarray,
+    center_nanos: np.ndarray,
+    day: int,
+    nano: int,
+) -> int | None:
+    """
+    Return the index of (day,nano) in the center arrays, or None if absent.
+
+    We keep this intentionally simple (linear scan via boolean mask) because center-time
+    counts are small in our benchmark windows (typically O(1e0–1e2)).
+    """
+    m = (center_days == int(day)) & (center_nanos == int(nano))
+    hit = np.nonzero(m)[0]
+    if hit.size == 0:
+        return None
+    return int(hit[0])
 
 def _utc_run_id() -> str:
     # e.g. 20260127T184501Z
@@ -88,18 +183,39 @@ def _truth_orbit_ids_in_subset(subset_dir: Path) -> set[str]:
     return {des_to_orbit[d] for d in truth_des if d in des_to_orbit}
 
 
-def _run_2body_ephemeris(*, orbits: Orbits, window_observers_tdb: Observers) -> Ephemeris:
+def _run_2body_ephemeris(
+    *,
+    orbits: Orbits,
+    window_observers_tdb: Observers,
+    timing: dict[str, float] | None = None,
+) -> Ephemeris:
     """
     2-body ephemeris for all (orbit, window_center) pairs with a single vectorized
     propagation + ephemeris call (no Python loops over times).
     """
     times = window_observers_tdb.coordinates.time
+    t0 = time.perf_counter()
     prop = propagate_2body(orbits, times)  # (N_orbits * N_times)
-    obs_nm = _pair_observers_for_propagated_orbits(observers=window_observers_tdb, n_orbits=int(len(orbits)))
+    t1 = time.perf_counter()
+    obs_nm = _pair_observers_for_propagated_orbits(
+        observers=window_observers_tdb, n_orbits=int(len(orbits))
+    )
+    t2 = time.perf_counter()
     ephem = generate_ephemeris_2body(prop, obs_nm)
+    t3 = time.perf_counter()
     # Store ephemeris in UTC for downstream joins (Stage 3), even if propagation
     # is performed in TDB internally.
-    return _ephem_to_utc(ephem)
+    ephem = _ephem_to_utc(ephem)
+    t4 = time.perf_counter()
+
+    if timing is not None:
+        timing["t_2body_total_sec"] = timing.get("t_2body_total_sec", 0.0) + float(t4 - t0)
+        timing["t_2body_propagate_sec"] = timing.get("t_2body_propagate_sec", 0.0) + float(t1 - t0)
+        timing["t_2body_observer_repeat_sec"] = timing.get("t_2body_observer_repeat_sec", 0.0) + float(t2 - t1)
+        timing["t_2body_generate_ephemeris_sec"] = timing.get("t_2body_generate_ephemeris_sec", 0.0) + float(t3 - t2)
+        timing["t_2body_rescale_utc_sec"] = timing.get("t_2body_rescale_utc_sec", 0.0) + float(t4 - t3)
+
+    return ephem
 
 
 def _run_assist_window_then_2body(*, orbits: Orbits, window_observers_tdb: Observers) -> Ephemeris:
@@ -207,6 +323,640 @@ def _write_quivr_part(out_dir: Path, *, qt: qv.Table, part_idx: int) -> None:
     qt.to_parquet(str(out_dir / f"part-{part_idx:06d}.parquet"))
 
 
+def _write_strategy_meta(strategy_dir: Path, meta: dict[str, object]) -> None:
+    _ensure_dir(strategy_dir)
+    _write_json(strategy_dir / "meta.json", meta)
+
+
+def _run_chunked_2body_mean_ephemeris(
+    *,
+    orbits: Orbits,
+    target_observers_tdb: Observers,
+    time_chunk_size: int,
+    out_ephem_dir: Path,
+    write_ephemeris: bool,
+) -> tuple[int, float, float]:
+    """
+    Vectorized 2-body propagation + ephemeris generation, chunked only over time to
+    bound memory.
+    """
+    compute_sec = 0.0
+    io_sec = 0.0
+    timing: dict[str, float] = {}
+    n_targets = int(len(target_observers_tdb))
+    n_chunks = int((n_targets + int(time_chunk_size) - 1) // int(time_chunk_size))
+    total_rows = 0
+    part = 0
+    t0 = time.perf_counter()
+    last_log_t = t0
+    for i0 in range(0, n_targets, int(time_chunk_size)):
+        i1 = min(i0 + int(time_chunk_size), n_targets)
+        obs_tdb = target_observers_tdb[i0:i1]
+        t_compute0 = time.perf_counter()
+        ephem = _run_2body_ephemeris(orbits=orbits, window_observers_tdb=obs_tdb, timing=timing)
+        compute_sec += time.perf_counter() - t_compute0
+        total_rows += int(len(ephem))
+        if bool(write_ephemeris):
+            t_io0 = time.perf_counter()
+            _write_quivr_part(out_ephem_dir, qt=ephem, part_idx=part)
+            io_sec += time.perf_counter() - t_io0
+        part += 1
+        last_log_t = _progress_maybe_log(
+            label="stage2 2body mean_ephem",
+            i=int(part),
+            n=int(n_chunks),
+            t0=float(t0),
+            last_log_t=float(last_log_t),
+            extra=f"rows={int(total_rows)} compute_sec={compute_sec:.1f} io_sec={io_sec:.1f}",
+        )
+    # Expose the breakdown to the caller by attaching to function attributes (simple and local).
+    _run_chunked_2body_mean_ephemeris._timing = timing  # type: ignore[attr-defined]
+    return int(total_rows), float(compute_sec), float(io_sec)
+
+
+def _run_strategy_2body(
+    *,
+    subset_dir: Path,
+    strategies_dir: Path,
+    orbits_all: Orbits,
+    orbits_mean: Orbits,
+    target_observers_utc: Observers,
+    target_observers_tdb: Observers,
+    windows: qv.Table,
+    window_size_days: int,
+    time_chunk_size: int,
+    write_ephemeris: bool,
+    include_covariance: bool,
+    n_cov_ok: int,
+) -> dict[str, object]:
+    name = "2body_with_covariance" if bool(include_covariance) else "2body_only"
+    strat_dir = strategies_dir / name
+    err: str | None = None
+    n_rows: int | None = None
+    compute_sec = 0.0
+    io_sec = 0.0
+    try:
+        _ensure_dir(strat_dir)
+        out_ephem_dir = strat_dir / "mean_ephemeris"
+        _ensure_dir(out_ephem_dir)
+        orbits_for_mean = orbits_all if bool(include_covariance) else orbits_mean
+        n_rows, compute_sec, io_sec = _run_chunked_2body_mean_ephemeris(
+            orbits=orbits_for_mean,
+            target_observers_tdb=target_observers_tdb,
+            time_chunk_size=int(time_chunk_size),
+            out_ephem_dir=out_ephem_dir,
+            write_ephemeris=bool(write_ephemeris),
+        )
+        timing = getattr(_run_chunked_2body_mean_ephemeris, "_timing", {})  # type: ignore[attr-defined]
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+        timing = {}
+
+    _ensure_dir(strat_dir)
+    _write_json(
+        strat_dir / "meta.json",
+        dict(
+            strategy=name,
+            kind="mean_ephemeris",
+            window_size_days=int(window_size_days),
+            n_orbits=int(len(orbits_all)),
+            n_time_targets=int(len(target_observers_utc)),
+            n_window_centers=int(len(windows)),
+            n_rows=n_rows,
+            time_chunk_size=int(time_chunk_size),
+            mean_with_covariance=bool(include_covariance),
+            runtime_sec=float(compute_sec),
+            io_sec=float(io_sec),
+            runtime_total_sec=float(compute_sec + io_sec),
+            **{k: float(v) for k, v in dict(timing).items()},
+            error=err,
+        ),
+    )
+    return dict(
+        subset_dir=str(subset_dir),
+        strategy=name,
+        variant_kind=None,
+        n_orbits=int(len(orbits_all)),
+        n_orbits_covok=int(n_cov_ok),
+        n_time_targets=int(len(target_observers_utc)),
+        n_window_centers=int(len(windows)),
+        n_ephem_rows_mean=n_rows,
+        n_variant_orbits=None,
+        n_ephem_rows_variants=None,
+        runtime_sec=float(compute_sec),
+        io_sec=float(io_sec),
+        runtime_total_sec=float(compute_sec + io_sec),
+        **{k: float(v) for k, v in dict(timing).items()},
+        error=err,
+    )
+
+
+def _run_chunked_assist_ephemeris(
+    *,
+    assist: ASSISTPropagator,
+    orbits: Orbits | VariantOrbits,
+    target_observers_utc: Observers,
+    time_chunk_size: int,
+    max_processes: int | None,
+    covariance: bool,
+    out_ephem_dir: Path,
+    write_ephemeris: bool,
+) -> tuple[int, float, float]:
+    """
+    Chunked ASSIST ephemeris generation over (obscode,time) targets.
+    """
+    compute_sec = 0.0
+    io_sec = 0.0
+    n_targets = int(len(target_observers_utc))
+    n_chunks = int((n_targets + int(time_chunk_size) - 1) // int(time_chunk_size))
+    total_rows = 0
+    part = 0
+    t0 = time.perf_counter()
+    last_log_t = t0
+    for i0 in range(0, n_targets, int(time_chunk_size)):
+        i1 = min(i0 + int(time_chunk_size), n_targets)
+        obs_utc = target_observers_utc[i0:i1]
+        t_compute0 = time.perf_counter()
+        ephem = assist.generate_ephemeris(
+            orbits,
+            obs_utc,
+            covariance=bool(covariance),
+            max_processes=max_processes,
+        )
+        compute_sec += time.perf_counter() - t_compute0
+        total_rows += int(len(ephem))
+        if bool(write_ephemeris):
+            t_io0 = time.perf_counter()
+            _write_quivr_part(out_ephem_dir, qt=ephem, part_idx=part)
+            io_sec += time.perf_counter() - t_io0
+        part += 1
+        last_log_t = _progress_maybe_log(
+            label="stage2 assist ephem",
+            i=int(part),
+            n=int(n_chunks),
+            t0=float(t0),
+            last_log_t=float(last_log_t),
+            extra=f"rows={int(total_rows)} compute_sec={compute_sec:.1f} io_sec={io_sec:.1f}",
+        )
+    return int(total_rows), float(compute_sec), float(io_sec)
+
+
+def _run_strategy_assist_window_then_2body(
+    *,
+    subset_dir: Path,
+    strategies_dir: Path,
+    orbits_all: Orbits,
+    orbits_mean: Orbits,
+    target_codes: pa.Array,
+    target_times_utc: Timestamp,
+    target_observers_utc: Observers,
+    windows: qv.Table,
+    window_size_days: int,
+    time_chunk_size: int,
+    max_processes: int | None,
+    write_ephemeris: bool,
+    n_cov_ok: int,
+) -> dict[str, object]:
+    name = "assist_window_then_2body"
+    strat_dir = strategies_dir / name
+    err: str | None = None
+    n_rows: int | None = None
+    compute_sec = 0.0
+    io_sec = 0.0
+    try:
+        _ensure_dir(strat_dir)
+        out_ephem_dir = strat_dir / "mean_ephemeris"
+        _ensure_dir(out_ephem_dir)
+
+        center_times_utc = windows.time.unique().sort_by(["days", "nanos"])
+        T = int(len(center_times_utc))
+        if T == 0:
+            raise ValueError("No window centers found; cannot run mixed strategy.")
+
+        assist = ASSISTPropagator()
+        t_compute0 = time.perf_counter()
+        orbits_at_centers = assist.propagate_orbits(
+            orbits_mean,
+            center_times_utc,
+            covariance=False,
+            max_processes=max_processes,
+        )  # (N*T)
+        compute_sec += time.perf_counter() - t_compute0
+
+        center_days = center_times_utc.days.to_numpy(zero_copy_only=False).astype(np.int64, copy=False)
+        center_nanos = center_times_utc.nanos.to_numpy(zero_copy_only=False).astype(np.int64, copy=False)
+
+        target_mjd = target_times_utc.mjd().to_numpy(zero_copy_only=False).astype(np.float64)
+        target_code = target_codes.to_numpy(zero_copy_only=False)
+
+        total_rows = 0
+        part = 0
+        n_orb = int(len(orbits_all))
+
+        for w in windows:
+            obscode = str(w.obscode[0].as_py())
+            w0 = float(w.window_start().mjd()[0].as_py())
+            w1 = float(w.window_end().mjd()[0].as_py())
+            mask = (target_code == obscode) & (target_mjd >= w0) & (target_mjd <= w1)
+            idx = np.nonzero(mask)[0]
+            if idx.size == 0:
+                continue
+
+            cidx = _center_time_index(
+                center_days=center_days,
+                center_nanos=center_nanos,
+                day=int(w.time.days[0].as_py()),
+                nano=int(w.time.nanos[0].as_py()),
+            )
+            if cidx is None:
+                continue
+
+            take_idx = (int(cidx) + np.arange(n_orb, dtype=np.int64) * int(T)).tolist()
+            orbits_center = orbits_at_centers.take(take_idx)
+
+            for j0 in range(0, int(idx.size), int(time_chunk_size)):
+                j1 = min(j0 + int(time_chunk_size), int(idx.size))
+                sub = idx[j0:j1].tolist()
+                times_tdb = target_times_utc.take(sub).rescale("tdb")
+                t_compute0 = time.perf_counter()
+                prop = propagate_2body(orbits_center, times_tdb)
+                obs_tdb = Observers.from_codes([obscode] * len(times_tdb), times_tdb)
+                obs_nm = _pair_observers_for_propagated_orbits(observers=obs_tdb, n_orbits=n_orb)
+                ephem = _ephem_to_utc(generate_ephemeris_2body(prop, obs_nm))
+                compute_sec += time.perf_counter() - t_compute0
+                total_rows += int(len(ephem))
+                if bool(write_ephemeris):
+                    t_io0 = time.perf_counter()
+                    _write_quivr_part(out_ephem_dir, qt=ephem, part_idx=part)
+                    io_sec += time.perf_counter() - t_io0
+                part += 1
+
+        n_rows = int(total_rows)
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+
+    _write_strategy_meta(
+        strat_dir,
+        dict(
+            strategy=name,
+            kind="mean_ephemeris",
+            window_size_days=int(window_size_days),
+            n_orbits=int(len(orbits_all)),
+            n_time_targets=int(len(target_observers_utc)),
+            n_window_centers=int(len(windows)),
+            n_rows=n_rows,
+            time_chunk_size=int(time_chunk_size),
+            runtime_sec=float(compute_sec),
+            io_sec=float(io_sec),
+            runtime_total_sec=float(compute_sec + io_sec),
+            error=err,
+        ),
+    )
+    return dict(
+        subset_dir=str(subset_dir),
+        strategy=name,
+        variant_kind=None,
+        n_orbits=int(len(orbits_all)),
+        n_orbits_covok=int(n_cov_ok),
+        n_time_targets=int(len(target_observers_utc)),
+        n_window_centers=int(len(windows)),
+        n_ephem_rows_mean=n_rows,
+        n_variant_orbits=None,
+        n_ephem_rows_variants=None,
+        runtime_sec=float(compute_sec),
+        io_sec=float(io_sec),
+        runtime_total_sec=float(compute_sec + io_sec),
+        error=err,
+    )
+
+
+def _run_strategy_assist_window_then_2body_variants(
+    *,
+    subset_dir: Path,
+    strategies_dir: Path,
+    variant_kind: str,
+    method: str,
+    num_samples: int | None,
+    orbits_all: Orbits,
+    orbits_covok: Orbits,
+    n_cov_ok: int,
+    target_codes: pa.Array,
+    target_times_utc: Timestamp,
+    target_observers_utc: Observers,
+    windows: qv.Table,
+    window_size_days: int,
+    time_chunk_size: int,
+    max_processes: int | None,
+    write_ephemeris: bool,
+    write_variants_orbits: bool,
+) -> dict[str, object]:
+    name = "assist_window_then_2body_variants"
+    strat_dir = strategies_dir / name / str(variant_kind)
+    err: str | None = None
+    n_rows: int | None = None
+    n_var: int | None = None
+    compute_sec = 0.0
+    io_sec = 0.0
+    try:
+        if int(n_cov_ok) == 0:
+            raise ValueError("No orbits have fully-defined 6x6 covariance; cannot generate variants.")
+        _ensure_dir(strat_dir)
+
+        center_times_utc = windows.time.unique().sort_by(["days", "nanos"])
+        T = int(len(center_times_utc))
+        if T == 0:
+            raise ValueError("No window centers found; cannot run mixed strategy.")
+
+        t_compute0 = time.perf_counter()
+        variants = (
+            VariantOrbits.create(orbits_covok, method=str(method))
+            if num_samples is None
+            else VariantOrbits.create(
+                orbits_covok, method=str(method), num_samples=int(num_samples), seed=0
+            )
+        )
+        compute_sec += time.perf_counter() - t_compute0
+        n_var = int(len(variants))
+
+        if bool(write_variants_orbits):
+            t_io0 = time.perf_counter()
+            variants.to_parquet(str(strat_dir / "variants_orbits.parquet"))
+            io_sec += time.perf_counter() - t_io0
+
+        assist = ASSISTPropagator()
+        t_compute0 = time.perf_counter()
+        variants_at_centers = assist.propagate_orbits(
+            variants,
+            center_times_utc,
+            covariance=False,
+            max_processes=max_processes,
+        )  # (n_var * T)
+        compute_sec += time.perf_counter() - t_compute0
+
+        center_days = center_times_utc.days.to_numpy(zero_copy_only=False).astype(np.int64, copy=False)
+        center_nanos = center_times_utc.nanos.to_numpy(zero_copy_only=False).astype(np.int64, copy=False)
+
+        target_mjd = target_times_utc.mjd().to_numpy(zero_copy_only=False).astype(np.float64)
+        target_code = target_codes.to_numpy(zero_copy_only=False)
+
+        out_ephem_dir = strat_dir / "variants_ephemeris"
+        _ensure_dir(out_ephem_dir)
+
+        total_rows = 0
+        part = 0
+        for w in windows:
+            obscode = str(w.obscode[0].as_py())
+            w0 = float(w.window_start().mjd()[0].as_py())
+            w1 = float(w.window_end().mjd()[0].as_py())
+            mask = (target_code == obscode) & (target_mjd >= w0) & (target_mjd <= w1)
+            idx = np.nonzero(mask)[0]
+            if idx.size == 0:
+                continue
+
+            cidx = _center_time_index(
+                center_days=center_days,
+                center_nanos=center_nanos,
+                day=int(w.time.days[0].as_py()),
+                nano=int(w.time.nanos[0].as_py()),
+            )
+            if cidx is None:
+                continue
+
+            take_idx = (int(cidx) + np.arange(int(n_var), dtype=np.int64) * int(T)).tolist()
+            variants_center = variants_at_centers.take(take_idx)
+
+            for j0 in range(0, int(idx.size), int(time_chunk_size)):
+                j1 = min(j0 + int(time_chunk_size), int(idx.size))
+                sub = idx[j0:j1].tolist()
+                times_tdb = target_times_utc.take(sub).rescale("tdb")
+                t_compute0 = time.perf_counter()
+                prop = propagate_2body(variants_center, times_tdb)
+                obs_tdb = Observers.from_codes([obscode] * len(times_tdb), times_tdb)
+                obs_nm = _pair_observers_for_propagated_orbits(
+                    observers=obs_tdb, n_orbits=int(n_var)
+                )
+                ephem = _ephem_to_utc(generate_ephemeris_2body(prop, obs_nm))
+                compute_sec += time.perf_counter() - t_compute0
+                total_rows += int(len(ephem))
+                if bool(write_ephemeris):
+                    t_io0 = time.perf_counter()
+                    _write_quivr_part(out_ephem_dir, qt=ephem, part_idx=part)
+                    io_sec += time.perf_counter() - t_io0
+                part += 1
+
+        n_rows = int(total_rows)
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+
+    _write_strategy_meta(
+        strat_dir,
+        dict(
+            strategy=name,
+            variant_kind=str(variant_kind),
+            variant_method=str(method),
+            n_variant_orbits=n_var,
+            kind="variants_ephemeris",
+            window_size_days=int(window_size_days),
+            n_orbits=int(len(orbits_all)),
+            n_orbits_covok=int(n_cov_ok),
+            n_time_targets=int(len(target_observers_utc)),
+            n_window_centers=int(len(windows)),
+            n_rows=n_rows,
+            time_chunk_size=int(time_chunk_size),
+            layout_note="Carry the same particles through ASSIST-to-centers then 2-body-to-targets; each ephemeris part is a cross product (variants_center × time_chunk).",
+            assist_max_processes=None if max_processes is None else int(max_processes),
+            assist_max_processes_variants_propagate_orbits=None if max_processes is None else int(max_processes),
+            runtime_sec=float(compute_sec),
+            io_sec=float(io_sec),
+            runtime_total_sec=float(compute_sec + io_sec),
+            error=err,
+        ),
+    )
+    return dict(
+        subset_dir=str(subset_dir),
+        strategy=name,
+        variant_kind=str(variant_kind),
+        n_orbits=int(len(orbits_all)),
+        n_orbits_covok=int(n_cov_ok),
+        n_time_targets=int(len(target_observers_utc)),
+        n_window_centers=int(len(windows)),
+        n_ephem_rows_mean=None,
+        n_variant_orbits=n_var,
+        n_ephem_rows_variants=n_rows,
+        runtime_sec=float(compute_sec),
+        io_sec=float(io_sec),
+        runtime_total_sec=float(compute_sec + io_sec),
+        error=err,
+    )
+
+
+def _run_strategy_assist_mean(
+    *,
+    subset_dir: Path,
+    strategies_dir: Path,
+    orbits_all: Orbits,
+    orbits_mean: Orbits,
+    target_observers_utc: Observers,
+    windows: qv.Table,
+    window_size_days: int,
+    time_chunk_size: int,
+    max_processes: int | None,
+    write_ephemeris: bool,
+    n_cov_ok: int,
+) -> dict[str, object]:
+    strat_dir = strategies_dir / "assist_mean"
+    err: str | None = None
+    n_rows: int | None = None
+    compute_sec = 0.0
+    io_sec = 0.0
+    try:
+        _ensure_dir(strat_dir)
+        out_ephem_dir = strat_dir / "mean_ephemeris"
+        _ensure_dir(out_ephem_dir)
+        assist = ASSISTPropagator()
+        n_rows, compute_sec, io_sec = _run_chunked_assist_ephemeris(
+            assist=assist,
+            orbits=orbits_mean,
+            target_observers_utc=target_observers_utc,
+            time_chunk_size=int(time_chunk_size),
+            max_processes=max_processes,
+            covariance=False,
+            out_ephem_dir=out_ephem_dir,
+            write_ephemeris=bool(write_ephemeris),
+        )
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+
+    _write_strategy_meta(
+        strat_dir,
+        dict(
+            strategy="assist_mean",
+            kind="mean_ephemeris",
+            window_size_days=int(window_size_days),
+            n_orbits=int(len(orbits_all)),
+            n_time_targets=int(len(target_observers_utc)),
+            n_window_centers=int(len(windows)),
+            n_rows=n_rows,
+            time_chunk_size=int(time_chunk_size),
+            runtime_sec=float(compute_sec),
+            io_sec=float(io_sec),
+            runtime_total_sec=float(compute_sec + io_sec),
+            error=err,
+        ),
+    )
+    return dict(
+        subset_dir=str(subset_dir),
+        strategy="assist_mean",
+        variant_kind=None,
+        n_orbits=int(len(orbits_all)),
+        n_orbits_covok=int(n_cov_ok),
+        n_time_targets=int(len(target_observers_utc)),
+        n_window_centers=int(len(windows)),
+        n_ephem_rows_mean=n_rows,
+        n_variant_orbits=None,
+        n_ephem_rows_variants=None,
+        runtime_sec=float(compute_sec),
+        io_sec=float(io_sec),
+        runtime_total_sec=float(compute_sec + io_sec),
+        error=err,
+    )
+
+
+def _run_strategy_assist_variants(
+    *,
+    subset_dir: Path,
+    strategies_dir: Path,
+    variant_kind: str,
+    method: str,
+    num_samples: int | None,
+    orbits_all: Orbits,
+    orbits_covok: Orbits,
+    n_cov_ok: int,
+    target_observers_utc: Observers,
+    windows: qv.Table,
+    time_chunk_size: int,
+    max_processes: int | None,
+    write_ephemeris: bool,
+    write_variants_orbits: bool,
+) -> dict[str, object]:
+    strat_dir = strategies_dir / "assist_variants" / str(variant_kind)
+    err: str | None = None
+    n_rows: int | None = None
+    n_var: int | None = None
+    compute_sec = 0.0
+    io_sec = 0.0
+    try:
+        if int(n_cov_ok) == 0:
+            raise ValueError("No orbits have fully-defined 6x6 covariance; cannot generate variants.")
+        t_compute0 = time.perf_counter()
+        variants = (
+            VariantOrbits.create(orbits_covok, method=str(method))
+            if num_samples is None
+            else VariantOrbits.create(orbits_covok, method=str(method), num_samples=int(num_samples), seed=0)
+        )
+        compute_sec += time.perf_counter() - t_compute0
+        n_var = int(len(variants))
+
+        _ensure_dir(strat_dir)
+        if bool(write_variants_orbits):
+            t_io0 = time.perf_counter()
+            variants.to_parquet(str(strat_dir / "variants_orbits.parquet"))
+            io_sec += time.perf_counter() - t_io0
+
+        out_ephem_dir = strat_dir / "variants_ephemeris"
+        _ensure_dir(out_ephem_dir)
+        assist = ASSISTPropagator()
+        n_rows, c_sec, io2_sec = _run_chunked_assist_ephemeris(
+            assist=assist,
+            orbits=variants,
+            target_observers_utc=target_observers_utc,
+            time_chunk_size=int(time_chunk_size),
+            max_processes=max_processes,
+            covariance=False,
+            out_ephem_dir=out_ephem_dir,
+            write_ephemeris=bool(write_ephemeris),
+        )
+        compute_sec += float(c_sec)
+        io_sec += float(io2_sec)
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+
+    _write_strategy_meta(
+        strat_dir,
+        dict(
+            strategy="assist_variants",
+            variant_kind=str(variant_kind),
+            variant_method=str(method),
+            n_variant_orbits=n_var,
+            n_time_targets=int(len(target_observers_utc)),
+            n_window_centers=int(len(windows)),
+            n_rows=n_rows,
+            time_chunk_size=int(time_chunk_size),
+            layout_note="Store VariantOrbits and Ephemeris separately; each ephemeris part is a cross product (variants × time_chunk).",
+            runtime_sec=float(compute_sec),
+            io_sec=float(io_sec),
+            runtime_total_sec=float(compute_sec + io_sec),
+            error=err,
+        ),
+    )
+    return dict(
+        subset_dir=str(subset_dir),
+        strategy="assist_variants",
+        variant_kind=str(variant_kind),
+        n_orbits=int(len(orbits_all)),
+        n_orbits_covok=int(n_cov_ok),
+        n_time_targets=int(len(target_observers_utc)),
+        n_window_centers=int(len(windows)),
+        n_ephem_rows_mean=None,
+        n_variant_orbits=n_var,
+        n_ephem_rows_variants=n_rows,
+        runtime_sec=float(compute_sec),
+        io_sec=float(io_sec),
+        runtime_total_sec=float(compute_sec + io_sec),
+        error=err,
+    )
+
+
 class FrameTimeTargets(qv.Table):
     obscode = qv.LargeStringColumn()
     time = Timestamp.as_column()
@@ -222,7 +972,7 @@ def run_stage2_propagation_bench(
     max_window_centers: int | None = None,
     strategies: list[str] | None = None,
     mc_samples: list[int] | None = None,
-    time_chunk_size: int = 2048,
+    time_chunk_size: int = 0,
     max_processes: int | None = 8,
     only_truth_orbits: bool = False,
     mean_with_covariance: bool = False,
@@ -249,6 +999,13 @@ def run_stage2_propagation_bench(
         target_codes = target_codes.slice(0, n)
         target_times_utc = target_times_utc[:n]
 
+    # Default: disable time chunking (single batch over all targets). Chunking can be
+    # re-enabled by passing a positive time_chunk_size if memory becomes a problem.
+    if int(time_chunk_size) <= 0:
+        time_chunk_size = int(len(target_times_utc))
+    else:
+        time_chunk_size = int(min(int(time_chunk_size), int(len(target_times_utc))))
+
     # Use the provided orbits parquet path (do not silently replace it with a subset default).
     # This lets callers run controlled samples (e.g., 20 truth-matched orbits) for benchmarking.
     orbits_path = orbits_parquet
@@ -257,7 +1014,9 @@ def run_stage2_propagation_bench(
     if bool(only_truth_orbits):
         truth_orbit_ids = _truth_orbit_ids_in_subset(subset_dir)
         if truth_orbit_ids:
-            mask = pc.is_in(orbits.orbit_id, value_set=pa.array(sorted(truth_orbit_ids), pa.large_string()))
+            mask = pc.is_in(
+                orbits.orbit_id, value_set=pa.array(sorted(truth_orbit_ids), pa.large_string())
+            )
             idx = np.nonzero(mask.to_numpy(zero_copy_only=False).astype(bool))[0]
             orbits = orbits.take(idx.tolist())
     if max_orbits is not None:
@@ -307,13 +1066,6 @@ def run_stage2_propagation_bench(
         except Exception:
             pass
 
-    strategies_dir = run_dir / "strategies"
-    _ensure_dir(strategies_dir)
-
-    def _write_strategy_meta(strategy_dir: Path, meta: dict[str, object]) -> None:
-        _ensure_dir(strategy_dir)
-        _write_json(strategy_dir / "meta.json", meta)
-
     def _enabled(name: str) -> bool:
         return strategies is None or name in strategies
 
@@ -324,203 +1076,71 @@ def run_stage2_propagation_bench(
     if mc_samples is None:
         mc_samples = [256] if (max_orbits is not None or max_window_centers is not None) else []
 
+    strategies_dir = run_dir / "strategies"
+    _ensure_dir(strategies_dir)
+
     # 2-body baselines (full target times).
-    for name, include_covariance in [
-        ("2body_only", False),
-        ("2body_with_covariance", True),
-    ]:
-        if not _enabled(name):
-            continue
-        strat_dir = strategies_dir / name
-        # Benchmark time should cover only propagation + ephemeris generation (compute),
-        # not frame/target fetching, window computation, or disk I/O.
-        err = None
-        n_rows: int | None = None
-        compute_sec = 0.0
-        io_sec = 0.0
-        try:
-            _ensure_dir(strat_dir)
-            out_ephem_dir = strat_dir / "mean_ephemeris"
-            _ensure_dir(out_ephem_dir)
-
-            orbits_for_mean = orbits if bool(include_covariance) else orbits_mean
-
-            # Chunk over target times to avoid huge in-memory tables.
-            n_targets = int(len(target_observers_tdb))
-            total_rows = 0
-            part = 0
-            for i0 in range(0, n_targets, int(time_chunk_size)):
-                i1 = min(i0 + int(time_chunk_size), n_targets)
-                obs_tdb = target_observers_tdb[i0:i1]
-                t_compute0 = time.perf_counter()
-                ephem = _run_2body_ephemeris(orbits=orbits_for_mean, window_observers_tdb=obs_tdb)
-                compute_sec += time.perf_counter() - t_compute0
-                total_rows += int(len(ephem))
-                if write_ephemeris:
-                    t_io0 = time.perf_counter()
-                    _write_quivr_part(out_ephem_dir, qt=ephem, part_idx=part)
-                    io_sec += time.perf_counter() - t_io0
-                part += 1
-            n_rows = total_rows
-        except Exception as e:  # noqa: BLE001
-            err = f"{type(e).__name__}: {e}"
-        _write_strategy_meta(
-            strat_dir,
-            dict(
-                strategy=name,
-                kind="mean_ephemeris",
-                window_size_days=int(window_size_days),
-                n_orbits=int(len(orbits)),
-                n_time_targets=int(len(target_observers_utc)),
-                n_window_centers=int(len(windows)),
-                n_rows=n_rows,
-                time_chunk_size=int(time_chunk_size),
-                mean_with_covariance=bool(include_covariance),
-                runtime_sec=float(compute_sec),
-                io_sec=float(io_sec),
-                runtime_total_sec=float(compute_sec + io_sec),
-                error=err,
-            ),
-        )
+    if _enabled("2body_only"):
         metrics_rows.append(
-            dict(
-                subset_dir=str(subset_dir),
-                strategy=name,
-                variant_kind=None,
-                n_orbits=int(len(orbits)),
-                n_orbits_covok=n_cov_ok,
-                n_time_targets=int(len(target_observers_utc)),
-                n_window_centers=int(len(windows)),
-                n_ephem_rows_mean=n_rows,
-                n_variant_orbits=None,
-                n_ephem_rows_variants=None,
-                runtime_sec=float(compute_sec),
-                io_sec=float(io_sec),
-                runtime_total_sec=float(compute_sec + io_sec),
-                error=err,
+            _run_with_strategy_logs(
+                label="2body_only",
+                fn=lambda: _run_strategy_2body(
+                    subset_dir=subset_dir,
+                    strategies_dir=strategies_dir,
+                    orbits_all=orbits,
+                    orbits_mean=orbits_mean,
+                    target_observers_utc=target_observers_utc,
+                    target_observers_tdb=target_observers_tdb,
+                    windows=windows,
+                    window_size_days=int(window_size_days),
+                    time_chunk_size=int(time_chunk_size),
+                    write_ephemeris=bool(write_ephemeris),
+                    include_covariance=False,
+                    n_cov_ok=int(n_cov_ok),
+                ),
+            )
+        )
+    if _enabled("2body_with_covariance"):
+        metrics_rows.append(
+            _run_with_strategy_logs(
+                label="2body_with_covariance",
+                fn=lambda: _run_strategy_2body(
+                    subset_dir=subset_dir,
+                    strategies_dir=strategies_dir,
+                    orbits_all=orbits,
+                    orbits_mean=orbits_mean,
+                    target_observers_utc=target_observers_utc,
+                    target_observers_tdb=target_observers_tdb,
+                    windows=windows,
+                    window_size_days=int(window_size_days),
+                    time_chunk_size=int(time_chunk_size),
+                    write_ephemeris=bool(write_ephemeris),
+                    include_covariance=True,
+                    n_cov_ok=int(n_cov_ok),
+                ),
             )
         )
 
     # Mixed strategy: ASSIST to window centers, then 2-body to all targets within each window.
     if _enabled("assist_window_then_2body"):
-        name = "assist_window_then_2body"
-        strat_dir = strategies_dir / name
-        # Benchmark time should cover only propagation + ephemeris generation (compute),
-        # not frame/target fetching, window computation, or disk I/O.
-        err = None
-        n_rows: int | None = None
-        compute_sec = 0.0
-        io_sec = 0.0
-        try:
-            _ensure_dir(strat_dir)
-            out_ephem_dir = strat_dir / "mean_ephemeris"
-            _ensure_dir(out_ephem_dir)
-
-            # Prepare center times (unique) and propagate once with ASSIST.
-            center_times_utc = windows.time.unique().sort_by(["days", "nanos"])
-            T = int(len(center_times_utc))
-            if T == 0:
-                raise ValueError("No window centers found; cannot run mixed strategy.")
-
-            assist = ASSISTPropagator()
-            t_compute0 = time.perf_counter()
-            orbits_at_centers = assist.propagate_orbits(
-                orbits_mean,
-                center_times_utc,
-                covariance=False,
-                max_processes=max_processes,
-            )  # (N*T)
-            compute_sec += time.perf_counter() - t_compute0
-
-            # Map center time -> index in center_times_utc via (days,nanos)
-            center_days = center_times_utc.days.to_numpy(zero_copy_only=False)
-            center_nanos = center_times_utc.nanos.to_numpy(zero_copy_only=False)
-            center_key_to_idx = {(int(d), int(n)): i for i, (d, n) in enumerate(zip(center_days, center_nanos))}
-
-            # Target mjds (UTC) for window membership tests.
-            target_mjd = target_times_utc.mjd().to_numpy(zero_copy_only=False).astype(np.float64)
-            target_code = target_codes.to_numpy(zero_copy_only=False)
-
-            total_rows = 0
-            part = 0
-            n_orb = int(len(orbits))
-
-            # Loop over windows (small) but do vectorized propagation within each.
-            for w in windows:
-                obscode = str(w.obscode[0].as_py())
-                w0 = float(w.window_start().mjd()[0].as_py())
-                w1 = float(w.window_end().mjd()[0].as_py())
-                # select targets in this window + obscode
-                mask = (target_code == obscode) & (target_mjd >= w0) & (target_mjd <= w1)
-                idx = np.nonzero(mask)[0]
-                if idx.size == 0:
-                    continue
-
-                # Get the center index for this window.
-                key = (int(w.time.days[0].as_py()), int(w.time.nanos[0].as_py()))
-                cidx = center_key_to_idx.get(key)
-                if cidx is None:
-                    continue
-
-                # Slice orbits at this center: positions are cidx + arange(N)*T
-                take_idx = (cidx + np.arange(n_orb, dtype=np.int64) * T).tolist()
-                orbits_center = orbits_at_centers.take(take_idx)
-
-                # Chunk within window targets to bound memory.
-                for j0 in range(0, int(idx.size), int(time_chunk_size)):
-                    j1 = min(j0 + int(time_chunk_size), int(idx.size))
-                    sub = idx[j0:j1].tolist()
-                    times_tdb = target_times_utc.take(sub).rescale("tdb")
-                    # 2-body from center to each target time (cross product over times)
-                    t_compute0 = time.perf_counter()
-                    prop = propagate_2body(orbits_center, times_tdb)
-                    obs_tdb = Observers.from_codes([obscode] * len(times_tdb), times_tdb)
-                    obs_nm = _pair_observers_for_propagated_orbits(observers=obs_tdb, n_orbits=n_orb)
-                    ephem = _ephem_to_utc(generate_ephemeris_2body(prop, obs_nm))
-                    compute_sec += time.perf_counter() - t_compute0
-                    total_rows += int(len(ephem))
-                    if write_ephemeris:
-                        t_io0 = time.perf_counter()
-                        _write_quivr_part(out_ephem_dir, qt=ephem, part_idx=part)
-                        io_sec += time.perf_counter() - t_io0
-                    part += 1
-
-            n_rows = total_rows
-        except Exception as e:  # noqa: BLE001
-            err = f"{type(e).__name__}: {e}"
-        _write_strategy_meta(
-            strat_dir,
-            dict(
-                strategy=name,
-                kind="mean_ephemeris",
-                window_size_days=int(window_size_days),
-                n_orbits=int(len(orbits)),
-                n_time_targets=int(len(target_observers_utc)),
-                n_window_centers=int(len(windows)),
-                n_rows=n_rows,
-                time_chunk_size=int(time_chunk_size),
-                runtime_sec=float(compute_sec),
-                io_sec=float(io_sec),
-                runtime_total_sec=float(compute_sec + io_sec),
-                error=err,
-            ),
-        )
         metrics_rows.append(
-            dict(
-                subset_dir=str(subset_dir),
-                strategy=name,
-                variant_kind=None,
-                n_orbits=int(len(orbits)),
-                n_orbits_covok=n_cov_ok,
-                n_time_targets=int(len(target_observers_utc)),
-                n_window_centers=int(len(windows)),
-                n_ephem_rows_mean=n_rows,
-                n_variant_orbits=None,
-                n_ephem_rows_variants=None,
-                runtime_sec=float(compute_sec),
-                io_sec=float(io_sec),
-                runtime_total_sec=float(compute_sec + io_sec),
-                error=err,
+            _run_with_strategy_logs(
+                label="assist_window_then_2body",
+                fn=lambda: _run_strategy_assist_window_then_2body(
+                    subset_dir=subset_dir,
+                    strategies_dir=strategies_dir,
+                    orbits_all=orbits,
+                    orbits_mean=orbits_mean,
+                    target_codes=target_codes,
+                    target_times_utc=target_times_utc,
+                    target_observers_utc=target_observers_utc,
+                    windows=windows,
+                    window_size_days=int(window_size_days),
+                    time_chunk_size=int(time_chunk_size),
+                    max_processes=max_processes,
+                    write_ephemeris=bool(write_ephemeris),
+                    n_cov_ok=int(n_cov_ok),
+                ),
             )
         )
 
@@ -537,220 +1157,49 @@ def run_stage2_propagation_bench(
         strat_name = f"assist_window_then_2body_variants:{variant_kind}"
         if not _enabled(strat_name):
             continue
-        name = "assist_window_then_2body_variants"
-        strat_dir = strategies_dir / name / variant_kind
-        err = None
-        n_rows: int | None = None
-        n_var: int | None = None
-        compute_sec = 0.0
-        io_sec = 0.0
-        try:
-            if n_cov_ok == 0:
-                raise ValueError("No orbits have fully-defined 6x6 covariance; cannot generate variants.")
-            _ensure_dir(strat_dir)
-
-            # Prepare center times (unique) and propagate variants to centers with ASSIST.
-            center_times_utc = windows.time.unique().sort_by(["days", "nanos"])
-            T = int(len(center_times_utc))
-            if T == 0:
-                raise ValueError("No window centers found; cannot run mixed strategy.")
-
-            t_compute0 = time.perf_counter()
-            variants = (
-                VariantOrbits.create(orbits_covok, method=method)
-                if num_samples is None
-                else VariantOrbits.create(
-                    orbits_covok, method=method, num_samples=int(num_samples), seed=0
-                )
-            )
-            compute_sec += time.perf_counter() - t_compute0
-            n_var = int(len(variants))
-
-            if write_variants_orbits:
-                t_io0 = time.perf_counter()
-                variants.to_parquet(str(strat_dir / "variants_orbits.parquet"))
-                io_sec += time.perf_counter() - t_io0
-
-            assist = ASSISTPropagator()
-            t_compute0 = time.perf_counter()
-            variants_at_centers = assist.propagate_orbits(
-                variants,
-                center_times_utc,
-                covariance=False,
-                max_processes=max_processes,
-            )  # (n_var * T)
-            compute_sec += time.perf_counter() - t_compute0
-
-            # Map center time -> index in center_times_utc via (days,nanos)
-            center_days = center_times_utc.days.to_numpy(zero_copy_only=False)
-            center_nanos = center_times_utc.nanos.to_numpy(zero_copy_only=False)
-            center_key_to_idx = {(int(d), int(n)): i for i, (d, n) in enumerate(zip(center_days, center_nanos))}
-
-            # Target mjds (UTC) for window membership tests.
-            target_mjd = target_times_utc.mjd().to_numpy(zero_copy_only=False).astype(np.float64)
-            target_code = target_codes.to_numpy(zero_copy_only=False)
-
-            out_ephem_dir = strat_dir / "variants_ephemeris"
-            _ensure_dir(out_ephem_dir)
-
-            total_rows = 0
-            part = 0
-
-            # Loop over windows (small) but do vectorized propagation within each.
-            for w in windows:
-                obscode = str(w.obscode[0].as_py())
-                w0 = float(w.window_start().mjd()[0].as_py())
-                w1 = float(w.window_end().mjd()[0].as_py())
-                mask = (target_code == obscode) & (target_mjd >= w0) & (target_mjd <= w1)
-                idx = np.nonzero(mask)[0]
-                if idx.size == 0:
-                    continue
-
-                key = (int(w.time.days[0].as_py()), int(w.time.nanos[0].as_py()))
-                cidx = center_key_to_idx.get(key)
-                if cidx is None:
-                    continue
-
-                # Slice variants at this center: positions are cidx + arange(n_var)*T
-                take_idx = (cidx + np.arange(n_var, dtype=np.int64) * T).tolist()
-                variants_center = variants_at_centers.take(take_idx)
-
-                # Chunk within window targets to bound memory.
-                for j0 in range(0, int(idx.size), int(time_chunk_size)):
-                    j1 = min(j0 + int(time_chunk_size), int(idx.size))
-                    sub = idx[j0:j1].tolist()
-                    times_tdb = target_times_utc.take(sub).rescale("tdb")
-
-                    t_compute0 = time.perf_counter()
-                    prop = propagate_2body(variants_center, times_tdb)
-                    obs_tdb = Observers.from_codes([obscode] * len(times_tdb), times_tdb)
-                    obs_nm = _pair_observers_for_propagated_orbits(observers=obs_tdb, n_orbits=int(n_var))
-                    ephem = _ephem_to_utc(generate_ephemeris_2body(prop, obs_nm))
-                    compute_sec += time.perf_counter() - t_compute0
-
-                    total_rows += int(len(ephem))
-                    if write_ephemeris:
-                        t_io0 = time.perf_counter()
-                        _write_quivr_part(out_ephem_dir, qt=ephem, part_idx=part)
-                        io_sec += time.perf_counter() - t_io0
-                    part += 1
-
-            n_rows = total_rows
-        except Exception as e:  # noqa: BLE001
-            err = f"{type(e).__name__}: {e}"
-        _write_strategy_meta(
-            strat_dir,
-            dict(
-                strategy=name,
-                variant_kind=variant_kind,
-                variant_method=str(method),
-                n_variant_orbits=n_var,
-                kind="variants_ephemeris",
-                window_size_days=int(window_size_days),
-                n_orbits=int(len(orbits)),
-                n_orbits_covok=n_cov_ok,
-                n_time_targets=int(len(target_observers_utc)),
-                n_window_centers=int(len(windows)),
-                n_rows=n_rows,
-                time_chunk_size=int(time_chunk_size),
-                layout_note="Carry the same particles through ASSIST-to-centers then 2-body-to-targets; each ephemeris part is a cross product (variants_center × time_chunk).",
-                assist_max_processes=None if max_processes is None else int(max_processes),
-                assist_max_processes_variants_propagate_orbits=None if max_processes is None else int(max_processes),
-                runtime_sec=float(compute_sec),
-                io_sec=float(io_sec),
-                runtime_total_sec=float(compute_sec + io_sec),
-                error=err,
-            ),
-        )
         metrics_rows.append(
-            dict(
-                subset_dir=str(subset_dir),
-                strategy=name,
-                variant_kind=variant_kind,
-                n_orbits=int(len(orbits)),
-                n_orbits_covok=n_cov_ok,
-                n_time_targets=int(len(target_observers_utc)),
-                n_window_centers=int(len(windows)),
-                n_ephem_rows_mean=None,
-                n_variant_orbits=n_var,
-                n_ephem_rows_variants=n_rows,
-                runtime_sec=float(compute_sec),
-                io_sec=float(io_sec),
-                runtime_total_sec=float(compute_sec + io_sec),
-                error=err,
+            _run_with_strategy_logs(
+                label=strat_name,
+                fn=lambda variant_kind=variant_kind, method=method, num_samples=num_samples: _run_strategy_assist_window_then_2body_variants(
+                    subset_dir=subset_dir,
+                    strategies_dir=strategies_dir,
+                    variant_kind=str(variant_kind),
+                    method=str(method),
+                    num_samples=num_samples,
+                    orbits_all=orbits,
+                    orbits_covok=orbits_covok,
+                    n_cov_ok=int(n_cov_ok),
+                    target_codes=target_codes,
+                    target_times_utc=target_times_utc,
+                    target_observers_utc=target_observers_utc,
+                    windows=windows,
+                    window_size_days=int(window_size_days),
+                    time_chunk_size=int(time_chunk_size),
+                    max_processes=max_processes,
+                    write_ephemeris=bool(write_ephemeris),
+                    write_variants_orbits=bool(write_variants_orbits),
+                ),
             )
         )
 
     # ASSIST mean (no covariance) for all orbits.
     if _enabled("assist_mean"):
-        assist_dir = strategies_dir / "assist_mean"
-        # Benchmark time should cover only propagation + ephemeris generation (compute),
-        # not frame/target fetching, window computation, or disk I/O.
-        err = None
-        n_rows: int | None = None
-        compute_sec = 0.0
-        io_sec = 0.0
-        try:
-            _ensure_dir(assist_dir)
-            out_ephem_dir = assist_dir / "mean_ephemeris"
-            _ensure_dir(out_ephem_dir)
-            n_targets = int(len(target_observers_utc))
-            total_rows = 0
-            part = 0
-            assist = ASSISTPropagator()
-            for i0 in range(0, n_targets, int(time_chunk_size)):
-                i1 = min(i0 + int(time_chunk_size), n_targets)
-                obs_utc = target_observers_utc[i0:i1]
-                t_compute0 = time.perf_counter()
-                ephem = assist.generate_ephemeris(
-                    orbits_mean,
-                    obs_utc,
-                    covariance=False,
-                    max_processes=max_processes,
-                )
-                compute_sec += time.perf_counter() - t_compute0
-                total_rows += int(len(ephem))
-                if write_ephemeris:
-                    t_io0 = time.perf_counter()
-                    _write_quivr_part(out_ephem_dir, qt=ephem, part_idx=part)
-                    io_sec += time.perf_counter() - t_io0
-                part += 1
-            n_rows = total_rows
-        except Exception as e:  # noqa: BLE001
-            err = f"{type(e).__name__}: {e}"
-        _write_strategy_meta(
-            assist_dir,
-            dict(
-                strategy="assist_mean",
-                kind="mean_ephemeris",
-                window_size_days=int(window_size_days),
-                n_orbits=int(len(orbits)),
-                n_time_targets=int(len(target_observers_utc)),
-                n_window_centers=int(len(windows)),
-                n_rows=n_rows,
-                time_chunk_size=int(time_chunk_size),
-                runtime_sec=float(compute_sec),
-                io_sec=float(io_sec),
-                runtime_total_sec=float(compute_sec + io_sec),
-                error=err,
-            ),
-        )
         metrics_rows.append(
-            dict(
-                subset_dir=str(subset_dir),
-                strategy="assist_mean",
-                variant_kind=None,
-                n_orbits=int(len(orbits)),
-                n_orbits_covok=n_cov_ok,
-                n_time_targets=int(len(target_observers_utc)),
-                n_window_centers=int(len(windows)),
-                n_ephem_rows_mean=n_rows,
-                n_variant_orbits=None,
-                n_ephem_rows_variants=None,
-                runtime_sec=float(compute_sec),
-                io_sec=float(io_sec),
-                runtime_total_sec=float(compute_sec + io_sec),
-                error=err,
+            _run_with_strategy_logs(
+                label="assist_mean",
+                fn=lambda: _run_strategy_assist_mean(
+                    subset_dir=subset_dir,
+                    strategies_dir=strategies_dir,
+                    orbits_all=orbits,
+                    orbits_mean=orbits_mean,
+                    target_observers_utc=target_observers_utc,
+                    windows=windows,
+                    window_size_days=int(window_size_days),
+                    time_chunk_size=int(time_chunk_size),
+                    max_processes=max_processes,
+                    write_ephemeris=bool(write_ephemeris),
+                    n_cov_ok=int(n_cov_ok),
+                ),
             )
         )
 
@@ -762,92 +1211,25 @@ def run_stage2_propagation_bench(
         strat_name = f"assist_variants:{variant_kind}"
         if not _enabled(strat_name):
             continue
-        strat_dir = strategies_dir / "assist_variants" / variant_kind
-        # Benchmark time should cover only variant creation + propagation + ephemeris generation (compute),
-        # not frame/target fetching, window computation, or disk I/O.
-        err = None
-        n_rows: int | None = None
-        n_var = None
-        compute_sec = 0.0
-        io_sec = 0.0
-        try:
-            if n_cov_ok == 0:
-                raise ValueError("No orbits have fully-defined 6x6 covariance; cannot generate variants.")
-            t_compute0 = time.perf_counter()
-            variants = (
-                VariantOrbits.create(orbits_covok, method=method)
-                if num_samples is None
-                else VariantOrbits.create(orbits_covok, method=method, num_samples=int(num_samples), seed=0)
-            )
-            compute_sec += time.perf_counter() - t_compute0
-            n_var = int(len(variants))
-            _ensure_dir(strat_dir)
-            if write_variants_orbits:
-                t_io0 = time.perf_counter()
-                variants.to_parquet(str(strat_dir / "variants_orbits.parquet"))
-                io_sec += time.perf_counter() - t_io0
-            out_ephem_dir = strat_dir / "variants_ephemeris"
-            _ensure_dir(out_ephem_dir)
-            assist = ASSISTPropagator()
-
-            # Chunk over target observers; this can still be huge for MC and is intentionally opt-in.
-            n_targets = int(len(target_observers_utc))
-            total_rows = 0
-            part = 0
-            for i0 in range(0, n_targets, int(time_chunk_size)):
-                i1 = min(i0 + int(time_chunk_size), n_targets)
-                obs_utc = target_observers_utc[i0:i1]
-                t_compute0 = time.perf_counter()
-                ephem = assist.generate_ephemeris(
-                    variants,
-                    obs_utc,
-                    covariance=False,
-                    max_processes=max_processes,
-                )
-                compute_sec += time.perf_counter() - t_compute0
-                total_rows += int(len(ephem))
-                if write_ephemeris:
-                    t_io0 = time.perf_counter()
-                    _write_quivr_part(out_ephem_dir, qt=ephem, part_idx=part)
-                    io_sec += time.perf_counter() - t_io0
-                part += 1
-            n_rows = total_rows
-        except Exception as e:  # noqa: BLE001
-            err = f"{type(e).__name__}: {e}"
-        _write_strategy_meta(
-            strat_dir,
-            dict(
-                strategy="assist_variants",
-                variant_kind=variant_kind,
-                variant_method=str(method),
-                n_variant_orbits=n_var,
-                n_time_targets=int(len(target_observers_utc)),
-                n_window_centers=int(len(windows)),
-                n_rows=n_rows,
-                time_chunk_size=int(time_chunk_size),
-                layout_note="Store VariantOrbits and Ephemeris separately; each ephemeris part is a cross product (variants × time_chunk).",
-                runtime_sec=float(compute_sec),
-                io_sec=float(io_sec),
-                runtime_total_sec=float(compute_sec + io_sec),
-                error=err,
-            ),
-        )
         metrics_rows.append(
-            dict(
-                subset_dir=str(subset_dir),
-                strategy="assist_variants",
-                variant_kind=variant_kind,
-                n_orbits=int(len(orbits)),
-                n_orbits_covok=n_cov_ok,
-                n_time_targets=int(len(target_observers_utc)),
-                n_window_centers=int(len(windows)),
-                n_ephem_rows_mean=None,
-                n_variant_orbits=n_var,
-                n_ephem_rows_variants=n_rows,
-                runtime_sec=float(compute_sec),
-                io_sec=float(io_sec),
-                runtime_total_sec=float(compute_sec + io_sec),
-                error=err,
+            _run_with_strategy_logs(
+                label=strat_name,
+                fn=lambda variant_kind=variant_kind, method=method, num_samples=num_samples: _run_strategy_assist_variants(
+                    subset_dir=subset_dir,
+                    strategies_dir=strategies_dir,
+                    variant_kind=str(variant_kind),
+                    method=str(method),
+                    num_samples=num_samples,
+                    orbits_all=orbits,
+                    orbits_covok=orbits_covok,
+                    n_cov_ok=int(n_cov_ok),
+                    target_observers_utc=target_observers_utc,
+                    windows=windows,
+                    time_chunk_size=int(time_chunk_size),
+                    max_processes=max_processes,
+                    write_ephemeris=bool(write_ephemeris),
+                    write_variants_orbits=bool(write_variants_orbits),
+                ),
             )
         )
 
@@ -884,6 +1266,12 @@ def run_stage2_propagation_bench(
 def main() -> None:
     import argparse
 
+    root = logging.getLogger()
+    if not root.handlers:
+        logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s")
+    # Ensure INFO logs are emitted even if something else configured logging earlier.
+    root.setLevel(logging.INFO)
+
     p = argparse.ArgumentParser(description="Stage 2: atomic propagation benchmark runner (cached ephemerides).")
     p.add_argument("--subset-dir", type=str, required=True)
     p.add_argument("--orbits-parquet", type=str, required=True)
@@ -895,7 +1283,15 @@ def main() -> None:
         default=None,
         help="Deprecated name: now caps number of (obscode,time) targets used for benchmarking.",
     )
-    p.add_argument("--time-chunk-size", type=int, default=2048)
+    p.add_argument(
+        "--time-chunk-size",
+        type=int,
+        default=0,
+        help=(
+            "Chunk size over (obscode,time) targets (default: 0 disables chunking; run all targets in one batch). "
+            "Use a positive value only if memory becomes a problem."
+        ),
+    )
     p.add_argument(
         "--max-processes",
         type=int,

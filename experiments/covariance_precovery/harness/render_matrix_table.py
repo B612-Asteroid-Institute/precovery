@@ -170,8 +170,8 @@ def build_matrix_table(
                 columns={
                     "runtime_total_sec": "stage4_runtime_total_sec",
                     "io_sec": "stage4_io_sec",
+                    "prep_sec": "stage4_prep_sec",
                     "filter_sec": "stage4_filter_sec",
-                    "chi2_sec": "stage4_chi2_sec",
                     "n_truth_matched": "stage4_n_truth_matched",
                     "n_recovered": "stage4_n_recovered",
                     "recall": "stage4_recall",
@@ -270,7 +270,7 @@ def main() -> None:
         "stage4_runtime_total_sec",
         "stage4_io_sec",
         "stage4_filter_sec",
-        "stage4_chi2_sec",
+        "stage4_prep_sec",
         "pipeline_runtime_total_sec",
         "n_errors",
         "error",

@@ -337,11 +337,11 @@ def _filter_truth_to_orbit_ids(truth_obs: pa.Table, orbit_ids: set[str]) -> pa.T
 
 def _ephem_key_table(ephem: Ephemeris) -> pa.Table:
     # Use `object_id` (SBDB name) when present; stage2's `orbit_id` historically was not unique.
-    orbit = [str(x) for x in ephem.orbit_id.to_pylist()]
+    orbit = ephem.orbit_id.to_pylist()
     obj_col = getattr(ephem, "object_id", None)
     obj = obj_col.to_pylist() if obj_col is not None else None
     if obj is None:
-        keys = orbit
+        keys = [str(x) for x in orbit]
     else:
         # Be robust to Ephemeris tables that have an `object_id` column but contain nulls:
         # fall back to orbit_id on a per-row basis.
@@ -351,7 +351,7 @@ def _ephem_key_table(ephem: Ephemeris) -> pa.Table:
             if s:
                 keys.append(_designation_from_object_id(s))
             else:
-                keys.append(orbit[i] if i < len(orbit) else "")
+                keys.append(str(orbit[i]) if i < len(orbit) else "")
     orbit_id = pa.array(keys, type=pa.large_string())
     return pa.table({"orbit_id": orbit_id})
 
@@ -674,31 +674,27 @@ def run_stage3_healpixel_bench(
         key = f"{strategy}:{variant_kind}"
         return strategies is None or key in strategies or strategy in strategies
 
-    # Mean strategies (point/covariance-derived footprints).
-    for strat_dir in sorted(strategies_root.glob("*")):
-        if not strat_dir.is_dir():
-            continue
-        name = strat_dir.name
-        if name == "assist_variants":
-            continue
-        if name == "assist_window_then_2body_variants":
-            continue
-        if not _enabled(name):
-            continue
+    def _run_mean_strategy(*, strat_dir: Path, name: str) -> None:
+        """
+        Evaluate all mean-ephemeris footprints for a single Stage 2 strategy directory.
+
+        Appends to outer-scope metrics_rows/coverage_rows and writes per-footprint artifacts
+        into run_dir as needed.
+        """
         mean_dir = strat_dir / "mean_ephemeris"
         if not mean_dir.exists():
-            continue
+            return
         part_files = sorted(mean_dir.glob("part-*.parquet"))
         if not part_files:
-            continue
+            return
 
-        # Filter truth to the orbits actually present in this Stage 2 strategy output.
         orbit_ids_in_strategy: set[str] = set()
         try:
             ep_first = Ephemeris.from_parquet(str(part_files[0]))
             orbit_ids_in_strategy = set(_ephem_key_table(ep_first)["orbit_id"].to_pylist())
         except Exception:  # noqa: BLE001
             orbit_ids_in_strategy = set()
+
         truth_obs_tbl_strategy = _filter_truth_to_orbit_ids(truth_obs_tbl, orbit_ids_in_strategy)
         truth_keys_tbl_strategy = _truth_keys_from_truth_observations(truth_obs_tbl_strategy)
         truth_unique_tbl_strategy: pa.Table | None = None
@@ -707,24 +703,40 @@ def run_stage3_healpixel_bench(
                 subset=["orbit_id", "target_idx", "healpixel"]
             ).table
 
-        # Determine whether covariance is present for this strategy.
         try:
             ep0 = _ephem_to_utc(Ephemeris.from_parquet(str(part_files[0])))
             has_cov = (
-                ep0.coordinates.covariance is not None
-                and (not ep0.coordinates.covariance.is_all_nan())
+                ep0.coordinates.covariance is not None and (not ep0.coordinates.covariance.is_all_nan())
             )
         except Exception:  # noqa: BLE001
             has_cov = False
 
         active_footprints = ["point"] + ([] if not has_cov else ["cov_disc", "cov_polygon", "cov_mc"])
-        # Optional robust polygon rasterization via MOC.
         if has_cov:
             active_footprints.append("cov_polygon_moc")
         if not active_footprints:
-            continue
+            return
 
-        # Evaluate footprints one technique at a time (atomic).
+        meta = json.loads((strat_dir / "meta.json").read_text())
+        n_orbits = int(meta["n_orbits"])
+        chunk = int(meta.get("time_chunk_size", 1024))
+        n_targets = int(meta.get("n_time_targets", len(targets_tbl)))
+        needs_time_map = (name == "assist_window_then_2body")
+        dt_days = float(60.0) / 86400.0
+
+        truth_obs = truth_obs_tbl_strategy
+        truth_unique = (
+            truth_unique_tbl_strategy
+            if truth_unique_tbl_strategy is not None
+            else pa.table(
+                {
+                    "orbit_id": pa.array([], pa.large_string()),
+                    "target_idx": pa.array([], pa.int64()),
+                    "healpixel": pa.array([], pa.int64()),
+                }
+            )
+        )
+
         for footprint in active_footprints:
             t0 = time.perf_counter()
             n_rows_total = 0
@@ -739,38 +751,15 @@ def run_stage3_healpixel_bench(
             geom_rows: list[dict[str, object]] = []
             geom_points: list[dict[str, object]] = []
             seen_geom: set[tuple[str, int]] = set()
-            meta = json.loads((strat_dir / "meta.json").read_text())
-            n_orbits = int(meta["n_orbits"])
-            chunk = int(meta.get("time_chunk_size", 1024))
-            n_targets = int(meta.get("n_time_targets", len(targets_tbl)))
-            # Strategy-specific mapping:
-            # - 2body_* are orbit-major cross products over fixed time chunks
-            # - assist_window_then_2body writes variable-sized parts; we map by (obscode,time)->target_idx
-            needs_time_map = (name == "assist_window_then_2body")
-            dt_days = float(60.0) / 86400.0
-            truth_obs = truth_obs_tbl_strategy
-            truth_unique = (
-                truth_unique_tbl_strategy
-                if truth_unique_tbl_strategy is not None
-                else pa.table(
-                    {
-                        "orbit_id": pa.array([], pa.large_string()),
-                        "target_idx": pa.array([], pa.int64()),
-                        "healpixel": pa.array([], pa.int64()),
-                    }
-                )
-            )
+
             for pf in part_files:
                 ephem = Ephemeris.from_parquet(str(pf))
                 n_rows_total += int(len(ephem))
                 if needs_time_map:
-                    target_idx = _map_ephem_to_target_idx_by_time(
-                        ephem=ephem, targets=targets_tbl, dt_days=dt_days
-                    )
+                    target_idx = _map_ephem_to_target_idx_by_time(ephem=ephem, targets=targets_tbl, dt_days=dt_days)
                     keep = target_idx >= 0
                     if not keep.any():
                         continue
-                    # If we couldn't map some rows, drop them (cannot join to frames).
                     if not keep.all():
                         hit = np.nonzero(keep)[0]
                         ephem = ephem.take(hit.tolist())
@@ -781,31 +770,27 @@ def run_stage3_healpixel_bench(
                     chunk_len = int(min(chunk, n_targets - start))
                     if chunk_len <= 0:
                         continue
-                    target_idx = np.tile(
-                        (np.arange(chunk_len, dtype=np.int64) + start), int(n_orbits)
-                    )
-                    # Safety: some parts may be truncated; align to ephem length.
+                    target_idx = np.tile((np.arange(chunk_len, dtype=np.int64) + start), int(n_orbits))
                     target_idx = target_idx[: int(len(ephem))]
+
                 if bool(only_truth):
-                    mask = _filter_ephem_to_truth(
-                        ephem=ephem, target_idx=target_idx, truth_keys=truth_keys_tbl_strategy
-                    )
+                    mask = _filter_ephem_to_truth(ephem=ephem, target_idx=target_idx, truth_keys=truth_keys_tbl_strategy)
                     hit = np.nonzero(mask)[0]
                     if hit.size == 0:
                         continue
                     ephem = ephem.take(hit.tolist())
                     target_idx = target_idx[hit]
+
                 n_rows_used += int(len(ephem))
                 if len(ephem) == 0:
                     continue
+
                 orbit_id_arr = _ephem_key_table(ephem)["orbit_id"].to_pylist()
                 lon = ephem.coordinates.lon.to_numpy(zero_copy_only=False).astype(np.float64)
                 lat = ephem.coordinates.lat.to_numpy(zero_copy_only=False).astype(np.float64)
 
                 if footprint == "point":
-                    pix = hp.ang2pix(int(healpix_nside), lon, lat, lonlat=True, nest=True).astype(
-                        np.int64
-                    )
+                    pix = hp.ang2pix(int(healpix_nside), lon, lat, lonlat=True, nest=True).astype(np.int64)
                     sum_pred_pixels += int(len(pix))
                     pred = pa.table(
                         {
@@ -818,7 +803,7 @@ def run_stage3_healpixel_bench(
                     if ephem.coordinates.covariance is None or ephem.coordinates.covariance.is_all_nan():
                         continue
                     cov6 = ephem.coordinates.covariance.to_matrix()
-                    cov_ll = cov6[:, 1:3, 1:3].astype(np.float64)  # (N,2,2) lon/lat in deg^2
+                    cov_ll = cov6[:, 1:3, 1:3].astype(np.float64)
                     n_rows_with_cov += int(len(ephem))
 
                     pix_list: list[np.ndarray] = []
@@ -917,16 +902,18 @@ def run_stage3_healpixel_bench(
                                                 lat_deg=float(latv[j]),
                                             )
                                         )
-                    if int(np.sum(lens)) == 0:
+
+                    if not pix_list:
                         continue
-                    sum_pred_pixels += int(np.sum(lens))
-                    row_idx_rep = np.repeat(np.arange(int(len(ephem)), dtype=np.int64), lens)
-                    hpix = np.concatenate(pix_list).astype(np.int64, copy=False)
+                    pix_cat = np.concatenate(pix_list) if len(pix_list) > 1 else pix_list[0]
+                    sum_pred_pixels += int(len(pix_cat))
+                    rep_orbit = np.repeat(np.asarray(orbit_id_arr, dtype=object), lens)
+                    rep_tidx = np.repeat(target_idx.astype(np.int64), lens)
                     pred = pa.table(
                         {
-                            "orbit_id": pa.array(np.asarray(orbit_id_arr, dtype=object)[row_idx_rep], pa.large_string()),
-                            "target_idx": pa.array(target_idx.astype(np.int64)[row_idx_rep], pa.int64()),
-                            "healpixel": pa.array(hpix, pa.int64()),
+                            "orbit_id": pa.array(rep_orbit.tolist(), pa.large_string()),
+                            "target_idx": pa.array(rep_tidx, pa.int64()),
+                            "healpixel": pa.array(pix_cat.astype(np.int64), pa.int64()),
                         }
                     )
 
@@ -938,18 +925,437 @@ def run_stage3_healpixel_bench(
                     )
                 if bool(compute_extra_frames) and selected.num_rows > 0:
                     selected_parts.append(selected.select(["orbit_id", "target_idx", "healpixel"]))
+
             dt = time.perf_counter() - t0
             metrics_rows.append(
                 dict(
                     stage2_run_dir=str(stage2_run_dir),
                     subset_dir=str(subset_dir),
-                    strategy=name,
+                    strategy=str(name),
                     variant_kind=None,
                     footprint=str(footprint),
                     healpix_nside=int(healpix_nside),
                     n_rows_ephem=int(n_rows_used),
-                    n_groups=int(n_rows_used),
-                    n_rows_with_cov=int(n_rows_with_cov),
+                    n_groups=None,
+                    n_rows_with_cov=(None if footprint == "point" else int(n_rows_with_cov)),
+                    sum_pred_pixels=int(sum_pred_pixels),
+                    sum_frame_pixels=0,
+                    sum_intersection=int(sum_intersection),
+                    runtime_sec=float(dt),
+                    n_errors=(None if n_errors == 0 else int(n_errors)),
+                    error=first_error,
+                )
+            )
+
+            tt = int(truth_obs_tbl_strategy.num_rows)
+            th = int(covered_total)
+            n_selected = None
+            n_extra = None
+            if bool(compute_extra_frames) and selected_parts:
+                sel_all = pa.concat_tables(selected_parts).combine_chunks()
+                sel_unique = TruthObservations.from_pyarrow(sel_all).drop_duplicates(
+                    subset=["orbit_id", "target_idx", "healpixel"]
+                ).table
+                n_selected = int(sel_unique.num_rows)
+                n_in_truth = int(
+                    sel_unique.join(truth_unique, keys=["orbit_id", "target_idx", "healpixel"], join_type="inner").num_rows
+                )
+                n_extra = int(n_selected - n_in_truth)
+                keys_dir = run_dir / "selected_keys" / str(name) / str(footprint)
+                _ensure_dir(keys_dir)
+                TruthObservations.from_pyarrow(sel_unique).to_parquet(str(keys_dir / "selected_keys_unique.parquet"))
+
+            if bool(compute_extra_frames) and bool(persist_geometry):
+                write_geometry_artifacts(
+                    run_dir=run_dir,
+                    strategy=str(name),
+                    variant_kind=None,
+                    footprint=str(footprint),
+                    geometry_rows=geom_rows,
+                    points_rows=geom_points,
+                )
+
+            coverage_rows.append(
+                dict(
+                    stage2_run_dir=str(stage2_run_dir),
+                    subset_dir=str(subset_dir),
+                    strategy=str(name),
+                    variant_kind=None,
+                    footprint=str(footprint),
+                    healpix_nside=int(healpix_nside),
+                    n_truth=tt,
+                    n_covered=th,
+                    coverage=(0.0 if tt == 0 else float(th) / float(tt)),
+                    n_selected=n_selected,
+                    n_extra_frames=n_extra,
+                )
+            )
+
+    def _run_variant_kind(
+        *,
+        variant_root_name: str,
+        strat_dir: Path,
+        variant_kind: str,
+        part_files: list[Path],
+    ) -> None:
+        """
+        Evaluate all variant-ephemeris footprints for one (strategy, variant_kind).
+
+        Appends to outer-scope metrics_rows/coverage_rows and writes per-footprint artifacts
+        into run_dir as needed.
+        """
+        orbit_ids_in_strategy: set[str] = set()
+        try:
+            ep_first = VariantEphemeris.from_parquet(str(part_files[0]))
+            orbit_ids_in_strategy = set(_ephem_key_table(ep_first)["orbit_id"].to_pylist())
+        except Exception:  # noqa: BLE001
+            orbit_ids_in_strategy = set()
+
+        truth_obs_tbl_strategy = _filter_truth_to_orbit_ids(truth_obs_tbl, orbit_ids_in_strategy)
+        truth_keys_tbl_strategy = _truth_keys_from_truth_observations(truth_obs_tbl_strategy)
+        truth_unique_tbl_strategy: pa.Table | None = None
+        if bool(compute_extra_frames) and truth_obs_tbl_strategy.num_rows > 0:
+            truth_unique_tbl_strategy = TruthObservations.from_pyarrow(truth_obs_tbl_strategy).drop_duplicates(
+                subset=["orbit_id", "target_idx", "healpixel"]
+            ).table
+
+        # Always map target_idx by (obscode,time) for variant outputs (parts can be irregular).
+        dt_days = float(60.0) / 86400.0
+        truth_obs = truth_obs_tbl_strategy
+        truth_unique = (
+            truth_unique_tbl_strategy
+            if truth_unique_tbl_strategy is not None
+            else pa.table(
+                {
+                    "orbit_id": pa.array([], pa.large_string()),
+                    "target_idx": pa.array([], pa.int64()),
+                    "healpixel": pa.array([], pa.int64()),
+                }
+            )
+        )
+
+        variant_footprints = [
+            ("sample_direct", None),
+            ("sample_polygon", "angle_sort"),
+            ("sample_polygon", "convex_hull"),
+            ("sample_polygon_moc", "angle_sort"),
+            ("sample_polygon_moc", "convex_hull"),
+            ("sample_corridor", None),
+            ("cov_disc_reconstructed", None),
+            ("cov_polygon_reconstructed", None),
+            ("cov_polygon_reconstructed_moc", None),
+            ("cov_mc_reconstructed", None),
+        ]
+
+        for footprint, polygon_mode in variant_footprints:
+            out_fp = (
+                f"{footprint}:{polygon_mode}"
+                if (footprint in {"sample_polygon", "sample_polygon_moc"} and polygon_mode is not None)
+                else str(footprint)
+            )
+            t0 = time.perf_counter()
+            n_rows_total = 0
+            n_rows_used = 0
+            n_groups = 0
+            sum_pred_pixels = 0
+            sum_intersection = 0
+            covered_total = 0
+            n_errors = 0
+            first_error: str | None = None
+            selected_parts: list[pa.Table] = []
+            geom_rows: list[dict[str, object]] = []
+            geom_points: list[dict[str, object]] = []
+            seen_geom: set[tuple[str, int]] = set()
+
+            for pf in part_files:
+                ephem = VariantEphemeris.from_parquet(str(pf))
+                n_rows_total += int(len(ephem))
+                if len(ephem) == 0:
+                    continue
+                target_idx = _map_ephem_to_target_idx_by_time(ephem=ephem, targets=targets_tbl, dt_days=dt_days)
+                keep = target_idx >= 0
+                if not keep.any():
+                    continue
+                if not keep.all():
+                    hit = np.nonzero(keep)[0]
+                    ephem = ephem.take(hit.tolist())
+                    target_idx = target_idx[hit]
+
+                if bool(only_truth):
+                    mask = _filter_ephem_to_truth(ephem=ephem, target_idx=target_idx, truth_keys=truth_keys_tbl_strategy)
+                    hit = np.nonzero(mask)[0]
+                    if hit.size == 0:
+                        continue
+                    ephem = ephem.take(hit.tolist())
+                    target_idx = target_idx[hit]
+
+                if len(ephem) == 0:
+                    continue
+                n_rows_used += int(len(ephem))
+
+                orbit_id = np.asarray(_ephem_key_table(ephem)["orbit_id"].to_pylist(), dtype=object)
+                lon = ephem.coordinates.lon.to_numpy(zero_copy_only=False).astype(np.float64)
+                lat = ephem.coordinates.lat.to_numpy(zero_copy_only=False).astype(np.float64)
+                order, starts = _group_slices_by_orbit_target(orbit_id, target_idx.astype(np.int64))
+                if starts.size == 0:
+                    continue
+                ends = np.concatenate([starts[1:], np.array([len(order)], dtype=np.int64)])
+
+                pred_orbit: list[str] = []
+                pred_tidx: list[int] = []
+                pred_hpix: list[int] = []
+                for s, e in zip(starts.tolist(), ends.tolist()):
+                    idx = order[s:e]
+                    if idx.size == 0:
+                        continue
+                    n_groups += 1
+                    oid = str(orbit_id[idx[0]])
+                    tidx = int(target_idx[idx[0]])
+                    lon_g = lon[idx]
+                    lat_g = lat[idx]
+
+                    if "_reconstructed" in footprint:
+                        vsub = ephem.take(idx.tolist())
+                        try:
+                            collapsed = _collapse_variant_ephemeris_group(variants=vsub)
+                            lon0 = float(collapsed.coordinates.lon[0].as_py())
+                            lat0 = float(collapsed.coordinates.lat[0].as_py())
+                            cov6 = collapsed.coordinates.covariance.to_matrix()[0].astype(np.float64)
+                            cov_ll = cov6[1:3, 1:3]
+                            if bool(persist_geometry):
+                                k = (str(oid), int(tidx))
+                                if k not in seen_geom:
+                                    seen_geom.add(k)
+                                    geom_id = f"{k[0]}|{k[1]}"
+                                    if str(footprint) in {"cov_polygon_reconstructed", "cov_polygon_reconstructed_moc"}:
+                                        lonv, latv = ellipse_boundary_vertices_lonlat_deg_from_cov(
+                                            lon0_deg=float(lon0),
+                                            lat0_deg=float(lat0),
+                                            cov_ll_deg2=np.asarray(cov_ll, dtype=np.float64),
+                                            n_sigma=float(n_sigma),
+                                            num_vertices=int(polygon_vertices),
+                                        )
+                                        geom_rows.append(
+                                            dict(
+                                                strategy=str(variant_root_name),
+                                                variant_kind=str(variant_kind),
+                                                footprint=str(out_fp),
+                                                orbit_id=str(k[0]),
+                                                target_idx=int(k[1]),
+                                                geometry_kind="polygon_vertices",
+                                                lon0_deg=float(lon0),
+                                                lat0_deg=float(lat0),
+                                                cov_ll_00=float(cov_ll[0, 0]),
+                                                cov_ll_01=float(cov_ll[0, 1]),
+                                                cov_ll_10=float(cov_ll[1, 0]),
+                                                cov_ll_11=float(cov_ll[1, 1]),
+                                                n_sigma=float(n_sigma),
+                                                polygon_vertices=int(polygon_vertices),
+                                                polygon_mode=None,
+                                                corridor_radius_arcsec=None,
+                                                corridor_step_arcsec=None,
+                                                buffer_arcsec=0.0,
+                                                geom_id=str(geom_id),
+                                            )
+                                        )
+                                        for j in range(len(lonv)):
+                                            geom_points.append(
+                                                dict(
+                                                    geom_id=str(geom_id),
+                                                    kind="polygon_vertex",
+                                                    idx=int(j),
+                                                    lon_deg=float(lonv[j]),
+                                                    lat_deg=float(latv[j]),
+                                                )
+                                            )
+                                    else:
+                                        geom_rows.append(
+                                            dict(
+                                                strategy=str(variant_root_name),
+                                                variant_kind=str(variant_kind),
+                                                footprint=str(out_fp),
+                                                orbit_id=str(k[0]),
+                                                target_idx=int(k[1]),
+                                                geometry_kind="ellipse_cov",
+                                                lon0_deg=float(lon0),
+                                                lat0_deg=float(lat0),
+                                                cov_ll_00=float(cov_ll[0, 0]),
+                                                cov_ll_01=float(cov_ll[0, 1]),
+                                                cov_ll_10=float(cov_ll[1, 0]),
+                                                cov_ll_11=float(cov_ll[1, 1]),
+                                                n_sigma=float(n_sigma),
+                                                polygon_vertices=None,
+                                                polygon_mode=None,
+                                                corridor_radius_arcsec=None,
+                                                corridor_step_arcsec=None,
+                                                buffer_arcsec=None,
+                                                geom_id=None,
+                                            )
+                                        )
+                            if footprint.endswith("_reconstructed_moc"):
+                                base = footprint.replace("_reconstructed_moc", "_moc")
+                            else:
+                                base = footprint.replace("_reconstructed", "")
+                            pix = _predicted_pixels_from_mean_row(
+                                lon_deg=float(lon0),
+                                lat_deg=float(lat0),
+                                cov_ll_deg2=cov_ll,
+                                nside=int(healpix_nside),
+                                footprint=str(base),
+                                n_sigma=float(n_sigma),
+                                polygon_vertices=int(polygon_vertices),
+                                mc_num_samples=int(cov_mc_num_samples),
+                                mc_seed=int(cov_mc_seed),
+                            )
+                        except BaseException as e:  # noqa: BLE001
+                            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                                raise
+                            n_errors += 1
+                            if first_error is None:
+                                first_error = f"{type(e).__name__}: {e}"
+                            pix = np.array([], dtype=np.int64)
+                    else:
+                        try:
+                            if bool(persist_geometry):
+                                k = (str(oid), int(tidx))
+                                if k not in seen_geom:
+                                    seen_geom.add(k)
+                                    geom_id = f"{k[0]}|{k[1]}"
+                                    if str(footprint) in {"sample_polygon", "sample_polygon_moc"}:
+                                        poly = perimeter_polygon_from_samples(
+                                            lon0_deg=float(lon_g[0]),
+                                            lat0_deg=float(lat_g[0]),
+                                            lon_deg=lon_g.astype(np.float64, copy=False),
+                                            lat_deg=lat_g.astype(np.float64, copy=False),
+                                            mode=("convex_hull" if polygon_mode == "convex_hull" else "angle_sort"),
+                                        )
+                                        geom_rows.append(
+                                            dict(
+                                                strategy=str(variant_root_name),
+                                                variant_kind=str(variant_kind),
+                                                footprint=str(out_fp),
+                                                orbit_id=str(k[0]),
+                                                target_idx=int(k[1]),
+                                                geometry_kind="polygon_vertices",
+                                                lon0_deg=float(lon_g[0]),
+                                                lat0_deg=float(lat_g[0]),
+                                                cov_ll_00=None,
+                                                cov_ll_01=None,
+                                                cov_ll_10=None,
+                                                cov_ll_11=None,
+                                                n_sigma=None,
+                                                polygon_vertices=int(len(poly)),
+                                                polygon_mode=str(polygon_mode),
+                                                corridor_radius_arcsec=None,
+                                                corridor_step_arcsec=None,
+                                                buffer_arcsec=0.0,
+                                                geom_id=str(geom_id),
+                                            )
+                                        )
+                                        for j in range(len(poly)):
+                                            geom_points.append(
+                                                dict(
+                                                    geom_id=str(geom_id),
+                                                    kind="polygon_vertex",
+                                                    idx=int(j),
+                                                    lon_deg=float(poly[j, 0]),
+                                                    lat_deg=float(poly[j, 1]),
+                                                )
+                                            )
+                                    elif str(footprint) == "sample_corridor":
+                                        lonp, latp = corridor_path_lonlat_deg_from_samples(
+                                            lon0_deg=float(lon_g[0]),
+                                            lat0_deg=float(lat_g[0]),
+                                            lon_deg=lon_g.astype(np.float64, copy=False),
+                                            lat_deg=lat_g.astype(np.float64, copy=False),
+                                        )
+                                        geom_rows.append(
+                                            dict(
+                                                strategy=str(variant_root_name),
+                                                variant_kind=str(variant_kind),
+                                                footprint=str(out_fp),
+                                                orbit_id=str(k[0]),
+                                                target_idx=int(k[1]),
+                                                geometry_kind="corridor_polyline",
+                                                lon0_deg=float(lon_g[0]),
+                                                lat0_deg=float(lat_g[0]),
+                                                cov_ll_00=None,
+                                                cov_ll_01=None,
+                                                cov_ll_10=None,
+                                                cov_ll_11=None,
+                                                n_sigma=None,
+                                                polygon_vertices=None,
+                                                polygon_mode=None,
+                                                corridor_radius_arcsec=float(corridor_radius_arcsec),
+                                                corridor_step_arcsec=float(corridor_step_arcsec),
+                                                buffer_arcsec=None,
+                                                geom_id=str(geom_id),
+                                            )
+                                        )
+                                        for j in range(len(lonp)):
+                                            geom_points.append(
+                                                dict(
+                                                    geom_id=str(geom_id),
+                                                    kind="corridor_path",
+                                                    idx=int(j),
+                                                    lon_deg=float(lonp[j]),
+                                                    lat_deg=float(latp[j]),
+                                                )
+                                            )
+                            pix = _predicted_pixels_from_samples(
+                                lon_deg=lon_g,
+                                lat_deg=lat_g,
+                                nside=int(healpix_nside),
+                                footprint=str(footprint),
+                                polygon_mode=("convex_hull" if polygon_mode == "convex_hull" else "angle_sort"),
+                                corridor_radius_arcsec=float(corridor_radius_arcsec),
+                                corridor_step_arcsec=float(corridor_step_arcsec),
+                            )
+                        except BaseException as e:  # noqa: BLE001
+                            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                                raise
+                            n_errors += 1
+                            if first_error is None:
+                                first_error = f"{type(e).__name__}: {e}"
+                            pix = np.array([], dtype=np.int64)
+
+                    if pix.size == 0:
+                        continue
+                    sum_pred_pixels += int(pix.size)
+                    pred_orbit.extend([oid] * int(pix.size))
+                    pred_tidx.extend([tidx] * int(pix.size))
+                    pred_hpix.extend([int(x) for x in pix.tolist()])
+
+                if not pred_orbit:
+                    continue
+                pred = pa.table(
+                    {
+                        "orbit_id": pa.array(pred_orbit, pa.large_string()),
+                        "target_idx": pa.array(np.asarray(pred_tidx, dtype=np.int64), pa.int64()),
+                        "healpixel": pa.array(np.asarray(pred_hpix, dtype=np.int64), pa.int64()),
+                    }
+                )
+                selected = pred.join(frames_pixels, keys=["target_idx", "healpixel"], join_type="inner")
+                sum_intersection += int(selected.num_rows)
+                if truth_obs.num_rows > 0 and selected.num_rows > 0:
+                    covered_total += int(
+                        truth_obs.join(selected, keys=["orbit_id", "target_idx", "healpixel"], join_type="inner").num_rows
+                    )
+                if bool(compute_extra_frames) and selected.num_rows > 0:
+                    selected_parts.append(selected.select(["orbit_id", "target_idx", "healpixel"]))
+
+            dt = time.perf_counter() - t0
+            metrics_rows.append(
+                dict(
+                    stage2_run_dir=str(stage2_run_dir),
+                    subset_dir=str(subset_dir),
+                    strategy=variant_root_name,
+                    variant_kind=str(variant_kind),
+                    footprint=str(out_fp),
+                    healpix_nside=int(healpix_nside),
+                    n_rows_ephem=int(n_rows_used),
+                    n_groups=int(n_groups),
+                    n_rows_with_cov=0,
                     sum_pred_pixels=int(sum_pred_pixels),
                     sum_frame_pixels=0,
                     sum_intersection=int(sum_intersection),
@@ -968,25 +1374,19 @@ def run_stage3_healpixel_bench(
                     subset=["orbit_id", "target_idx", "healpixel"]
                 ).table
                 n_selected = int(sel_unique.num_rows)
-                # extra frames = selected_unique \ truth_unique
                 n_in_truth = int(
-                    sel_unique.join(
-                        truth_unique, keys=["orbit_id", "target_idx", "healpixel"], join_type="inner"
-                    ).num_rows
+                    sel_unique.join(truth_unique, keys=["orbit_id", "target_idx", "healpixel"], join_type="inner").num_rows
                 )
                 n_extra = int(n_selected - n_in_truth)
-                # Optional persisted artifact for fast downstream inspection.
-                keys_dir = run_dir / "selected_keys" / name / footprint
+                keys_dir = run_dir / "selected_keys" / f"{variant_root_name}:{variant_kind}" / out_fp
                 _ensure_dir(keys_dir)
-                TruthObservations.from_pyarrow(sel_unique).to_parquet(
-                    str(keys_dir / "selected_keys_unique.parquet")
-                )
+                TruthObservations.from_pyarrow(sel_unique).to_parquet(str(keys_dir / "selected_keys_unique.parquet"))
             if bool(compute_extra_frames) and bool(persist_geometry):
                 write_geometry_artifacts(
                     run_dir=run_dir,
-                    strategy=str(name),
-                    variant_kind=None,
-                    footprint=str(footprint),
+                    strategy=str(variant_root_name),
+                    variant_kind=str(variant_kind),
+                    footprint=str(out_fp),
                     geometry_rows=geom_rows,
                     points_rows=geom_points,
                 )
@@ -994,9 +1394,9 @@ def run_stage3_healpixel_bench(
                 dict(
                     stage2_run_dir=str(stage2_run_dir),
                     subset_dir=str(subset_dir),
-                    strategy=name,
-                    variant_kind=None,
-                    footprint=str(footprint),
+                    strategy=variant_root_name,
+                    variant_kind=str(variant_kind),
+                    footprint=str(out_fp),
                     healpix_nside=int(healpix_nside),
                     n_truth=tt,
                     n_covered=th,
@@ -1005,6 +1405,17 @@ def run_stage3_healpixel_bench(
                     n_extra_frames=n_extra,
                 )
             )
+
+    # Mean strategies (point/covariance-derived footprints).
+    for strat_dir in sorted(strategies_root.glob("*")):
+        if not strat_dir.is_dir():
+            continue
+        name = strat_dir.name
+        if name in {"assist_variants", "assist_window_then_2body_variants"}:
+            continue
+        if not _enabled(name):
+            continue
+        _run_mean_strategy(strat_dir=strat_dir, name=name)
 
     # Variant strategies (sample-derived and reconstructed-covariance footprints).
     for variant_root_name in ["assist_variants", "assist_window_then_2body_variants"]:
@@ -1023,433 +1434,12 @@ def run_stage3_healpixel_bench(
             part_files = sorted(ephem_dir.glob("part-*.parquet"))
             if not part_files:
                 continue
-
-            orbit_ids_in_strategy: set[str] = set()
-            try:
-                ep_first = VariantEphemeris.from_parquet(str(part_files[0]))
-                orbit_ids_in_strategy = set(_ephem_key_table(ep_first)["orbit_id"].to_pylist())
-            except Exception:  # noqa: BLE001
-                orbit_ids_in_strategy = set()
-            truth_obs_tbl_strategy = _filter_truth_to_orbit_ids(truth_obs_tbl, orbit_ids_in_strategy)
-            truth_keys_tbl_strategy = _truth_keys_from_truth_observations(truth_obs_tbl_strategy)
-            truth_unique_tbl_strategy: pa.Table | None = None
-            if bool(compute_extra_frames) and truth_obs_tbl_strategy.num_rows > 0:
-                truth_unique_tbl_strategy = TruthObservations.from_pyarrow(truth_obs_tbl_strategy).drop_duplicates(
-                    subset=["orbit_id", "target_idx", "healpixel"]
-                ).table
-
-            # Always map target_idx by (obscode,time) for variant outputs (parts can be irregular).
-            dt_days = float(60.0) / 86400.0
-            truth_obs = truth_obs_tbl_strategy
-            truth_unique = (
-                truth_unique_tbl_strategy
-                if truth_unique_tbl_strategy is not None
-                else pa.table(
-                    {
-                        "orbit_id": pa.array([], pa.large_string()),
-                        "target_idx": pa.array([], pa.int64()),
-                        "healpixel": pa.array([], pa.int64()),
-                    }
-                )
+            _run_variant_kind(
+                variant_root_name=str(variant_root_name),
+                strat_dir=strat_dir,
+                variant_kind=str(variant_kind),
+                part_files=part_files,
             )
-
-            variant_footprints = [
-                ("sample_direct", None),
-                ("sample_polygon", "angle_sort"),
-                ("sample_polygon", "convex_hull"),
-                ("sample_polygon_moc", "angle_sort"),
-                ("sample_polygon_moc", "convex_hull"),
-                ("sample_corridor", None),
-                ("cov_disc_reconstructed", None),
-                ("cov_polygon_reconstructed", None),
-                ("cov_polygon_reconstructed_moc", None),
-                ("cov_mc_reconstructed", None),
-            ]
-
-            for footprint, polygon_mode in variant_footprints:
-                out_fp = (
-                    f"{footprint}:{polygon_mode}"
-                    if (footprint in {"sample_polygon", "sample_polygon_moc"} and polygon_mode is not None)
-                    else str(footprint)
-                )
-                t0 = time.perf_counter()
-                n_rows_total = 0
-                n_rows_used = 0
-                n_groups = 0
-                sum_pred_pixels = 0
-                sum_intersection = 0
-                covered_total = 0
-                n_errors = 0
-                first_error: str | None = None
-                selected_parts: list[pa.Table] = []
-                geom_rows: list[dict[str, object]] = []
-                geom_points: list[dict[str, object]] = []
-                seen_geom: set[tuple[str, int]] = set()
-                geom_rows: list[dict[str, object]] = []
-                geom_points: list[dict[str, object]] = []
-                seen_geom: set[tuple[str, int]] = set()
-
-                for pf in part_files:
-                    ephem = VariantEphemeris.from_parquet(str(pf))
-                    n_rows_total += int(len(ephem))
-                    if len(ephem) == 0:
-                        continue
-                    target_idx = _map_ephem_to_target_idx_by_time(ephem=ephem, targets=targets_tbl, dt_days=dt_days)
-                    keep = target_idx >= 0
-                    if not keep.any():
-                        continue
-                    if not keep.all():
-                        hit = np.nonzero(keep)[0]
-                        ephem = ephem.take(hit.tolist())
-                        target_idx = target_idx[hit]
-
-                    if bool(only_truth):
-                        mask = _filter_ephem_to_truth(
-                            ephem=ephem, target_idx=target_idx, truth_keys=truth_keys_tbl_strategy
-                        )
-                        hit = np.nonzero(mask)[0]
-                        if hit.size == 0:
-                            continue
-                        ephem = ephem.take(hit.tolist())
-                        target_idx = target_idx[hit]
-
-                    if len(ephem) == 0:
-                        continue
-                    n_rows_used += int(len(ephem))
-
-                    orbit_id = np.asarray(_ephem_key_table(ephem)["orbit_id"].to_pylist(), dtype=object)
-                    lon = ephem.coordinates.lon.to_numpy(zero_copy_only=False).astype(np.float64)
-                    lat = ephem.coordinates.lat.to_numpy(zero_copy_only=False).astype(np.float64)
-                    order, starts = _group_slices_by_orbit_target(orbit_id, target_idx.astype(np.int64))
-                    if starts.size == 0:
-                        continue
-                    # Add end sentinel.
-                    ends = np.concatenate([starts[1:], np.array([len(order)], dtype=np.int64)])
-
-                    # Accumulate predicted pixels per group into a key table.
-                    pred_orbit: list[str] = []
-                    pred_tidx: list[int] = []
-                    pred_hpix: list[int] = []
-                    for s, e in zip(starts.tolist(), ends.tolist()):
-                        idx = order[s:e]
-                        if idx.size == 0:
-                            continue
-                        n_groups += 1
-                        oid = str(orbit_id[idx[0]])
-                        tidx = int(target_idx[idx[0]])
-                        lon_g = lon[idx]
-                        lat_g = lat[idx]
-
-                        if "_reconstructed" in footprint:
-                            vsub = ephem.take(idx.tolist())
-                            try:
-                                collapsed = _collapse_variant_ephemeris_group(
-                                    variants=vsub,
-                                )
-                                lon0 = float(collapsed.coordinates.lon[0].as_py())
-                                lat0 = float(collapsed.coordinates.lat[0].as_py())
-                                cov6 = collapsed.coordinates.covariance.to_matrix()[0].astype(np.float64)
-                                cov_ll = cov6[1:3, 1:3]
-                                if bool(persist_geometry):
-                                    k = (str(oid), int(tidx))
-                                    if k not in seen_geom:
-                                        seen_geom.add(k)
-                                        geom_id = f"{k[0]}|{k[1]}"
-                                        if str(footprint) in {"cov_polygon_reconstructed", "cov_polygon_reconstructed_moc"}:
-                                            lonv, latv = ellipse_boundary_vertices_lonlat_deg_from_cov(
-                                                lon0_deg=float(lon0),
-                                                lat0_deg=float(lat0),
-                                                cov_ll_deg2=np.asarray(cov_ll, dtype=np.float64),
-                                                n_sigma=float(n_sigma),
-                                                num_vertices=int(polygon_vertices),
-                                            )
-                                            geom_rows.append(
-                                                dict(
-                                                    strategy=str(variant_root_name),
-                                                    variant_kind=str(variant_kind),
-                                                    footprint=str(out_fp),
-                                                    orbit_id=str(k[0]),
-                                                    target_idx=int(k[1]),
-                                                    geometry_kind="polygon_vertices",
-                                                    lon0_deg=float(lon0),
-                                                    lat0_deg=float(lat0),
-                                                    cov_ll_00=float(cov_ll[0, 0]),
-                                                    cov_ll_01=float(cov_ll[0, 1]),
-                                                    cov_ll_10=float(cov_ll[1, 0]),
-                                                    cov_ll_11=float(cov_ll[1, 1]),
-                                                    n_sigma=float(n_sigma),
-                                                    polygon_vertices=int(polygon_vertices),
-                                                    polygon_mode=None,
-                                                    corridor_radius_arcsec=None,
-                                                    corridor_step_arcsec=None,
-                                                    buffer_arcsec=0.0,
-                                                    geom_id=str(geom_id),
-                                                )
-                                            )
-                                            for j in range(len(lonv)):
-                                                geom_points.append(
-                                                    dict(
-                                                        geom_id=str(geom_id),
-                                                        kind="polygon_vertex",
-                                                        idx=int(j),
-                                                        lon_deg=float(lonv[j]),
-                                                        lat_deg=float(latv[j]),
-                                                    )
-                                                )
-                                        else:
-                                            geom_rows.append(
-                                                dict(
-                                                    strategy=str(variant_root_name),
-                                                    variant_kind=str(variant_kind),
-                                                    footprint=str(out_fp),
-                                                    orbit_id=str(k[0]),
-                                                    target_idx=int(k[1]),
-                                                    geometry_kind="ellipse_cov",
-                                                    lon0_deg=float(lon0),
-                                                    lat0_deg=float(lat0),
-                                                    cov_ll_00=float(cov_ll[0, 0]),
-                                                    cov_ll_01=float(cov_ll[0, 1]),
-                                                    cov_ll_10=float(cov_ll[1, 0]),
-                                                    cov_ll_11=float(cov_ll[1, 1]),
-                                                    n_sigma=float(n_sigma),
-                                                    polygon_vertices=None,
-                                                    polygon_mode=None,
-                                                    corridor_radius_arcsec=None,
-                                                    corridor_step_arcsec=None,
-                                                    buffer_arcsec=None,
-                                                    geom_id=None,
-                                                )
-                                            )
-                                if footprint.endswith("_reconstructed_moc"):
-                                    base = footprint.replace("_reconstructed_moc", "_moc")
-                                else:
-                                    base = footprint.replace("_reconstructed", "")
-                                pix = _predicted_pixels_from_mean_row(
-                                    lon_deg=float(lon0),
-                                    lat_deg=float(lat0),
-                                    cov_ll_deg2=cov_ll,
-                                    nside=int(healpix_nside),
-                                    footprint=str(base),
-                                    n_sigma=float(n_sigma),
-                                    polygon_vertices=int(polygon_vertices),
-                                    mc_num_samples=int(cov_mc_num_samples),
-                                    mc_seed=int(cov_mc_seed),
-                                )
-                            except BaseException as e:  # noqa: BLE001
-                                if isinstance(e, (KeyboardInterrupt, SystemExit)):
-                                    raise
-                                n_errors += 1
-                                if first_error is None:
-                                    first_error = f"{type(e).__name__}: {e}"
-                                pix = np.array([], dtype=np.int64)
-                        else:
-                            try:
-                                if bool(persist_geometry):
-                                    k = (str(oid), int(tidx))
-                                    if k not in seen_geom:
-                                        seen_geom.add(k)
-                                        geom_id = f"{k[0]}|{k[1]}"
-                                        if str(footprint) in {"sample_polygon", "sample_polygon_moc"}:
-                                            poly = perimeter_polygon_from_samples(
-                                                lon0_deg=float(lon_g[0]),
-                                                lat0_deg=float(lat_g[0]),
-                                                lon_deg=lon_g.astype(np.float64, copy=False),
-                                                lat_deg=lat_g.astype(np.float64, copy=False),
-                                                mode=("convex_hull" if polygon_mode == "convex_hull" else "angle_sort"),
-                                            )
-                                            geom_rows.append(
-                                                dict(
-                                                    strategy=str(variant_root_name),
-                                                    variant_kind=str(variant_kind),
-                                                    footprint=str(out_fp),
-                                                    orbit_id=str(k[0]),
-                                                    target_idx=int(k[1]),
-                                                    geometry_kind="polygon_vertices",
-                                                    lon0_deg=float(lon_g[0]),
-                                                    lat0_deg=float(lat_g[0]),
-                                                    cov_ll_00=None,
-                                                    cov_ll_01=None,
-                                                    cov_ll_10=None,
-                                                    cov_ll_11=None,
-                                                    n_sigma=None,
-                                                    polygon_vertices=int(len(poly)),
-                                                    polygon_mode=str(polygon_mode),
-                                                    corridor_radius_arcsec=None,
-                                                    corridor_step_arcsec=None,
-                                                    buffer_arcsec=0.0,
-                                                    geom_id=str(geom_id),
-                                                )
-                                            )
-                                            for j in range(len(poly)):
-                                                geom_points.append(
-                                                    dict(
-                                                        geom_id=str(geom_id),
-                                                        kind="polygon_vertex",
-                                                        idx=int(j),
-                                                        lon_deg=float(poly[j, 0]),
-                                                        lat_deg=float(poly[j, 1]),
-                                                    )
-                                                )
-                                        elif str(footprint) == "sample_corridor":
-                                            lonp, latp = corridor_path_lonlat_deg_from_samples(
-                                                lon0_deg=float(lon_g[0]),
-                                                lat0_deg=float(lat_g[0]),
-                                                lon_deg=lon_g.astype(np.float64, copy=False),
-                                                lat_deg=lat_g.astype(np.float64, copy=False),
-                                            )
-                                            geom_rows.append(
-                                                dict(
-                                                    strategy=str(variant_root_name),
-                                                    variant_kind=str(variant_kind),
-                                                    footprint=str(out_fp),
-                                                    orbit_id=str(k[0]),
-                                                    target_idx=int(k[1]),
-                                                    geometry_kind="corridor_polyline",
-                                                    lon0_deg=float(lon_g[0]),
-                                                    lat0_deg=float(lat_g[0]),
-                                                    cov_ll_00=None,
-                                                    cov_ll_01=None,
-                                                    cov_ll_10=None,
-                                                    cov_ll_11=None,
-                                                    n_sigma=None,
-                                                    polygon_vertices=None,
-                                                    polygon_mode=None,
-                                                    corridor_radius_arcsec=float(corridor_radius_arcsec),
-                                                    corridor_step_arcsec=float(corridor_step_arcsec),
-                                                    buffer_arcsec=None,
-                                                    geom_id=str(geom_id),
-                                                )
-                                            )
-                                            for j in range(len(lonp)):
-                                                geom_points.append(
-                                                    dict(
-                                                        geom_id=str(geom_id),
-                                                        kind="corridor_path",
-                                                        idx=int(j),
-                                                        lon_deg=float(lonp[j]),
-                                                        lat_deg=float(latp[j]),
-                                                    )
-                                                )
-                                pix = _predicted_pixels_from_samples(
-                                    lon_deg=lon_g,
-                                    lat_deg=lat_g,
-                                    nside=int(healpix_nside),
-                                    footprint=str(footprint),
-                                    polygon_mode=(
-                                        "convex_hull"
-                                        if polygon_mode == "convex_hull"
-                                        else "angle_sort"
-                                    ),
-                                    corridor_radius_arcsec=float(corridor_radius_arcsec),
-                                    corridor_step_arcsec=float(corridor_step_arcsec),
-                                )
-                            except BaseException as e:  # noqa: BLE001
-                                if isinstance(e, (KeyboardInterrupt, SystemExit)):
-                                    raise
-                                n_errors += 1
-                                if first_error is None:
-                                    first_error = f"{type(e).__name__}: {e}"
-                                pix = np.array([], dtype=np.int64)
-                        if pix.size == 0:
-                            continue
-                        sum_pred_pixels += int(pix.size)
-                        pred_orbit.extend([oid] * int(pix.size))
-                        pred_tidx.extend([tidx] * int(pix.size))
-                        pred_hpix.extend([int(x) for x in pix.tolist()])
-
-                    if not pred_orbit:
-                        continue
-                    pred = pa.table(
-                        {
-                            "orbit_id": pa.array(pred_orbit, pa.large_string()),
-                            "target_idx": pa.array(np.asarray(pred_tidx, dtype=np.int64), pa.int64()),
-                            "healpixel": pa.array(np.asarray(pred_hpix, dtype=np.int64), pa.int64()),
-                        }
-                    )
-                    selected = pred.join(frames_pixels, keys=["target_idx", "healpixel"], join_type="inner")
-                    sum_intersection += int(selected.num_rows)
-                    if truth_obs.num_rows > 0 and selected.num_rows > 0:
-                        covered_total += int(
-                            truth_obs.join(
-                                selected, keys=["orbit_id", "target_idx", "healpixel"], join_type="inner"
-                            ).num_rows
-                        )
-                    if bool(compute_extra_frames) and selected.num_rows > 0:
-                        selected_parts.append(selected.select(["orbit_id", "target_idx", "healpixel"]))
-
-                dt = time.perf_counter() - t0
-                metrics_rows.append(
-                    dict(
-                        stage2_run_dir=str(stage2_run_dir),
-                        subset_dir=str(subset_dir),
-                        strategy=variant_root_name,
-                        variant_kind=str(variant_kind),
-                        footprint=str(out_fp),
-                        healpix_nside=int(healpix_nside),
-                        n_rows_ephem=int(n_rows_used),
-                        n_groups=int(n_groups),
-                        n_rows_with_cov=0,
-                        sum_pred_pixels=int(sum_pred_pixels),
-                        sum_frame_pixels=0,
-                        sum_intersection=int(sum_intersection),
-                        runtime_sec=float(dt),
-                        n_errors=(None if n_errors == 0 else int(n_errors)),
-                        error=first_error,
-                    )
-                )
-                tt = int(truth_obs_tbl_strategy.num_rows)
-                th = int(covered_total)
-                n_selected = None
-                n_extra = None
-                if bool(compute_extra_frames) and selected_parts:
-                    sel_all = pa.concat_tables(selected_parts).combine_chunks()
-                    sel_unique = TruthObservations.from_pyarrow(sel_all).drop_duplicates(
-                        subset=["orbit_id", "target_idx", "healpixel"]
-                    ).table
-                    n_selected = int(sel_unique.num_rows)
-                    n_in_truth = int(
-                        sel_unique.join(truth_unique, keys=["orbit_id", "target_idx", "healpixel"], join_type="inner").num_rows
-                    )
-                    n_extra = int(n_selected - n_in_truth)
-                    keys_dir = run_dir / "selected_keys" / f"{variant_root_name}:{variant_kind}" / out_fp
-                    _ensure_dir(keys_dir)
-                    TruthObservations.from_pyarrow(sel_unique).to_parquet(
-                        str(keys_dir / "selected_keys_unique.parquet")
-                    )
-                if bool(compute_extra_frames) and bool(persist_geometry):
-                    write_geometry_artifacts(
-                        run_dir=run_dir,
-                        strategy=str(variant_root_name),
-                        variant_kind=str(variant_kind),
-                        footprint=str(out_fp),
-                        geometry_rows=geom_rows,
-                        points_rows=geom_points,
-                    )
-                if bool(compute_extra_frames) and bool(persist_geometry):
-                    strat_key = str(variant_root_name) if variant_kind is None else f"{variant_root_name}:{variant_kind}"
-                    write_geometry_artifacts(
-                        run_dir=run_dir,
-                        strategy=strat_key if ":" not in strat_key else str(variant_root_name),
-                        variant_kind=str(variant_kind),
-                        footprint=str(out_fp),
-                        geometry_rows=geom_rows,
-                        points_rows=geom_points,
-                    )
-                coverage_rows.append(
-                    dict(
-                        stage2_run_dir=str(stage2_run_dir),
-                        subset_dir=str(subset_dir),
-                        strategy=variant_root_name,
-                        variant_kind=str(variant_kind),
-                        footprint=str(out_fp),
-                        healpix_nside=int(healpix_nside),
-                        n_truth=tt,
-                        n_covered=th,
-                        coverage=(0.0 if tt == 0 else float(th) / float(tt)),
-                        n_selected=n_selected,
-                        n_extra_frames=n_extra,
-                    )
-                )
 
     metrics = Stage3Metrics.from_pyarrow(pa.Table.from_pylist(metrics_rows))
     coverage = Stage3Coverage.from_pyarrow(pa.Table.from_pylist(coverage_rows))
