@@ -34,7 +34,7 @@ dependencies = [
     "pandas",
     "healpy",
     "requests",
-    "adam-core @ git+ssh://git@github.com/B612-Asteroid-Institute/adam_core.git@49c4b0e040851f1aa8da835a7d763d2c59634bd8",
+    "adam-core @ git+ssh://git@github.com/B612-Asteroid-Institute/adam_core.git@e871f1195aeffc602ed65911661eb2d11835ed6d",
     "pip>=25.3",
     "mocpy>=0.19.1",
 ]

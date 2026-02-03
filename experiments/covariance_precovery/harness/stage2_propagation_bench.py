@@ -80,7 +80,7 @@ def _run_with_strategy_logs(
     err = out.get("error")
     extra = "" if not err else f" error={err!s}"
 
-    # Optional breakdown (currently emitted for 2body_* strategies).
+    # Optional breakdowns.
     t_prop = out.get("t_2body_propagate_sec")
     t_rep = out.get("t_2body_observer_repeat_sec")
     t_eph = out.get("t_2body_generate_ephemeris_sec")
@@ -93,6 +93,23 @@ def _run_with_strategy_logs(
                 f" ephem={float(t_eph):.1f}s"
                 f" utc={float(t_utc):.1f}s)"
             )
+        except Exception:  # noqa: BLE001
+            pass
+
+    t_vcreate = out.get("t_variants_create_sec")
+    t_assist_cent = out.get("t_assist_propagate_centers_sec")
+    t_obs_codes = out.get("t_observers_from_codes_sec")
+    if any(x is not None for x in (t_vcreate, t_assist_cent, t_obs_codes)):
+        parts: list[str] = []
+        try:
+            if t_vcreate is not None:
+                parts.append(f"variants_create={float(t_vcreate):.1f}s")
+            if t_assist_cent is not None:
+                parts.append(f"assist_centers={float(t_assist_cent):.1f}s")
+            if t_obs_codes is not None:
+                parts.append(f"observers_from_codes={float(t_obs_codes):.1f}s")
+            if parts:
+                extra += " " + " ".join(parts)
         except Exception:  # noqa: BLE001
             pass
 
@@ -187,6 +204,7 @@ def _run_2body_ephemeris(
     *,
     orbits: Orbits,
     window_observers_tdb: Observers,
+    max_processes: int | None = None,
     timing: dict[str, float] | None = None,
 ) -> Ephemeris:
     """
@@ -195,13 +213,21 @@ def _run_2body_ephemeris(
     """
     times = window_observers_tdb.coordinates.time
     t0 = time.perf_counter()
-    prop = propagate_2body(orbits, times)  # (N_orbits * N_times)
+    prop = (
+        propagate_2body(orbits, times, max_processes=int(max_processes))
+        if max_processes is not None
+        else propagate_2body(orbits, times)
+    )  # (N_orbits * N_times)
     t1 = time.perf_counter()
     obs_nm = _pair_observers_for_propagated_orbits(
         observers=window_observers_tdb, n_orbits=int(len(orbits))
     )
     t2 = time.perf_counter()
-    ephem = generate_ephemeris_2body(prop, obs_nm)
+    ephem = (
+        generate_ephemeris_2body(prop, obs_nm, max_processes=int(max_processes))
+        if max_processes is not None
+        else generate_ephemeris_2body(prop, obs_nm)
+    )
     t3 = time.perf_counter()
     # Store ephemeris in UTC for downstream joins (Stage 3), even if propagation
     # is performed in TDB internally.
@@ -218,7 +244,12 @@ def _run_2body_ephemeris(
     return ephem
 
 
-def _run_assist_window_then_2body(*, orbits: Orbits, window_observers_tdb: Observers) -> Ephemeris:
+def _run_assist_window_then_2body(
+    *,
+    orbits: Orbits,
+    window_observers_tdb: Observers,
+    max_processes: int | None = None,
+) -> Ephemeris:
     """
     ASSIST propagate to reference epoch (no covariance), then 2-body to each
     window-center time (paired, vectorized over orbits and times).
@@ -227,7 +258,11 @@ def _run_assist_window_then_2body(*, orbits: Orbits, window_observers_tdb: Obser
     t_ref = Timestamp.from_mjd([mean_mjd_tdb], scale="tdb")
     prop_assist = ASSISTPropagator()
     orb_ref = prop_assist.propagate_orbits(orbits, t_ref, covariance=False)
-    return _run_2body_ephemeris(orbits=orb_ref, window_observers_tdb=window_observers_tdb)
+    return _run_2body_ephemeris(
+        orbits=orb_ref,
+        window_observers_tdb=window_observers_tdb,
+        max_processes=max_processes,
+    )
 
 
 def _ephem_to_utc(ephem: Ephemeris) -> Ephemeris:
@@ -318,6 +353,96 @@ def _fetch_unique_exposure_midpoints(
     return pa.array(obscodes, type=pa.large_string()), Timestamp.from_mjd(mjds, scale="utc")
 
 
+def _fetch_truth_matched_exposure_midpoints(
+    *, subset_dir: Path, index_db: Path
+) -> tuple[pa.Array, Timestamp]:
+    """
+    Return distinct (obscode, exposure_mjd_mid) pairs for *truth-matched* detections.
+
+    Stage 3 and Stage 4 use `exposure_mjd_mid` as the join key into the subset index:
+    - Stage 3 materializes (target_idx, healpixel) by joining frames.exposure_mjd_mid
+      to Stage 2's input targets by *exact equality*.
+    - Stage 4 queries frames by (obscode, exposure_mjd_mid) when loading observations.
+
+    So in truth-only workflows we must target exposure midpoints, not detection times.
+    We derive these midpoints by joining the truth crossmatch's matched exposure IDs
+    back to `index.db`.
+    """
+    artifacts = Path(subset_dir) / "artifacts"
+    truth_path = artifacts / "truth_precovery_crossmatch.parquet"
+    if not truth_path.exists():
+        raise FileNotFoundError(f"Missing truth crossmatch parquet: {truth_path}")
+    if not Path(index_db).exists():
+        raise FileNotFoundError(f"Missing subset index.db: {index_db}")
+
+    truth = pq.read_table(
+        str(truth_path),
+        columns=[
+            "matched",
+            "obscode",
+            "match_dataset_id",
+            "match_exposure_id",
+        ],
+    )
+    truth = truth.filter(pc.equal(truth["matched"], True))
+    if truth.num_rows == 0:
+        return pa.array([], type=pa.large_string()), Timestamp.from_mjd([], scale="utc")
+
+    # Keep only rows with exposure identifiers.
+    m_has = pc.and_(
+        pc.invert(pc.is_null(truth["match_exposure_id"])),
+        pc.invert(pc.is_null(truth["match_dataset_id"])),
+    )
+    truth = truth.filter(m_has)
+    if truth.num_rows == 0:
+        return pa.array([], type=pa.large_string()), Timestamp.from_mjd([], scale="utc")
+
+    # Build a compact set of unique keys to look up in index.db.
+    # Note: keys are small enough that an in-DB temp table join is fastest and simplest.
+    ds = [str(x) for x in truth["match_dataset_id"].to_pylist()]
+    code = [str(x) for x in truth["obscode"].to_pylist()]
+    exp = [str(x) for x in truth["match_exposure_id"].to_pylist()]
+
+    keys = sorted(set(zip(ds, code, exp)))
+    if not keys:
+        return pa.array([], type=pa.large_string()), Timestamp.from_mjd([], scale="utc")
+
+    import sqlite3
+
+    conn = sqlite3.connect(str(index_db))
+    try:
+        conn.execute("CREATE TEMP TABLE truth_keys (dataset_id TEXT, obscode TEXT, exposure_id TEXT)")
+        conn.executemany(
+            "INSERT INTO truth_keys (dataset_id, obscode, exposure_id) VALUES (?, ?, ?)",
+            keys,
+        )
+        conn.execute("CREATE INDEX truth_keys_idx ON truth_keys (dataset_id, obscode, exposure_id)")
+        rows = conn.execute(
+            """
+            SELECT f.obscode, f.exposure_mjd_mid
+            FROM frames f
+            INNER JOIN truth_keys t
+              ON f.dataset_id = t.dataset_id
+             AND f.obscode = t.obscode
+             AND f.exposure_id = t.exposure_id
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return pa.array([], type=pa.large_string()), Timestamp.from_mjd([], scale="utc")
+
+    obsc = [str(r[0]) for r in rows]
+    mjd = [float(r[1]) for r in rows]
+
+    # De-dupe and stable sort by (mjd, obscode) so targets are deterministic.
+    uniq = sorted(set(zip(mjd, obsc)))
+    mjd_u = [x[0] for x in uniq]
+    obsc_u = [x[1] for x in uniq]
+    return pa.array(obsc_u, type=pa.large_string()), Timestamp.from_mjd(mjd_u, scale="utc")
+
+
 def _write_quivr_part(out_dir: Path, *, qt: qv.Table, part_idx: int) -> None:
     _ensure_dir(out_dir)
     qt.to_parquet(str(out_dir / f"part-{part_idx:06d}.parquet"))
@@ -333,6 +458,7 @@ def _run_chunked_2body_mean_ephemeris(
     orbits: Orbits,
     target_observers_tdb: Observers,
     time_chunk_size: int,
+    max_processes: int | None,
     out_ephem_dir: Path,
     write_ephemeris: bool,
 ) -> tuple[int, float, float]:
@@ -353,7 +479,12 @@ def _run_chunked_2body_mean_ephemeris(
         i1 = min(i0 + int(time_chunk_size), n_targets)
         obs_tdb = target_observers_tdb[i0:i1]
         t_compute0 = time.perf_counter()
-        ephem = _run_2body_ephemeris(orbits=orbits, window_observers_tdb=obs_tdb, timing=timing)
+        ephem = _run_2body_ephemeris(
+            orbits=orbits,
+            window_observers_tdb=obs_tdb,
+            max_processes=max_processes,
+            timing=timing,
+        )
         compute_sec += time.perf_counter() - t_compute0
         total_rows += int(len(ephem))
         if bool(write_ephemeris):
@@ -385,6 +516,7 @@ def _run_strategy_2body(
     windows: qv.Table,
     window_size_days: int,
     time_chunk_size: int,
+    max_processes: int | None,
     write_ephemeris: bool,
     include_covariance: bool,
     n_cov_ok: int,
@@ -404,6 +536,7 @@ def _run_strategy_2body(
             orbits=orbits_for_mean,
             target_observers_tdb=target_observers_tdb,
             time_chunk_size=int(time_chunk_size),
+            max_processes=max_processes,
             out_ephem_dir=out_ephem_dir,
             write_ephemeris=bool(write_ephemeris),
         )
@@ -425,6 +558,7 @@ def _run_strategy_2body(
             n_rows=n_rows,
             time_chunk_size=int(time_chunk_size),
             mean_with_covariance=bool(include_covariance),
+            two_body_max_processes=None if max_processes is None else int(max_processes),
             runtime_sec=float(compute_sec),
             io_sec=float(io_sec),
             runtime_total_sec=float(compute_sec + io_sec),
@@ -579,10 +713,12 @@ def _run_strategy_assist_window_then_2body(
                 sub = idx[j0:j1].tolist()
                 times_tdb = target_times_utc.take(sub).rescale("tdb")
                 t_compute0 = time.perf_counter()
-                prop = propagate_2body(orbits_center, times_tdb)
                 obs_tdb = Observers.from_codes([obscode] * len(times_tdb), times_tdb)
-                obs_nm = _pair_observers_for_propagated_orbits(observers=obs_tdb, n_orbits=n_orb)
-                ephem = _ephem_to_utc(generate_ephemeris_2body(prop, obs_nm))
+                ephem = _run_2body_ephemeris(
+                    orbits=orbits_center,
+                    window_observers_tdb=obs_tdb,
+                    max_processes=max_processes,
+                )
                 compute_sec += time.perf_counter() - t_compute0
                 total_rows += int(len(ephem))
                 if bool(write_ephemeris):
@@ -606,6 +742,7 @@ def _run_strategy_assist_window_then_2body(
             n_window_centers=int(len(windows)),
             n_rows=n_rows,
             time_chunk_size=int(time_chunk_size),
+            two_body_max_processes=None if max_processes is None else int(max_processes),
             runtime_sec=float(compute_sec),
             io_sec=float(io_sec),
             runtime_total_sec=float(compute_sec + io_sec),
@@ -626,6 +763,7 @@ def _run_strategy_assist_window_then_2body(
         runtime_sec=float(compute_sec),
         io_sec=float(io_sec),
         runtime_total_sec=float(compute_sec + io_sec),
+        two_body_max_processes=None if max_processes is None else int(max_processes),
         error=err,
     )
 
@@ -657,6 +795,7 @@ def _run_strategy_assist_window_then_2body_variants(
     n_var: int | None = None
     compute_sec = 0.0
     io_sec = 0.0
+    timing: dict[str, float] = {}
     try:
         if int(n_cov_ok) == 0:
             raise ValueError("No orbits have fully-defined 6x6 covariance; cannot generate variants.")
@@ -675,7 +814,9 @@ def _run_strategy_assist_window_then_2body_variants(
                 orbits_covok, method=str(method), num_samples=int(num_samples), seed=0
             )
         )
-        compute_sec += time.perf_counter() - t_compute0
+        dt = time.perf_counter() - t_compute0
+        compute_sec += dt
+        timing["t_variants_create_sec"] = timing.get("t_variants_create_sec", 0.0) + float(dt)
         n_var = int(len(variants))
 
         if bool(write_variants_orbits):
@@ -691,7 +832,9 @@ def _run_strategy_assist_window_then_2body_variants(
             covariance=False,
             max_processes=max_processes,
         )  # (n_var * T)
-        compute_sec += time.perf_counter() - t_compute0
+        dt = time.perf_counter() - t_compute0
+        compute_sec += dt
+        timing["t_assist_propagate_centers_sec"] = timing.get("t_assist_propagate_centers_sec", 0.0) + float(dt)
 
         center_days = center_times_utc.days.to_numpy(zero_copy_only=False).astype(np.int64, copy=False)
         center_nanos = center_times_utc.nanos.to_numpy(zero_copy_only=False).astype(np.int64, copy=False)
@@ -729,13 +872,19 @@ def _run_strategy_assist_window_then_2body_variants(
                 j1 = min(j0 + int(time_chunk_size), int(idx.size))
                 sub = idx[j0:j1].tolist()
                 times_tdb = target_times_utc.take(sub).rescale("tdb")
-                t_compute0 = time.perf_counter()
-                prop = propagate_2body(variants_center, times_tdb)
+
+                t_obs0 = time.perf_counter()
                 obs_tdb = Observers.from_codes([obscode] * len(times_tdb), times_tdb)
-                obs_nm = _pair_observers_for_propagated_orbits(
-                    observers=obs_tdb, n_orbits=int(n_var)
+                dt_obs = time.perf_counter() - t_obs0
+                timing["t_observers_from_codes_sec"] = timing.get("t_observers_from_codes_sec", 0.0) + float(dt_obs)
+
+                t_compute0 = time.perf_counter()
+                ephem = _run_2body_ephemeris(
+                    orbits=variants_center,
+                    window_observers_tdb=obs_tdb,
+                    max_processes=max_processes,
+                    timing=timing,
                 )
-                ephem = _ephem_to_utc(generate_ephemeris_2body(prop, obs_nm))
                 compute_sec += time.perf_counter() - t_compute0
                 total_rows += int(len(ephem))
                 if bool(write_ephemeris):
@@ -766,9 +915,11 @@ def _run_strategy_assist_window_then_2body_variants(
             layout_note="Carry the same particles through ASSIST-to-centers then 2-body-to-targets; each ephemeris part is a cross product (variants_center × time_chunk).",
             assist_max_processes=None if max_processes is None else int(max_processes),
             assist_max_processes_variants_propagate_orbits=None if max_processes is None else int(max_processes),
+            two_body_max_processes=None if max_processes is None else int(max_processes),
             runtime_sec=float(compute_sec),
             io_sec=float(io_sec),
             runtime_total_sec=float(compute_sec + io_sec),
+            **{k: float(v) for k, v in dict(timing).items()},
             error=err,
         ),
     )
@@ -786,6 +937,8 @@ def _run_strategy_assist_window_then_2body_variants(
         runtime_sec=float(compute_sec),
         io_sec=float(io_sec),
         runtime_total_sec=float(compute_sec + io_sec),
+        two_body_max_processes=None if max_processes is None else int(max_processes),
+        **{k: float(v) for k, v in dict(timing).items()},
         error=err,
     )
 
@@ -858,6 +1011,7 @@ def _run_strategy_assist_mean(
         runtime_sec=float(compute_sec),
         io_sec=float(io_sec),
         runtime_total_sec=float(compute_sec + io_sec),
+        two_body_max_processes=None if max_processes is None else int(max_processes),
         error=err,
     )
 
@@ -975,6 +1129,7 @@ def run_stage2_propagation_bench(
     time_chunk_size: int = 0,
     max_processes: int | None = 8,
     only_truth_orbits: bool = False,
+    only_truth_targets: bool = False,
     mean_with_covariance: bool = False,
     write_ephemeris: bool = True,
     write_variants_orbits: bool = True,
@@ -988,11 +1143,18 @@ def run_stage2_propagation_bench(
     run_dir = out_dir / _utc_run_id()
     _ensure_dir(run_dir)
 
-    # Full propagation targets: all distinct (obscode, exposure_mjd_mid) pairs in the subset range.
-    # This is the true workload for per-frame ephemeris generation.
-    target_codes, target_times_utc = _fetch_unique_exposure_midpoints(
-        db, start_mjd=float(win.min_mjd), end_mjd=float(win.max_mjd) + 1e-9
-    )
+    # Propagation targets: by default, all distinct (obscode, exposure_mjd_mid) pairs in the subset range.
+    # In truth-only recovery runs, restrict targets to only the exposure midpoints that are known
+    # (from the truth crossmatch) to contain a matched truth detection.
+    if bool(only_truth_targets):
+        target_codes, target_times_utc = _fetch_truth_matched_exposure_midpoints(
+            subset_dir=Path(subset_dir), index_db=Path(win.index_db)
+        )
+    else:
+        # This is the true workload for per-frame ephemeris generation.
+        target_codes, target_times_utc = _fetch_unique_exposure_midpoints(
+            db, start_mjd=float(win.min_mjd), end_mjd=float(win.max_mjd) + 1e-9
+        )
     if max_window_centers is not None:
         # Backwards-compat: this flag now caps the number of (obscode,time) targets.
         n = int(max_window_centers)
@@ -1094,6 +1256,7 @@ def run_stage2_propagation_bench(
                     windows=windows,
                     window_size_days=int(window_size_days),
                     time_chunk_size=int(time_chunk_size),
+                    max_processes=max_processes,
                     write_ephemeris=bool(write_ephemeris),
                     include_covariance=False,
                     n_cov_ok=int(n_cov_ok),
@@ -1114,6 +1277,7 @@ def run_stage2_propagation_bench(
                     windows=windows,
                     window_size_days=int(window_size_days),
                     time_chunk_size=int(time_chunk_size),
+                    max_processes=max_processes,
                     write_ephemeris=bool(write_ephemeris),
                     include_covariance=True,
                     n_cov_ok=int(n_cov_ok),
@@ -1249,6 +1413,7 @@ def run_stage2_propagation_bench(
         "time_chunk_size": int(time_chunk_size),
         "max_processes": None if max_processes is None else int(max_processes),
         "only_truth_orbits": bool(only_truth_orbits),
+        "only_truth_targets": bool(only_truth_targets),
         "n_orbits_truth_matched": None if truth_orbit_ids is None else int(len(truth_orbit_ids)),
         "mean_with_covariance": bool(mean_with_covariance),
         "write_ephemeris": bool(write_ephemeris),
@@ -1296,12 +1461,24 @@ def main() -> None:
         "--max-processes",
         type=int,
         default=8,
-        help="Max processes for ASSISTPropagator calls (propagate_orbits/generate_ephemeris). Use 0 to disable.",
+        help=(
+            "Max processes for multiprocessing-enabled propagation/ephemeris calls in this benchmark "
+            "(ASSISTPropagator + 2-body propagate_2body/generate_ephemeris_2body). Use 0 to disable."
+        ),
     )
     p.add_argument(
         "--only-truth-orbits",
         action="store_true",
         help="Filter input orbits to those with ≥1 matched truth detection in this subset window.",
+    )
+    p.add_argument(
+        "--only-truth-targets",
+        action="store_true",
+        help=(
+            "Restrict propagation targets to only those exposure midpoints that are known (from the "
+            "truth crossmatch) to contain a matched truth detection. This avoids propagating to all "
+            "unique exposure times in the month partition."
+        ),
     )
     p.add_argument(
         "--mean-with-covariance",
@@ -1348,6 +1525,7 @@ def main() -> None:
         time_chunk_size=int(args.time_chunk_size),
         max_processes=(None if int(args.max_processes) <= 0 else int(args.max_processes)),
         only_truth_orbits=bool(args.only_truth_orbits),
+        only_truth_targets=bool(args.only_truth_targets),
         mean_with_covariance=bool(args.mean_with_covariance),
         write_ephemeris=not bool(args.no_write_ephemeris),
         write_variants_orbits=not bool(args.no_write_variants_orbits),
