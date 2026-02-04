@@ -123,19 +123,20 @@ def _ensure_dir(p: Path) -> None:
 
 def _center_time_index(
     *,
-    center_days: np.ndarray,
-    center_nanos: np.ndarray,
-    day: int,
-    nano: int,
+    center_times: Timestamp,
+    time: Timestamp,
+    precision: str = "ns",
 ) -> int | None:
     """
-    Return the index of (day,nano) in the center arrays, or None if absent.
+    Return the index of `time` within `center_times`, or None if absent.
 
-    We keep this intentionally simple (linear scan via boolean mask) because center-time
-    counts are small in our benchmark windows (typically O(1e0–1e2)).
+    Uses `Timestamp.equals()` so we can tolerate small differences (e.g. nanosecond-level)
+    if desired via `precision`.
     """
-    m = (center_days == int(day)) & (center_nanos == int(nano))
-    hit = np.nonzero(m)[0]
+    if len(time) != 1:
+        raise ValueError("time must be a length-1 Timestamp")
+    m = center_times.equals(time, precision=str(precision))
+    hit = pc.indices_nonzero(m).to_numpy(zero_copy_only=False)
     if hit.size == 0:
         return None
     return int(hit[0])
@@ -162,6 +163,7 @@ def _pair_observers_for_propagated_orbits(*, observers: Observers, n_orbits: int
     idx = np.tile(np.arange(n_times, dtype=np.int64), int(n_orbits))
     # Reuse already-computed observer states; just repeat rows in the right order.
     return observers.take(idx)
+
 
 
 def _cov_ok_mask(orbits: Orbits) -> np.ndarray:
@@ -644,6 +646,7 @@ def _run_strategy_assist_window_then_2body(
     target_codes: pa.Array,
     target_times_utc: Timestamp,
     target_observers_utc: Observers,
+    target_observers_tdb: Observers,
     windows: qv.Table,
     window_size_days: int,
     time_chunk_size: int,
@@ -677,9 +680,6 @@ def _run_strategy_assist_window_then_2body(
         )  # (N*T)
         compute_sec += time.perf_counter() - t_compute0
 
-        center_days = center_times_utc.days.to_numpy(zero_copy_only=False).astype(np.int64, copy=False)
-        center_nanos = center_times_utc.nanos.to_numpy(zero_copy_only=False).astype(np.int64, copy=False)
-
         target_mjd = target_times_utc.mjd().to_numpy(zero_copy_only=False).astype(np.float64)
         target_code = target_codes.to_numpy(zero_copy_only=False)
 
@@ -692,28 +692,30 @@ def _run_strategy_assist_window_then_2body(
             w0 = float(w.window_start().mjd()[0].as_py())
             w1 = float(w.window_end().mjd()[0].as_py())
             mask = (target_code == obscode) & (target_mjd >= w0) & (target_mjd <= w1)
-            idx = np.nonzero(mask)[0]
-            if idx.size == 0:
+            idx = np.nonzero(mask)[0].tolist()
+            if not idx:
                 continue
 
             cidx = _center_time_index(
-                center_days=center_days,
-                center_nanos=center_nanos,
-                day=int(w.time.days[0].as_py()),
-                nano=int(w.time.nanos[0].as_py()),
+                center_times=center_times_utc,
+                time=w.time,
+                precision="ns",
             )
             if cidx is None:
                 continue
 
-            take_idx = (int(cidx) + np.arange(n_orb, dtype=np.int64) * int(T)).tolist()
+            # `ASSISTPropagator.propagate_orbits(orbits, center_times)` returns results in
+            # time-major order:
+            #   [all_orbits@t0, all_orbits@t1, ...]
+            # so the slice for one center time is a contiguous block.
+            take_idx = (int(cidx) * int(n_orb) + np.arange(n_orb, dtype=np.int64)).tolist()
             orbits_center = orbits_at_centers.take(take_idx)
 
-            for j0 in range(0, int(idx.size), int(time_chunk_size)):
-                j1 = min(j0 + int(time_chunk_size), int(idx.size))
-                sub = idx[j0:j1].tolist()
-                times_tdb = target_times_utc.take(sub).rescale("tdb")
+            for j0 in range(0, int(len(idx)), int(time_chunk_size)):
+                j1 = min(j0 + int(time_chunk_size), int(len(idx)))
+                sub = idx[j0:j1]
                 t_compute0 = time.perf_counter()
-                obs_tdb = Observers.from_codes([obscode] * len(times_tdb), times_tdb)
+                obs_tdb = target_observers_tdb.take(sub)
                 ephem = _run_2body_ephemeris(
                     orbits=orbits_center,
                     window_observers_tdb=obs_tdb,
@@ -781,6 +783,7 @@ def _run_strategy_assist_window_then_2body_variants(
     target_codes: pa.Array,
     target_times_utc: Timestamp,
     target_observers_utc: Observers,
+    target_observers_tdb: Observers,
     windows: qv.Table,
     window_size_days: int,
     time_chunk_size: int,
@@ -836,9 +839,6 @@ def _run_strategy_assist_window_then_2body_variants(
         compute_sec += dt
         timing["t_assist_propagate_centers_sec"] = timing.get("t_assist_propagate_centers_sec", 0.0) + float(dt)
 
-        center_days = center_times_utc.days.to_numpy(zero_copy_only=False).astype(np.int64, copy=False)
-        center_nanos = center_times_utc.nanos.to_numpy(zero_copy_only=False).astype(np.int64, copy=False)
-
         target_mjd = target_times_utc.mjd().to_numpy(zero_copy_only=False).astype(np.float64)
         target_code = target_codes.to_numpy(zero_copy_only=False)
 
@@ -852,31 +852,29 @@ def _run_strategy_assist_window_then_2body_variants(
             w0 = float(w.window_start().mjd()[0].as_py())
             w1 = float(w.window_end().mjd()[0].as_py())
             mask = (target_code == obscode) & (target_mjd >= w0) & (target_mjd <= w1)
-            idx = np.nonzero(mask)[0]
-            if idx.size == 0:
+            idx = np.nonzero(mask)[0].tolist()
+            if not idx:
                 continue
 
             cidx = _center_time_index(
-                center_days=center_days,
-                center_nanos=center_nanos,
-                day=int(w.time.days[0].as_py()),
-                nano=int(w.time.nanos[0].as_py()),
+                center_times=center_times_utc,
+                time=w.time,
+                precision="ns",
             )
             if cidx is None:
                 continue
 
-            take_idx = (int(cidx) + np.arange(int(n_var), dtype=np.int64) * int(T)).tolist()
+            # `ASSISTPropagator.propagate_orbits(variants, center_times)` returns results in
+            # time-major order:
+            #   [all_variants@t0, all_variants@t1, ...]
+            # so the slice for one center time is a contiguous block.
+            take_idx = (int(cidx) * int(n_var) + np.arange(int(n_var), dtype=np.int64)).tolist()
             variants_center = variants_at_centers.take(take_idx)
 
-            for j0 in range(0, int(idx.size), int(time_chunk_size)):
-                j1 = min(j0 + int(time_chunk_size), int(idx.size))
-                sub = idx[j0:j1].tolist()
-                times_tdb = target_times_utc.take(sub).rescale("tdb")
-
-                t_obs0 = time.perf_counter()
-                obs_tdb = Observers.from_codes([obscode] * len(times_tdb), times_tdb)
-                dt_obs = time.perf_counter() - t_obs0
-                timing["t_observers_from_codes_sec"] = timing.get("t_observers_from_codes_sec", 0.0) + float(dt_obs)
+            for j0 in range(0, int(len(idx)), int(time_chunk_size)):
+                j1 = min(j0 + int(time_chunk_size), int(len(idx)))
+                sub = idx[j0:j1]
+                obs_tdb = target_observers_tdb.take(sub)
 
                 t_compute0 = time.perf_counter()
                 ephem = _run_2body_ephemeris(
@@ -1123,6 +1121,7 @@ def run_stage2_propagation_bench(
     window_size_days: int = 7,
     out_dir: Path | None = None,
     max_orbits: int | None = None,
+    orbit_ids: list[str] | None = None,
     max_window_centers: int | None = None,
     strategies: list[str] | None = None,
     mc_samples: list[int] | None = None,
@@ -1179,6 +1178,12 @@ def run_stage2_propagation_bench(
             mask = pc.is_in(
                 orbits.orbit_id, value_set=pa.array(sorted(truth_orbit_ids), pa.large_string())
             )
+            idx = np.nonzero(mask.to_numpy(zero_copy_only=False).astype(bool))[0]
+            orbits = orbits.take(idx.tolist())
+    if orbit_ids is not None:
+        wanted = sorted({str(x).strip() for x in orbit_ids if str(x).strip()})
+        if wanted:
+            mask = pc.is_in(orbits.orbit_id, value_set=pa.array(wanted, pa.large_string()))
             idx = np.nonzero(mask.to_numpy(zero_copy_only=False).astype(bool))[0]
             orbits = orbits.take(idx.tolist())
     if max_orbits is not None:
@@ -1298,6 +1303,7 @@ def run_stage2_propagation_bench(
                     target_codes=target_codes,
                     target_times_utc=target_times_utc,
                     target_observers_utc=target_observers_utc,
+                    target_observers_tdb=target_observers_tdb,
                     windows=windows,
                     window_size_days=int(window_size_days),
                     time_chunk_size=int(time_chunk_size),
@@ -1336,6 +1342,7 @@ def run_stage2_propagation_bench(
                     target_codes=target_codes,
                     target_times_utc=target_times_utc,
                     target_observers_utc=target_observers_utc,
+                    target_observers_tdb=target_observers_tdb,
                     windows=windows,
                     window_size_days=int(window_size_days),
                     time_chunk_size=int(time_chunk_size),
@@ -1443,6 +1450,12 @@ def main() -> None:
     p.add_argument("--window-size-days", type=int, default=7)
     p.add_argument("--max-orbits", type=int, default=None)
     p.add_argument(
+        "--orbit-ids",
+        type=str,
+        default=None,
+        help="Comma-separated list of orbit_id values to run (debugging / 1-orbit comparisons).",
+    )
+    p.add_argument(
         "--max-window-centers",
         type=int,
         default=None,
@@ -1519,6 +1532,7 @@ def main() -> None:
         orbits_parquet=Path(args.orbits_parquet),
         window_size_days=int(args.window_size_days),
         max_orbits=args.max_orbits,
+        orbit_ids=(None if args.orbit_ids is None else [s.strip() for s in str(args.orbit_ids).split(',') if s.strip()]),
         max_window_centers=args.max_window_centers,
         strategies=_parse_strategies_arg(args.strategies),
         mc_samples=_parse_mc_samples_arg(args.mc_samples, default=[]),
