@@ -657,6 +657,13 @@ def plot_covariance_polygon_vs_truth(
     dpi: int = 200,
     min_polygon_pixels: int = 50,
     n_sigma_override: float | None = None,
+    draw_detection_uncertainty: bool = True,
+    detection_sigma_levels: tuple[float, ...] = (1.0, 4.0),
+    include_pred_mean: bool = True,
+    zoom_include_pred_mean: bool = True,
+    add_inset_when_scales_separate: bool = True,
+    inset_scale_ratio_threshold: float = 50.0,
+    layout: str = "single",
 ) -> Path:
     """
     Single-case debug plot:
@@ -694,6 +701,11 @@ def plot_covariance_polygon_vs_truth(
             "truth_ra_deg",
             "truth_dec_deg",
             "match_time_mjd_utc",
+            "match_ra_deg",
+            "match_dec_deg",
+            "match_dataset_id",
+            "match_exposure_id",
+            "match_observation_id",
         ],
     ).combine_chunks()
     import pyarrow.compute as pc
@@ -707,6 +719,13 @@ def plot_covariance_polygon_vs_truth(
     j = int(np.argmin(np.abs(mt.astype(float) - float(mjd_mid_utc))))
     truth_ra = float(truth["truth_ra_deg"][j].as_py())
     truth_dec = float(truth["truth_dec_deg"][j].as_py())
+    match_ra_py = truth["match_ra_deg"][j].as_py()
+    match_dec_py = truth["match_dec_deg"][j].as_py()
+    match_ra = float(match_ra_py) if match_ra_py is not None else float("nan")
+    match_dec = float(match_dec_py) if match_dec_py is not None else float("nan")
+    match_dataset_id = truth["match_dataset_id"][j].as_py()
+    match_exposure_id = truth["match_exposure_id"][j].as_py()
+    match_observation_id = truth["match_observation_id"][j].as_py()
 
     # Load Stage 3 geometry row for this (orbit_id, target_idx).
     geom_path = (
@@ -765,6 +784,63 @@ def plot_covariance_polygon_vs_truth(
     x0a, y0a = float(x0[0] * 3600.0), float(y0[0] * 3600.0)
     xp, yp = xp * 3600.0, yp * 3600.0
 
+    # Matched (measured) detection point and its astrometric uncertainty ellipse (optional).
+    xma = yma = float("nan")
+    if np.isfinite(match_ra) and np.isfinite(match_dec):
+        xm, ym = _tangent_xy_deg(np.array([match_ra]), np.array([match_dec]), truth_ra, truth_dec)
+        xma, yma = float(xm[0] * 3600.0), float(ym[0] * 3600.0)
+
+    det_sig_x_arcsec: float | None = None
+    det_sig_y_arcsec: float | None = None
+    if bool(draw_detection_uncertainty) and np.isfinite(xma) and np.isfinite(yma) and (match_observation_id is not None):
+        try:
+            from precovery.healpix_geom import radec_to_healpixel
+            from precovery.precovery_db import PrecoveryDatabase
+        except Exception:  # noqa: BLE001
+            radec_to_healpixel = None  # type: ignore[assignment]
+            PrecoveryDatabase = None  # type: ignore[assignment]
+
+        if radec_to_healpixel is not None and PrecoveryDatabase is not None:
+            try:
+                db = PrecoveryDatabase.from_dir(str(subset_dir), mode="r", allow_version_mismatch=True)
+                try:
+                    nside_db = int(getattr(db.config, "nside", 32))
+                except Exception:  # noqa: BLE001
+                    nside_db = 32
+
+                hpix_db = int(radec_to_healpixel(float(match_ra), float(match_dec), int(nside_db)))
+                frames = db.frames.idx.frames_for_healpixel(int(hpix_db), str(obscode))
+                if match_dataset_id is not None:
+                    frames = frames.apply_mask(pc.equal(frames.dataset_id, str(match_dataset_id)))
+                if match_exposure_id is not None:
+                    frames = frames.apply_mask(pc.equal(frames.exposure_id, str(match_exposure_id)))
+                if len(frames) > 1:
+                    mjd = frames.exposure_mjd_mid.to_numpy(zero_copy_only=False).astype(np.float64)
+                    k = int(np.argmin(np.abs(mjd - float(mjd_mid_utc))))
+                    frames = frames.take([k])
+
+                if len(frames) == 1:
+                    obs = db.frames.get_observations(frames)
+                    want = str(match_observation_id).encode()
+                    ids = np.asarray(obs.id.to_pylist(), dtype=object)
+                    hit = np.nonzero(ids == want)[0]
+                    if hit.size > 0:
+                        ii = int(hit[0])
+                        ra_sig_deg = float(obs.ra_sigma[ii].as_py())
+                        dec_sig_deg = float(obs.dec_sigma[ii].as_py())
+                        ra_sig_arcsec = ra_sig_deg * 3600.0
+                        dec_sig_arcsec = dec_sig_deg * 3600.0
+                        det_sig_x_arcsec = float(ra_sig_arcsec * np.cos(np.deg2rad(float(match_dec))))
+                        det_sig_y_arcsec = float(dec_sig_arcsec)
+
+                try:
+                    db.frames.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            except Exception:  # noqa: BLE001
+                det_sig_x_arcsec = None
+                det_sig_y_arcsec = None
+
     # Choose zoom: make polygon span at least `min_polygon_pixels` on the saved image.
     # Use a 6-inch square canvas.
     fig_w_in = 6.0
@@ -774,23 +850,131 @@ def plot_covariance_polygon_vs_truth(
     poly_span = max(poly_w, poly_h, 1e-6)
     # Want poly_span * axes_px / (2*lim) >= min_polygon_pixels  => lim <= poly_span*axes_px/(2*min_polygon_pixels)
     lim = float(poly_span * axes_px / (2.0 * float(min_polygon_pixels)))
-    # Also ensure we include mean + some margin.
-    lim = max(lim, float(max(abs(x0a), abs(y0a))) * 1.2, poly_span * 0.6)
+    # Also ensure we include detection uncertainty ellipse (if available) + some margin.
+    if (det_sig_x_arcsec is not None) and (det_sig_y_arcsec is not None) and len(detection_sigma_levels) > 0:
+        kmax = float(np.max(np.asarray(detection_sigma_levels, dtype=np.float64)))
+        det_span = max(abs(float(det_sig_x_arcsec)), abs(float(det_sig_y_arcsec)), 0.0) * kmax * 2.0
+        lim = max(lim, det_span * 2.0)
+    # Keep a small margin around the polygon even if it is extremely tiny.
+    lim = max(lim, poly_span * 0.6)
+    # Optionally include the predicted mean point in view.
+    if bool(zoom_include_pred_mean):
+        lim = max(lim, float(max(abs(x0a), abs(y0a))) * 1.2)
 
-    fig, ax = plt.subplots(figsize=(fig_w_in, fig_w_in), dpi=int(dpi))
-    ax.fill(xp, yp, facecolor=str(facecolor), alpha=float(alpha), edgecolor=str(facecolor), linewidth=1.5)
-    ax.scatter([0.0], [0.0], c="k", s=45, marker="x", label="truth detection")
-    ax.scatter([x0a], [y0a], c="k", s=35, marker="o", label="pred mean")
-    ax.set_xlim(-lim, lim)
-    ax.set_ylim(-lim, lim)
-    ax.set_aspect("equal", adjustable="box")
-    ax.set_xlabel("Δlon*cos(lat) [arcsec]")
-    ax.set_ylabel("Δlat [arcsec]")
-    ax.set_title(
-        f"{strategy_key} {orbit_id} {obscode} target={int(target_idx)} mjd={mjd_mid_utc:.6f}"
-    )
-    ax.legend()
-    fig.tight_layout()
+    if str(layout) not in {"single", "two_panel"}:
+        raise ValueError("layout must be 'single' or 'two_panel'")
+
+    if str(layout) == "two_panel":
+        fig, (ax_det, ax_cov) = plt.subplots(ncols=2, figsize=(10.5, 5.25), dpi=int(dpi))
+
+        # Left: detection uncertainty scale.
+        ax_det.scatter([0.0], [0.0], c="k", s=40, marker="x", label="truth detection")
+        ax_det.scatter([x0a], [y0a], c="k", s=28, marker="o", label="cov center")
+        if np.isfinite(xma) and np.isfinite(yma):
+            ax_det.scatter([xma], [yma], c="k", s=28, marker="+", label="matched detection")
+        # Draw covariance outline (will usually be tiny on this scale).
+        ax_det.plot(xp, yp, color=str(facecolor), linewidth=2.0, alpha=0.9, label="cov 4σ footprint")
+
+        if (det_sig_x_arcsec is not None) and (det_sig_y_arcsec is not None) and np.isfinite(xma) and np.isfinite(yma):
+            try:
+                from matplotlib.patches import Ellipse
+            except Exception:  # noqa: BLE001
+                Ellipse = None  # type: ignore[assignment]
+            if Ellipse is not None and len(detection_sigma_levels) > 0:
+                first = True
+                for ksig in detection_sigma_levels:
+                    ls = "--" if float(ksig) == 1.0 else "-"
+                    ax_det.add_patch(
+                        Ellipse(
+                            (float(xma), float(yma)),
+                            width=2.0 * float(ksig) * float(det_sig_x_arcsec),
+                            height=2.0 * float(ksig) * float(det_sig_y_arcsec),
+                            angle=0.0,
+                            fill=False,
+                            edgecolor="k",
+                            linewidth=1.25,
+                            linestyle=ls,
+                            label=("det uncertainty" if first else None),
+                        )
+                    )
+                    first = False
+
+        # Set left limits based on detection uncertainty (4σ) when available.
+        lim_det = 5.0
+        if (det_sig_x_arcsec is not None) and (det_sig_y_arcsec is not None) and len(detection_sigma_levels) > 0:
+            kmax = float(np.max(np.asarray(detection_sigma_levels, dtype=np.float64)))
+            det_span = max(abs(float(det_sig_x_arcsec)), abs(float(det_sig_y_arcsec))) * kmax
+            lim_det = max(lim_det, det_span * 1.6)
+        # also include truth↔cov center distance
+        lim_det = max(lim_det, float(max(abs(x0a), abs(y0a))) * 1.3)
+        ax_det.set_xlim(-lim_det, lim_det)
+        ax_det.set_ylim(-lim_det, lim_det)
+        ax_det.set_aspect("equal", adjustable="box")
+        ax_det.set_xlabel("Δlon*cos(lat) [arcsec]")
+        ax_det.set_ylabel("Δlat [arcsec]")
+        ax_det.set_title("Detection uncertainty scale")
+        ax_det.legend(loc="upper right")
+
+        # Right: covariance scale (show truth + matched + cov center + polygon).
+        ax_cov.fill(xp, yp, facecolor=str(facecolor), alpha=float(alpha), edgecolor="none", zorder=1)
+        ax_cov.plot(xp, yp, color=str(facecolor), linewidth=3.0, zorder=2, label="cov 4σ footprint")
+        ax_cov.scatter([0.0], [0.0], c="k", s=40, marker="x", zorder=3, label="truth detection")
+        ax_cov.scatter([x0a], [y0a], c="k", s=28, marker="o", zorder=3, label="cov center")
+        if np.isfinite(xma) and np.isfinite(yma):
+            ax_cov.scatter([xma], [yma], c="k", s=28, marker="+", zorder=3, label="matched detection")
+
+        # Covariance-focused view: include truth/cov/matched but do NOT try to include full det-4σ ellipse.
+        lim_cov = max(float(max(abs(x0a), abs(y0a))), float(max(abs(xma), abs(yma))) if np.isfinite(xma) else 0.0) * 1.5
+        lim_cov = max(lim_cov, poly_span * 8.0, 0.05)
+        ax_cov.set_xlim(-lim_cov, lim_cov)
+        ax_cov.set_ylim(-lim_cov, lim_cov)
+        ax_cov.set_aspect("equal", adjustable="box")
+        ax_cov.set_xlabel("Δlon*cos(lat) [arcsec]")
+        ax_cov.set_ylabel("Δlat [arcsec]")
+        ax_cov.set_title("Covariance scale")
+        ax_cov.legend(loc="upper right")
+
+        fig.suptitle(f"{strategy_key} {orbit_id} {obscode} target={int(target_idx)} mjd={mjd_mid_utc:.6f}")
+        fig.tight_layout()
+    else:
+        fig, ax = plt.subplots(figsize=(fig_w_in, fig_w_in), dpi=int(dpi))
+        ax.fill(xp, yp, facecolor=str(facecolor), alpha=float(alpha), edgecolor=str(facecolor), linewidth=1.5)
+        ax.scatter([0.0], [0.0], c="k", s=45, marker="x", label="truth detection")
+        if np.isfinite(xma) and np.isfinite(yma):
+            ax.scatter([xma], [yma], c="k", s=35, marker="+", label="matched detection")
+            if (det_sig_x_arcsec is not None) and (det_sig_y_arcsec is not None):
+                try:
+                    from matplotlib.patches import Ellipse
+                except Exception:  # noqa: BLE001
+                    Ellipse = None  # type: ignore[assignment]
+                if Ellipse is not None:
+                    for ksig in detection_sigma_levels:
+                        ls = "--" if float(ksig) == 1.0 else "-"
+                        ax.add_patch(
+                            Ellipse(
+                                (float(xma), float(yma)),
+                                width=2.0 * float(ksig) * float(det_sig_x_arcsec),
+                                height=2.0 * float(ksig) * float(det_sig_y_arcsec),
+                                angle=0.0,
+                                fill=False,
+                                edgecolor="k",
+                                linewidth=1.25,
+                                linestyle=ls,
+                                label=f"det {float(ksig):g}σ",
+                            )
+                        )
+        if bool(include_pred_mean):
+            ax.scatter([x0a], [y0a], c="k", s=35, marker="o", label="pred mean")
+        ax.set_xlim(-lim, lim)
+        ax.set_ylim(-lim, lim)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel("Δlon*cos(lat) [arcsec]")
+        ax.set_ylabel("Δlat [arcsec]")
+        ax.set_title(
+            f"{strategy_key} {orbit_id} {obscode} target={int(target_idx)} mjd={mjd_mid_utc:.6f}"
+        )
+        ax.legend()
+        fig.tight_layout()
 
     out_dir = Path("experiments/covariance_precovery/tmp")
     out_dir.mkdir(parents=True, exist_ok=True)
