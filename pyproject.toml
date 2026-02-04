@@ -57,7 +57,7 @@ test = [
 notebooks = [
     "matplotlib>=3.10.8",
     "ipykernel>=7.1.0",
-    "adam-assist>=0.3.5",
+    "adam-assist @ git+https://github.com/B612-Asteroid-Institute/adam-assist.git@feature/magnitudes",
 ]
 
 [project.urls]
