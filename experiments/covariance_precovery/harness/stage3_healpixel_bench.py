@@ -78,8 +78,8 @@ class Stage3Metrics(qv.Table):
     healpix_nside = qv.Int64Column()
 
     n_rows_ephem = qv.Int64Column()
-    n_groups = qv.Int64Column()
-    n_rows_with_cov = qv.Int64Column()
+    n_groups = qv.Int64Column(nullable=True)
+    n_rows_with_cov = qv.Int64Column(nullable=True)
 
     sum_pred_pixels = qv.Int64Column()
     sum_frame_pixels = qv.Int64Column()
