@@ -117,20 +117,19 @@ def _read_stage2_targets(stage2_run_dir: Path) -> pa.Table:
     Table with columns:
       - target_idx (int64): 0..n_targets-1
       - obscode (large_string)
-      - exposure_mjd_mid (float64): UTC MJD midpoint as stored by Stage 2 inputs
+      - time (struct<days: int64, nanos: int64>): UTC exposure midpoint timestamp
     """
     targets = FrameTimeTargets.from_parquet(
         str(stage2_run_dir / "inputs" / "frame_time_targets.parquet")
     )
-    mjd = targets.time.mjd().to_numpy(zero_copy_only=False).astype(np.float64)
     idx = np.arange(len(targets), dtype=np.int64)
     return pa.Table.from_arrays(
         [
             pa.array(idx, type=pa.int64()),
             pa.array(targets.obscode.to_pylist(), type=pa.large_string()),
-            pa.array(mjd, type=pa.float64()),
+            targets.table.column("time").combine_chunks(),
         ],
-        names=["target_idx", "obscode", "exposure_mjd_mid"],
+        names=["target_idx", "obscode", "time"],
     )
 
 
@@ -177,7 +176,11 @@ def _read_frames_pixels_table(
     import sqlite3
 
     codes = targets["obscode"].to_pylist()
-    mjd = pc.cast(targets["exposure_mjd_mid"], pa.float64()).to_numpy(zero_copy_only=False)
+    # `frames.exposure_mjd_mid` is stored as float UTC MJD in index.db, so we compute the
+    # float join key on demand from the Stage 2 target timestamps (UTC).
+    t = targets.column("time").combine_chunks()
+    t_utc = Timestamp.from_kwargs(days=t.field("days"), nanos=t.field("nanos"), scale="utc")
+    mjd = t_utc.mjd().to_numpy(zero_copy_only=False).astype(np.float64)
     tidx = pc.cast(targets["target_idx"], pa.int64()).to_numpy(zero_copy_only=False)
 
     conn = sqlite3.connect(str(index_db))
@@ -232,19 +235,45 @@ def _read_frames_pixels_table(
 def _map_times_to_target_idx_by_obscode(
     *,
     obscode: np.ndarray,
-    time_mjd: np.ndarray,
+    time_utc: Timestamp,
     targets: pa.Table,
-    dt_days: float,
+    dt_sec: float,
+    precision: str = "us",
 ) -> np.ndarray:
     """
-    Map each (obscode, time_mjd) row to the nearest Stage 2 target_idx for that obscode
-    within tolerance.
+    Map each (obscode, time_utc) row to the nearest Stage 2 target_idx for that obscode
+    within tolerance, using integer time keys (no float MJD matching).
+
+    Notes
+    -----
+    - This is a *nearest-neighbor* lookup (per obscode) within `dt_sec`. We intentionally
+      avoid float MJD comparisons and also avoid exact (days,nanos) equality; ns-level
+      offsets (e.g. -16 ns) are naturally handled because the nearest target time is still
+      the same exposure midpoint.
+    - `precision` is accepted for API compatibility, but this routine does not require
+      precision-bucket rounding to be robust for the current use case (dt_sec ~ 60s).
     """
     targ_obscode = np.asarray(targets["obscode"].to_pylist(), dtype=object)
-    targ_mjd = np.asarray(targets["exposure_mjd_mid"].to_numpy(zero_copy_only=False), dtype=np.float64)
+    t = targets.column("time").combine_chunks()
+    targ_time = Timestamp.from_kwargs(days=t.field("days"), nanos=t.field("nanos"), scale="utc")
     targ_idx = np.asarray(targets["target_idx"].to_numpy(zero_copy_only=False), dtype=np.int64)
 
-    out = np.full(len(time_mjd), -1, dtype=np.int64)
+    # Convert UTC timestamps to a single integer nanosecond key for fast sorting/search.
+    # This is safe because `Timestamp.nanos` is already "nanos since start of day".
+    day_ns = 86_400 * 1_000_000_000
+    tt = _timestamp_to_utc(targ_time)
+    t0 = _timestamp_to_utc(time_utc)
+    targ_key = (
+        tt.days.to_numpy(zero_copy_only=False).astype(np.int64, copy=False) * day_ns
+        + tt.nanos.to_numpy(zero_copy_only=False).astype(np.int64, copy=False)
+    )
+    time_key = (
+        t0.days.to_numpy(zero_copy_only=False).astype(np.int64, copy=False) * day_ns
+        + t0.nanos.to_numpy(zero_copy_only=False).astype(np.int64, copy=False)
+    )
+
+    out = np.full(len(time_key), -1, dtype=np.int64)
+    tol_ns = int(float(dt_sec) * 1_000_000_000)
     for code in sorted(set(obscode.tolist())):
         mt = obscode == code
         if not mt.any():
@@ -252,21 +281,21 @@ def _map_times_to_target_idx_by_obscode(
         mg = targ_obscode == code
         if not mg.any():
             continue
-        mjd = targ_mjd[mg]
+        key = targ_key[mg]
         idx = targ_idx[mg]
-        order = np.argsort(mjd)
-        mjd_s = mjd[order]
+        order = np.argsort(key)
+        key_s = key[order]
         idx_s = idx[order]
-        times = time_mjd[mt]
-        j = np.searchsorted(mjd_s, times)
-        j0 = np.clip(j - 1, 0, len(mjd_s) - 1)
-        j1 = np.clip(j, 0, len(mjd_s) - 1)
-        d0 = np.abs(mjd_s[j0] - times)
-        d1 = np.abs(mjd_s[j1] - times)
+        times = time_key[mt]
+        j = np.searchsorted(key_s, times)
+        j0 = np.clip(j - 1, 0, len(key_s) - 1)
+        j1 = np.clip(j, 0, len(key_s) - 1)
+        d0 = np.abs(key_s[j0] - times)
+        d1 = np.abs(key_s[j1] - times)
         use1 = d1 < d0
         jj = np.where(use1, j1, j0)
         dd = np.where(use1, d1, d0)
-        ok = dd <= float(dt_days)
+        ok = dd <= int(tol_ns)
         out[np.nonzero(mt)[0][ok]] = idx_s[jj[ok]]
     return out
 
@@ -313,16 +342,19 @@ def _read_truth_observations_table(*, subset_dir: Path, targets: pa.Table) -> pa
     if truth.num_rows == 0:
         return TruthObservations.empty().table
 
-    # Map match_time_mjd_utc -> nearest target_idx per obscode (within 60s).
-    dt_days = float(60.0) / 86400.0
-
     t_obscode = np.asarray(truth["obscode"].to_pylist(), dtype=object)
     t_time = np.asarray(truth["match_time_mjd_utc"].to_numpy(zero_copy_only=False), dtype=np.float64)
     t_orbit = np.asarray(truth["orbit_id"].to_pylist(), dtype=object)
     t_hpix = np.asarray(truth["healpixel"].to_numpy(zero_copy_only=False), dtype=np.int64)
 
+    # Map match_time_mjd_utc -> nearest target_idx per obscode (within 60s), using Timestamp matching.
+    t_time_utc = Timestamp.from_mjd(t_time.tolist(), scale="utc")
     target_idx = _map_times_to_target_idx_by_obscode(
-        obscode=t_obscode, time_mjd=t_time, targets=targets, dt_days=dt_days
+        obscode=t_obscode,
+        time_utc=t_time_utc,
+        targets=targets,
+        dt_sec=60.0,
+        precision="us",
     )
     ok = target_idx >= 0
     if not ok.any():
@@ -409,11 +441,15 @@ def _map_ephem_to_target_idx_by_time(
     This is used for strategies whose output ordering is not a simple (orbit-major × time-chunk)
     cross product of Stage 2 targets (e.g. assist_window_then_2body).
     """
-    # Normalize ephem time to UTC MJD for matching to target exposure midpoints.
-    t_mjd = ephem.coordinates.time.rescale("utc").mjd().to_numpy(zero_copy_only=False).astype(np.float64)
+    # Normalize ephem time to UTC and match using Timestamp keys (no float MJD matching).
+    t_utc = _timestamp_to_utc(ephem.coordinates.time)
     code = np.asarray(ephem.coordinates.origin.code.to_pylist(), dtype=object)
     return _map_times_to_target_idx_by_obscode(
-        obscode=code, time_mjd=t_mjd, targets=targets, dt_days=float(dt_days)
+        obscode=code,
+        time_utc=t_utc,
+        targets=targets,
+        dt_sec=float(dt_days) * 86400.0,
+        precision="us",
     )
 
 
@@ -1013,11 +1049,31 @@ def run_stage3_healpixel_bench(
         into run_dir as needed.
         """
         orbit_ids_in_strategy: set[str] = set()
-        try:
-            ep_first = VariantEphemeris.from_parquet(str(part_files[0]))
-            orbit_ids_in_strategy = set(_ephem_key_table(ep_first)["orbit_id"].to_pylist())
-        except Exception:  # noqa: BLE001
-            orbit_ids_in_strategy = set()
+        # IMPORTANT: For some strategies (notably windowed propagation), the ephemeris parts
+        # are not orbit-major, so part-000000 may contain only a subset of orbits. When
+        # present, prefer `variants_orbits.parquet` as the authoritative orbit-id set.
+        orbits_path = strat_dir / "variants_orbits.parquet"
+        if orbits_path.exists():
+            try:
+                orbits_tbl = pq.read_table(str(orbits_path), columns=["orbit_id", "object_id"])
+                obj = orbits_tbl.column("object_id").to_pylist()
+                orb = orbits_tbl.column("orbit_id").to_pylist()
+                keys: list[str] = []
+                for i, x in enumerate(obj):
+                    s = "" if x is None else str(x).strip()
+                    if s:
+                        keys.append(_designation_from_object_id(s))
+                    else:
+                        keys.append(str(orb[i]) if i < len(orb) else "")
+                orbit_ids_in_strategy = set([k for k in keys if str(k).strip() != ""])
+            except Exception:  # noqa: BLE001
+                orbit_ids_in_strategy = set()
+        if not orbit_ids_in_strategy:
+            try:
+                ep_first = VariantEphemeris.from_parquet(str(part_files[0]))
+                orbit_ids_in_strategy = set(_ephem_key_table(ep_first)["orbit_id"].to_pylist())
+            except Exception:  # noqa: BLE001
+                orbit_ids_in_strategy = set()
 
         truth_obs_tbl_strategy = _filter_truth_to_orbit_ids(truth_obs_tbl, orbit_ids_in_strategy)
         truth_keys_tbl_strategy = _truth_keys_from_truth_observations(truth_obs_tbl_strategy)

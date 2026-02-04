@@ -16,6 +16,7 @@ import quivr as qv
 
 from adam_core.orbits.ephemeris import Ephemeris
 from adam_core.orbits.variants import VariantEphemeris
+from adam_core.time import Timestamp
 
 from precovery.frame_db import HealpixFrame
 from precovery.observation import ObservationsTable
@@ -211,12 +212,15 @@ def _read_truth_matches_table(*, subset_dir: Path, targets: pa.Table) -> pa.Tabl
     if truth.num_rows == 0:
         return _truth_matches_empty()
 
-    # Map truth_time_mjd_utc -> nearest target_idx per obscode (within 60s).
-    dt_days = float(60.0) / 86400.0
     t_obscode = np.asarray(truth["obscode"].to_pylist(), dtype=object)
     t_time = np.asarray(truth["truth_time_mjd_utc"].to_numpy(zero_copy_only=False), dtype=np.float64)
+    t_time_utc = Timestamp.from_mjd(t_time.tolist(), scale="utc")
     target_idx = _map_times_to_target_idx_by_obscode(
-        obscode=t_obscode, time_mjd=t_time, targets=targets, dt_days=dt_days
+        obscode=t_obscode,
+        time_utc=t_time_utc,
+        targets=targets,
+        dt_sec=60.0,
+        precision="us",
     )
     ok = target_idx >= 0
     if not ok.any():
@@ -293,12 +297,15 @@ def _read_truth_frame_keys_table(*, subset_dir: Path, targets: pa.Table) -> pa.T
             }
         )
 
-    # Map match_time_mjd_utc -> nearest target_idx per obscode (within 60s).
-    dt_days = float(60.0) / 86400.0
     t_obscode = np.asarray(truth["obscode"].to_pylist(), dtype=object)
     t_time = np.asarray(truth["match_time_mjd_utc"].to_numpy(zero_copy_only=False), dtype=np.float64)
+    t_time_utc = Timestamp.from_mjd(t_time.tolist(), scale="utc")
     target_idx = _map_times_to_target_idx_by_obscode(
-        obscode=t_obscode, time_mjd=t_time, targets=targets, dt_days=dt_days
+        obscode=t_obscode,
+        time_utc=t_time_utc,
+        targets=targets,
+        dt_sec=60.0,
+        precision="us",
     )
     ok = target_idx >= 0
     if not ok.any():
@@ -999,7 +1006,10 @@ def run_stage4_detection_filter_bench(
 
     # Targets arrays for quick lookup by target_idx.
     targ_obscode = np.asarray(targets_tbl["obscode"].to_pylist(), dtype=object)
-    targ_mjd = np.asarray(targets_tbl["exposure_mjd_mid"].to_numpy(zero_copy_only=False), dtype=np.float64)
+    t = targets_tbl.column("time").combine_chunks()
+    targ_time_utc = Timestamp.from_kwargs(days=t.field("days"), nanos=t.field("nanos"), scale="utc")
+    # index.db stores exposure midpoints as float MJD UTC.
+    targ_mjd = np.asarray(targ_time_utc.mjd().to_numpy(zero_copy_only=False), dtype=np.float64)
 
     index_db = subset_dir / "index.db"
     if not index_db.exists():
@@ -1330,16 +1340,36 @@ def run_stage4_detection_filter_bench(
         def _run_variant_kind(
             *,
             variant_root_name: str,
+            strat_dir: Path,
             variant_kind: str,
             part_files: list[Path],
         ) -> None:
             """Run Stage 4 for one variant-ephemeris (strategy, variant_kind)."""
-            orbit_ids_in_strategy: set[str]
-            try:
-                ep_first = VariantEphemeris.from_parquet(str(part_files[0]))
-                orbit_ids_in_strategy = set(_ephem_key_table(ep_first)["orbit_id"].to_pylist())
-            except Exception:  # noqa: BLE001
-                orbit_ids_in_strategy = set()
+            orbit_ids_in_strategy: set[str] = set()
+            # IMPORTANT: For windowed strategies, part-000000 may not include all orbits, so
+            # use variants_orbits.parquet when present.
+            orbits_path = Path(strat_dir) / "variants_orbits.parquet"
+            if orbits_path.exists():
+                try:
+                    orbits_tbl = pq.read_table(str(orbits_path), columns=["orbit_id", "object_id"])
+                    obj = orbits_tbl.column("object_id").to_pylist()
+                    orb = orbits_tbl.column("orbit_id").to_pylist()
+                    keys: list[str] = []
+                    for i, x in enumerate(obj):
+                        s = "" if x is None else str(x).strip()
+                        if s:
+                            keys.append(_designation_from_object_id(s))
+                        else:
+                            keys.append(str(orb[i]) if i < len(orb) else "")
+                    orbit_ids_in_strategy = set([k for k in keys if str(k).strip() != ""])
+                except Exception:  # noqa: BLE001
+                    orbit_ids_in_strategy = set()
+            if not orbit_ids_in_strategy:
+                try:
+                    ep_first = VariantEphemeris.from_parquet(str(part_files[0]))
+                    orbit_ids_in_strategy = set(_ephem_key_table(ep_first)["orbit_id"].to_pylist())
+                except Exception:  # noqa: BLE001
+                    orbit_ids_in_strategy = set()
 
             allowed_orbits = _allowed_orbit_ids(orbit_ids_in_strategy=orbit_ids_in_strategy, max_orbits=max_orbits)
             truth_strategy = _filter_truth_matches_to_orbit_ids(truth_all, allowed_orbits)
@@ -1624,6 +1654,7 @@ def run_stage4_detection_filter_bench(
 
                 _run_variant_kind(
                     variant_root_name=str(variant_root_name),
+                    strat_dir=strat_dir,
                     variant_kind=str(variant_kind),
                     part_files=part_files,
                 )

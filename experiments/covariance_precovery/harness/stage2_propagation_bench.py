@@ -839,6 +839,48 @@ def _run_strategy_assist_window_then_2body_variants(
         compute_sec += dt
         timing["t_assist_propagate_centers_sec"] = timing.get("t_assist_propagate_centers_sec", 0.0) + float(dt)
 
+        # `ASSISTPropagator.propagate_orbits(..., center_times)` does not guarantee a stable
+        # output ordering (time-major vs orbit-major) across implementations, and it may
+        # emit times that differ slightly (µs) from the requested `center_times`.
+        #
+        # To robustly select the propagated variant block for a given center time `w.time`,
+        # precompute a mapping from each requested `center_times_utc[i]` to the closest
+        # unique propagated time value, then select rows by exact (days,nanos) equality
+        # against that propagated time.
+        prop_time = variants_at_centers.coordinates.time
+        try:
+            center_times_match = center_times_utc.rescale(str(prop_time.scale))
+        except Exception:  # noqa: BLE001
+            center_times_match = center_times_utc
+        prop_unique = prop_time.unique().sort_by(["days", "nanos"])
+        if int(len(prop_unique)) == 0:
+            raise RuntimeError("ASSIST propagate_orbits produced no unique times.")
+        if int(len(prop_unique)) != int(len(center_times_match)):
+            raise RuntimeError(
+                "Unexpected ASSIST propagate_orbits time grid: "
+                f"got {int(len(prop_unique))} unique times, expected {int(len(center_times_match))}."
+            )
+        day_ns = 86_400 * 1_000_000_000
+        pu_key = (
+            prop_unique.days.to_numpy(zero_copy_only=False).astype(np.int64, copy=False) * day_ns
+            + prop_unique.nanos.to_numpy(zero_copy_only=False).astype(np.int64, copy=False)
+        )
+        ct_key = (
+            center_times_match.days.to_numpy(zero_copy_only=False).astype(np.int64, copy=False) * day_ns
+            + center_times_match.nanos.to_numpy(zero_copy_only=False).astype(np.int64, copy=False)
+        )
+        prop_idx_for_center: list[int] = []
+        for k in ct_key.tolist():
+            j = int(np.argmin(np.abs(pu_key - int(k))))
+            dt_ns = int(np.abs(int(pu_key[j]) - int(k)))
+            # We expect these to be extremely close (typically µs); guard against gross mismatches.
+            if dt_ns > 5_000_000_000:  # 5 seconds
+                raise RuntimeError(
+                    "Could not align ASSIST propagated times to requested centers: "
+                    f"closest dt={float(dt_ns)/1e9:.6f}s."
+                )
+            prop_idx_for_center.append(j)
+
         target_mjd = target_times_utc.mjd().to_numpy(zero_copy_only=False).astype(np.float64)
         target_code = target_codes.to_numpy(zero_copy_only=False)
 
@@ -864,12 +906,15 @@ def _run_strategy_assist_window_then_2body_variants(
             if cidx is None:
                 continue
 
-            # `ASSISTPropagator.propagate_orbits(variants, center_times)` returns results in
-            # time-major order:
-            #   [all_variants@t0, all_variants@t1, ...]
-            # so the slice for one center time is a contiguous block.
-            take_idx = (int(cidx) * int(n_var) + np.arange(int(n_var), dtype=np.int64)).tolist()
-            variants_center = variants_at_centers.take(take_idx)
+            center_time_prop = prop_unique.take([int(prop_idx_for_center[int(cidx)])])
+            m = prop_time.equals(center_time_prop, precision="ns")
+            take_idx = pc.indices_nonzero(m).to_numpy(zero_copy_only=False).astype(np.int64)
+            if take_idx.size != int(n_var):
+                raise RuntimeError(
+                    "Unexpected ASSIST propagate_orbits layout: "
+                    f"center time produced {int(take_idx.size)} rows, expected {int(n_var)}."
+                )
+            variants_center = variants_at_centers.take(take_idx.tolist())
 
             for j0 in range(0, int(len(idx)), int(time_chunk_size)):
                 j1 = min(j0 + int(time_chunk_size), int(len(idx)))

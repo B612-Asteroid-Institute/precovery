@@ -1,1 +1,2 @@
 adam-core @ git+ssh://git@github.com/B612-Asteroid-Institute/adam_core.git@8dc525764112e70d0d4f7b621f9ae17e418019d3
+rebound==4.5.0
