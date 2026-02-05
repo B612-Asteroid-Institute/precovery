@@ -10,10 +10,26 @@ import pyarrow.parquet as pq
 
 
 def _designation_from_object_id(object_id: str) -> str:
+    """
+    Extract a human-friendly designation from an SBDB-style `object_id` string.
+
+    Common forms include:
+      - "2019 QU127"
+      - "3753 Cruithne (1986 TO)"
+      - "594913 'Aylo'chaxnim (2020 AV2)"
+
+    Prefer the trailing parenthetical (e.g. "(1986 TO)") when present; otherwise
+    fall back to the full string.
+    """
     s = str(object_id).strip()
+    # If the entire string is parenthetical, strip it.
     if s.startswith("(") and s.endswith(")") and len(s) >= 3:
         return s[1:-1].strip()
-    return s.split()[0].strip()
+    # If there's a trailing "(...)" group, use its contents.
+    m = re.search(r"\(([^()]+)\)\s*$", s)
+    if m:
+        return str(m.group(1)).strip()
+    return s
 
 
 def _slugify(s: str) -> str:
@@ -60,9 +76,14 @@ def _orbit_name_map_from_stage2_meta(*, stage2_run_dir: Path) -> dict[str, str]:
     for oid, o in zip(orbit_id, obj):
         if o is None:
             continue
-        name = _designation_from_object_id(str(o))
+        obj_s = str(o)
+        name = _designation_from_object_id(obj_s)
         if name:
             out[str(oid)] = str(name)
+            # Also allow lookup by the leading SBDB number (often used downstream as orbit_id).
+            first = obj_s.strip().split()[0].strip() if obj_s.strip() else ""
+            if first:
+                out[str(first)] = str(name)
     return out
 
 
@@ -142,7 +163,12 @@ def plot_area_vs_expected_obs(
     """
     Plot covariance ellipse area vs |Δt| and expected returned observations per exposure.
 
-    Expected obs is computed from `weighted_bytes_per_exposure / bytes_per_obs` when possible.
+    Expected obs is computed from Stage 5 bytes metrics when possible.
+
+    Important: for wide target sets, most (orbit,target) pairs will have *no* intersected
+    frames (orbit is not in that exposure). In that regime, averaging per-exposure over
+    all targets drives expected_obs toward ~0. Prefer the conditional
+    `*_per_hit_exposure` metrics when available.
     """
     try:
         import matplotlib.pyplot as plt
@@ -189,17 +215,30 @@ def plot_area_vs_expected_obs(
     # Area of a single HEALPix pixel in deg^2.
     pix_area_deg2 = (4.0 * np.pi) * (180.0 / np.pi) ** 2 / (12.0 * float(nside) * float(nside))
 
-    # Expected observations encompassed by covariance (per exposure):
-    # use fractional-coverage weighted bytes if available.
-    exp_col = "_expected_obs_in_cov_per_exposure"
-    if "weighted_bytes_per_exposure" in df.columns:
+    # Expected observations encompassed by covariance.
+    #
+    # Prefer the "per hit exposure" conditional metric when present:
+    #   - n_targets_hit counts exposures where the footprint touched ≥1 frame (or upper bound)
+    #   - weighted_bytes_per_hit_exposure / bytes_per_obs approximates returned candidates per in-scope exposure.
+    exp_col = "_expected_obs_in_cov"
+    ylab = "expected_obs_in_cov_per_hit_exposure"
+    if "expected_obs_per_hit_exposure" in df.columns:
+        df[exp_col] = df["expected_obs_per_hit_exposure"].to_numpy(dtype=float)
+    elif "weighted_bytes_per_hit_exposure" in df.columns:
+        df[exp_col] = df["weighted_bytes_per_hit_exposure"].to_numpy(dtype=float) / float(bpo)
+    elif "weighted_bytes_per_exposure" in df.columns:
+        # Fallback: unconditional average over all targets in the bin (often ~0).
+        ylab = "expected_obs_in_cov_per_exposure"
         df[exp_col] = df["weighted_bytes_per_exposure"].to_numpy(dtype=float) / float(bpo)
     elif "sum_weighted_data_length_bytes" in df.columns:
+        # Old fallback.
+        ylab = "expected_obs_in_cov_per_exposure"
         sw = df["sum_weighted_data_length_bytes"].to_numpy(dtype=float)
         n = df["n_targets"].to_numpy(dtype=float)
         df[exp_col] = np.where(n > 0, (sw / n) / float(bpo), np.nan)
     else:
         # Fallback to density × area model, using intersected-pixel density.
+        ylab = "expected_obs_in_cov_per_exposure"
         bytes_per_exp = df["bytes_per_exposure"].to_numpy(dtype=float)
         frames_per_exp = df["frames_per_exposure"].to_numpy(dtype=float)
         area = df[str(area_metric)].to_numpy(dtype=float)
@@ -224,7 +263,6 @@ def plot_area_vs_expected_obs(
     ax1.plot(x, q_area["p99"].to_numpy(dtype=float), label=f"p99({area_metric})", color="C0")
 
     # Expected obs on right axis.
-    ylab = "expected_obs_in_cov_per_exposure"
     ax2.plot(x, q_exp["p99"].to_numpy(dtype=float), label=f"p99({ylab})", color="C1")
 
     ax1.set_xlabel(x_label)

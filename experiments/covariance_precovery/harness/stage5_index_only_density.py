@@ -145,6 +145,52 @@ def _sample_target_indices(*, n: int, max_sampled: int | None) -> np.ndarray | N
     return np.sort(idx)
 
 
+def _effective_obs_sigma_arcsec(astro_sigma_arcsec: float | None) -> float:
+    """
+    Observation 1-sigma astrometric error (arcsec) used to form an innovation covariance.
+
+    We treat observation sigma as always > 0. If missing/invalid/<=0, we use a notional
+    default of 0.1 arcsec.
+    """
+    default = 0.1
+    if astro_sigma_arcsec is None:
+        return float(default)
+    s = float(astro_sigma_arcsec)
+    if not np.isfinite(s) or s <= 0.0:
+        return float(default)
+    return float(s)
+
+
+def _innov_cov_ll_deg2(*, cov_ll_deg2: np.ndarray, lat0_deg: float, obs_sigma_arcsec: float) -> np.ndarray:
+    """
+    Innovation-style covariance inflation in the local tangent plane:
+
+        C_xy_eff = C_xy_pred + sigma_obs^2 * I
+
+    where x = Δlon * cos(lat0), y = Δlat (both in degrees), and sigma_obs is in degrees.
+
+    Returns the equivalent lon/lat covariance (deg^2) so downstream footprint code can
+    remain unchanged.
+    """
+    cov_ll = np.asarray(cov_ll_deg2, dtype=np.float64)
+    cos_lat = float(np.cos(np.deg2rad(float(lat0_deg))))
+    cos_lat = cos_lat if np.isfinite(cos_lat) and abs(cos_lat) > 1e-12 else 1e-12
+
+    # Convert lon/lat -> tangent plane: C_xy = A C_ll A^T, A=diag(cos(lat0), 1).
+    A = np.array([[cos_lat, 0.0], [0.0, 1.0]], dtype=np.float64)
+    cov_xy = A @ cov_ll @ A.T
+    cov_xy = 0.5 * (cov_xy + cov_xy.T)
+
+    sig_deg = float(obs_sigma_arcsec) / 3600.0
+    cov_xy_eff = cov_xy + (sig_deg * sig_deg) * np.eye(2, dtype=np.float64)
+
+    # Convert back: C_ll = A^{-1} C_xy A^{-T}, A^{-1}=diag(1/cos(lat0), 1).
+    Ainv = np.array([[1.0 / cos_lat, 0.0], [0.0, 1.0]], dtype=np.float64)
+    cov_ll_eff = Ainv @ cov_xy_eff @ Ainv.T
+    cov_ll_eff = 0.5 * (cov_ll_eff + cov_ll_eff.T)
+    return cov_ll_eff.astype(np.float64, copy=False)
+
+
 def _fractional_parent_weights_nested(
     *,
     pix_parent: np.ndarray,
@@ -237,6 +283,7 @@ def _parent_pixels_and_weights_from_child_nested(
 @dataclass
 class _GroupAgg:
     n_targets: int = 0
+    n_targets_hit: int = 0
     sum_pred_pixels: int = 0
     max_pred_pixels: int = 0
 
@@ -279,16 +326,22 @@ class Stage5IndexOnlyTimeSeries(qv.Table):
     abs_dt_max_days = qv.Float64Column(nullable=True)
 
     n_targets = qv.Int64Column()
+    n_targets_hit = qv.Int64Column()
+    hit_rate = qv.Float64Column(nullable=True)
     sum_pred_pixels = qv.Int64Column()
     max_pred_pixels = qv.Int64Column()
 
     sum_frames_touched = qv.Int64Column()
     sum_data_length_bytes = qv.Int64Column()
     bytes_per_exposure = qv.Float64Column()
+    bytes_per_hit_exposure = qv.Float64Column(nullable=True)
     sum_weighted_data_length_bytes = qv.Float64Column(nullable=True)
     weighted_bytes_per_exposure = qv.Float64Column(nullable=True)
     expected_obs_per_exposure = qv.Float64Column(nullable=True)
+    weighted_bytes_per_hit_exposure = qv.Float64Column(nullable=True)
+    expected_obs_per_hit_exposure = qv.Float64Column(nullable=True)
     frames_per_exposure = qv.Float64Column()
+    frames_per_hit_exposure = qv.Float64Column(nullable=True)
 
     n_upper_bound_all_frames = qv.Int64Column()
 
@@ -396,6 +449,7 @@ def run_stage5_index_only_density(
         part_files = part_files[: int(max_parts)]
 
     # Basic run header.
+    obs_sigma_arcsec_used = _effective_obs_sigma_arcsec(astro_sigma_arcsec)
     _log(
         "START"
         f" subset={subset_dir}"
@@ -407,6 +461,7 @@ def run_stage5_index_only_density(
         f" n_sigma={float(n_sigma):g}"
         f" poly_v={int(polygon_vertices)}"
         f" astro_sigma_arcsec={(None if astro_sigma_arcsec is None else float(astro_sigma_arcsec))}"
+        f" astro_sigma_arcsec_used={float(obs_sigma_arcsec_used)}"
         f" targets={int(n_time_targets_eff)}"
         f" sampled_targets={(None if max_sampled_targets is None else int(max_sampled_targets))}"
         f" parts={len(part_files)}"
@@ -541,12 +596,11 @@ def run_stage5_index_only_density(
                 abs_dt = float(abs(dt_days))
 
                 cov_ll = cov6[i, 1:3, 1:3].astype(np.float64, copy=False)
-                cov_ll_eff = cov_ll
-                if astro_sigma_arcsec is not None:
-                    sig = float(astro_sigma_arcsec)
-                    if np.isfinite(sig) and sig > 0.0:
-                        sig_deg = float(sig) / 3600.0
-                        cov_ll_eff = cov_ll + (sig_deg * sig_deg) * np.eye(2, dtype=np.float64)
+                cov_ll_eff = _innov_cov_ll_deg2(
+                    cov_ll_deg2=cov_ll,
+                    lat0_deg=float(lat[i]),
+                    obs_sigma_arcsec=float(obs_sigma_arcsec_used),
+                )
 
                 sigma_major_arcsec = sigma_major_arcsec_from_cov_ll_deg2(
                     cov_ll_deg2=cov_ll_eff, lat0_deg=float(lat[i])
@@ -736,6 +790,8 @@ def run_stage5_index_only_density(
                         a = _GroupAgg()
                         agg[gk] = a
                     a.n_targets += 1
+                    if int(n_frames) > 0 or bool(upper):
+                        a.n_targets_hit += 1
                     a.sum_pred_pixels += int(n_pix)
                     a.max_pred_pixels = max(int(a.max_pred_pixels), int(n_pix))
                     a.sum_frames_touched += int(n_frames)
@@ -774,12 +830,16 @@ def run_stage5_index_only_density(
     out_rows: list[dict[str, object]] = []
     for (oid, bid, direction), a in agg.items():
         n_t = int(a.n_targets)
+        n_hit = int(a.n_targets_hit)
         sum_bytes = int(a.sum_data_length_bytes)
         sum_w_bytes = float(a.sum_weighted_data_length_bytes)
         sum_frames = int(a.sum_frames_touched)
         bytes_per_exp = (float(sum_bytes) / float(n_t)) if n_t > 0 else float("nan")
         w_bytes_per_exp = (float(sum_w_bytes) / float(n_t)) if n_t > 0 else float("nan")
         frames_per_exp = (float(sum_frames) / float(n_t)) if n_t > 0 else float("nan")
+        bytes_per_hit_exp = (float(sum_bytes) / float(n_hit)) if n_hit > 0 else float("nan")
+        w_bytes_per_hit_exp = (float(sum_w_bytes) / float(n_hit)) if n_hit > 0 else float("nan")
+        frames_per_hit_exp = (float(sum_frames) / float(n_hit)) if n_hit > 0 else float("nan")
 
         sig_mean = (float(a.sum_sigma_major_arcsec) / float(n_t)) if (n_t > 0) else None
         area_mean = (float(a.sum_ellipse_area_deg2) / float(n_t)) if (n_t > 0) else None
@@ -787,6 +847,10 @@ def run_stage5_index_only_density(
         exp_obs_per_exp: float | None = None
         if bytes_per_obs is not None and np.isfinite(w_bytes_per_exp) and float(bytes_per_obs) > 0.0:
             exp_obs_per_exp = float(w_bytes_per_exp) / float(bytes_per_obs)
+
+        exp_obs_per_hit_exp: float | None = None
+        if bytes_per_obs is not None and np.isfinite(w_bytes_per_hit_exp) and float(bytes_per_obs) > 0.0:
+            exp_obs_per_hit_exp = float(w_bytes_per_hit_exp) / float(bytes_per_obs)
 
         out_rows.append(
             dict(
@@ -803,15 +867,23 @@ def run_stage5_index_only_density(
                 abs_dt_min_days=(None if a.abs_dt_min_days is None else float(a.abs_dt_min_days)),
                 abs_dt_max_days=(None if a.abs_dt_max_days is None else float(a.abs_dt_max_days)),
                 n_targets=int(n_t),
+                n_targets_hit=int(n_hit),
+                hit_rate=(None if n_t <= 0 else float(n_hit) / float(n_t)),
                 sum_pred_pixels=int(a.sum_pred_pixels),
                 max_pred_pixels=int(a.max_pred_pixels),
                 sum_frames_touched=int(sum_frames),
                 sum_data_length_bytes=int(sum_bytes),
                 bytes_per_exposure=float(bytes_per_exp),
+                bytes_per_hit_exposure=(None if not np.isfinite(bytes_per_hit_exp) else float(bytes_per_hit_exp)),
                 sum_weighted_data_length_bytes=(None if not np.isfinite(sum_w_bytes) else float(sum_w_bytes)),
                 weighted_bytes_per_exposure=(None if not np.isfinite(w_bytes_per_exp) else float(w_bytes_per_exp)),
                 expected_obs_per_exposure=(None if exp_obs_per_exp is None else float(exp_obs_per_exp)),
+                weighted_bytes_per_hit_exposure=(
+                    None if not np.isfinite(w_bytes_per_hit_exp) else float(w_bytes_per_hit_exp)
+                ),
+                expected_obs_per_hit_exposure=(None if exp_obs_per_hit_exp is None else float(exp_obs_per_hit_exp)),
                 frames_per_exposure=float(frames_per_exp),
+                frames_per_hit_exposure=(None if not np.isfinite(frames_per_hit_exp) else float(frames_per_hit_exp)),
                 n_upper_bound_all_frames=int(a.n_upper_bound_all_frames),
                 sigma_major_arcsec_mean=(None if sig_mean is None else float(sig_mean)),
                 sigma_major_arcsec_max=(None if n_t <= 0 else float(a.max_sigma_major_arcsec)),
@@ -841,7 +913,8 @@ def run_stage5_index_only_density(
         max_sampled_targets=(None if max_sampled_targets is None else int(max_sampled_targets)),
         report_signed=bool(report_signed),
         bytes_per_obs=(None if bytes_per_obs is None else float(bytes_per_obs)),
-        astro_sigma_arcsec=(None if astro_sigma_arcsec is None else float(astro_sigma_arcsec)),
+        astro_sigma_arcsec=float(obs_sigma_arcsec_used),
+        astro_sigma_arcsec_arg=(None if astro_sigma_arcsec is None else float(astro_sigma_arcsec)),
         bytes_per_exposure_max=(None if bytes_per_exposure_max is None else float(bytes_per_exposure_max)),
         consecutive_batches=int(consecutive_batches),
         fractional_nside=(None if fractional_nside is None else int(fractional_nside)),
@@ -903,8 +976,12 @@ def main() -> None:
     p.add_argument(
         "--astro-sigma-arcsec",
         type=float,
-        default=None,
-        help="Optional scalar 1-sigma astrometric error (arcsec) added as isotropic covariance buffer.",
+        default=0.1,
+        help=(
+            "Observation 1-sigma astrometric error (arcsec) used to form an innovation covariance "
+            "(predicted + observational variance) in the tangent plane. "
+            "If <= 0, a notional default of 0.1 arcsec is used."
+        ),
     )
     p.add_argument(
         "--fractional-nside",
