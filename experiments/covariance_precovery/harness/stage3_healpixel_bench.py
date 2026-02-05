@@ -1181,6 +1181,184 @@ def run_stage3_healpixel_bench(
                     continue
                 n_rows_used += int(len(ephem))
 
+                # Fast-path for reconstructed-covariance footprints:
+                # collapse the *entire* VariantEphemeris at once (vectorized in adam_core),
+                # rather than collapsing 13-point groups in a Python loop.
+                if ("_reconstructed" in str(footprint)) and hasattr(ephem, "collapse_by_object_id"):
+                    try:
+                        collapsed = ephem.collapse_by_object_id()
+                    except BaseException as e:  # noqa: BLE001
+                        if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                            raise
+                        n_errors += 1
+                        if first_error is None:
+                            first_error = f"{type(e).__name__}: {e}"
+                        continue
+
+                    if len(collapsed) == 0:
+                        continue
+                    target_idx_c = _map_ephem_to_target_idx_by_time(
+                        ephem=collapsed, targets=targets_tbl, dt_days=dt_days
+                    )
+                    keep_c = target_idx_c >= 0
+                    if not keep_c.any():
+                        continue
+                    if not keep_c.all():
+                        hit = np.nonzero(keep_c)[0]
+                        collapsed = collapsed.take(hit.tolist())
+                        target_idx_c = target_idx_c[hit]
+
+                    if bool(only_truth):
+                        mask = _filter_ephem_to_truth(
+                            ephem=collapsed, target_idx=target_idx_c, truth_keys=truth_keys_tbl_strategy
+                        )
+                        hit = np.nonzero(mask)[0]
+                        if hit.size == 0:
+                            continue
+                        collapsed = collapsed.take(hit.tolist())
+                        target_idx_c = target_idx_c[hit]
+
+                    if len(collapsed) == 0:
+                        continue
+                    n_groups += int(len(collapsed))
+
+                    orbit_id_c = np.asarray(_ephem_key_table(collapsed)["orbit_id"].to_pylist(), dtype=object)
+                    lon0 = collapsed.coordinates.lon.to_numpy(zero_copy_only=False).astype(np.float64)
+                    lat0 = collapsed.coordinates.lat.to_numpy(zero_copy_only=False).astype(np.float64)
+
+                    cov6 = collapsed.coordinates.covariance.to_matrix().astype(np.float64)
+                    cov_ll = cov6[:, 1:3, 1:3]
+
+                    if str(footprint).endswith("_reconstructed_moc"):
+                        base = str(footprint).replace("_reconstructed_moc", "_moc")
+                    else:
+                        base = str(footprint).replace("_reconstructed", "")
+
+                    pred_orbit: list[str] = []
+                    pred_tidx: list[int] = []
+                    pred_hpix: list[int] = []
+                    for i in range(int(len(collapsed))):
+                        oid = str(orbit_id_c[i])
+                        tidx = int(target_idx_c[i])
+                        cov_ll_i = np.asarray(cov_ll[i], dtype=np.float64)
+
+                        if bool(persist_geometry):
+                            k = (str(oid), int(tidx))
+                            if k not in seen_geom:
+                                seen_geom.add(k)
+                                geom_id = f"{k[0]}|{k[1]}"
+                                if str(footprint) in {"cov_polygon_reconstructed_moc"}:
+                                    lonv, latv = ellipse_boundary_vertices_lonlat_deg_from_cov(
+                                        lon0_deg=float(lon0[i]),
+                                        lat0_deg=float(lat0[i]),
+                                        cov_ll_deg2=cov_ll_i,
+                                        n_sigma=float(n_sigma),
+                                        num_vertices=int(polygon_vertices),
+                                    )
+                                    geom_rows.append(
+                                        dict(
+                                            strategy=str(variant_root_name),
+                                            variant_kind=str(variant_kind),
+                                            footprint=str(out_fp),
+                                            orbit_id=str(k[0]),
+                                            target_idx=int(k[1]),
+                                            geometry_kind="polygon_vertices",
+                                            lon0_deg=float(lon0[i]),
+                                            lat0_deg=float(lat0[i]),
+                                            cov_ll_00=float(cov_ll_i[0, 0]),
+                                            cov_ll_01=float(cov_ll_i[0, 1]),
+                                            cov_ll_10=float(cov_ll_i[1, 0]),
+                                            cov_ll_11=float(cov_ll_i[1, 1]),
+                                            n_sigma=float(n_sigma),
+                                            polygon_vertices=int(polygon_vertices),
+                                            polygon_mode=None,
+                                            corridor_radius_arcsec=None,
+                                            corridor_step_arcsec=None,
+                                            buffer_arcsec=0.0,
+                                            geom_id=str(geom_id),
+                                        )
+                                    )
+                                    for j in range(len(lonv)):
+                                        geom_points.append(
+                                            dict(
+                                                geom_id=str(geom_id),
+                                                kind="polygon_vertex",
+                                                idx=int(j),
+                                                lon_deg=float(lonv[j]),
+                                                lat_deg=float(latv[j]),
+                                            )
+                                        )
+                                else:
+                                    geom_rows.append(
+                                        dict(
+                                            strategy=str(variant_root_name),
+                                            variant_kind=str(variant_kind),
+                                            footprint=str(out_fp),
+                                            orbit_id=str(k[0]),
+                                            target_idx=int(k[1]),
+                                            geometry_kind="ellipse_cov",
+                                            lon0_deg=float(lon0[i]),
+                                            lat0_deg=float(lat0[i]),
+                                            cov_ll_00=float(cov_ll_i[0, 0]),
+                                            cov_ll_01=float(cov_ll_i[0, 1]),
+                                            cov_ll_10=float(cov_ll_i[1, 0]),
+                                            cov_ll_11=float(cov_ll_i[1, 1]),
+                                            n_sigma=float(n_sigma),
+                                            polygon_vertices=None,
+                                            polygon_mode=None,
+                                            corridor_radius_arcsec=None,
+                                            corridor_step_arcsec=None,
+                                            buffer_arcsec=None,
+                                            geom_id=None,
+                                        )
+                                    )
+
+                        try:
+                            pix = _predicted_pixels_from_mean_row(
+                                lon_deg=float(lon0[i]),
+                                lat_deg=float(lat0[i]),
+                                cov_ll_deg2=cov_ll_i,
+                                nside=int(healpix_nside),
+                                footprint=str(base),
+                                n_sigma=float(n_sigma),
+                                polygon_vertices=int(polygon_vertices),
+                                mc_num_samples=int(cov_mc_num_samples),
+                                mc_seed=int(cov_mc_seed),
+                            )
+                        except BaseException as e:  # noqa: BLE001
+                            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                                raise
+                            n_errors += 1
+                            if first_error is None:
+                                first_error = f"{type(e).__name__}: {e}"
+                            pix = np.array([], dtype=np.int64)
+
+                        if pix.size == 0:
+                            continue
+                        sum_pred_pixels += int(pix.size)
+                        pred_orbit.extend([oid] * int(pix.size))
+                        pred_tidx.extend([tidx] * int(pix.size))
+                        pred_hpix.extend([int(x) for x in pix.tolist()])
+
+                    if not pred_orbit:
+                        continue
+                    pred = pa.table(
+                        {
+                            "orbit_id": pa.array(pred_orbit, pa.large_string()),
+                            "target_idx": pa.array(np.asarray(pred_tidx, dtype=np.int64), pa.int64()),
+                            "healpixel": pa.array(np.asarray(pred_hpix, dtype=np.int64), pa.int64()),
+                        }
+                    )
+                    selected = pred.join(frames_pixels, keys=["target_idx", "healpixel"], join_type="inner")
+                    sum_intersection += int(selected.num_rows)
+                    if truth_obs.num_rows > 0 and selected.num_rows > 0:
+                        covered_total += int(
+                            truth_obs.join(selected, keys=["orbit_id", "target_idx", "healpixel"], join_type="inner").num_rows
+                        )
+                    if bool(compute_extra_frames) and selected.num_rows > 0:
+                        selected_parts.append(selected.select(["orbit_id", "target_idx", "healpixel"]))
+                    continue
+
                 orbit_id = np.asarray(_ephem_key_table(ephem)["orbit_id"].to_pylist(), dtype=object)
                 lon = ephem.coordinates.lon.to_numpy(zero_copy_only=False).astype(np.float64)
                 lat = ephem.coordinates.lat.to_numpy(zero_copy_only=False).astype(np.float64)

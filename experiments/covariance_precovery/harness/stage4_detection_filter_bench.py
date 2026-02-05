@@ -1635,6 +1635,199 @@ def run_stage4_detection_filter_bench(
                     if len(ephem) == 0:
                         continue
 
+                    # Fast-path for reconstructed-covariance footprints: collapse the entire
+                    # VariantEphemeris at once (vectorized in adam_core) rather than collapsing
+                    # 13-point groups in a Python loop.
+                    if ("_reconstructed" in str(out_fp)) and hasattr(ephem, "collapse_by_object_id"):
+                        try:
+                            collapsed = ephem.collapse_by_object_id()
+                        except BaseException as e:  # noqa: BLE001
+                            for agg in aggs.values():
+                                agg.record_error(e)
+                            continue
+
+                        if len(collapsed) == 0:
+                            continue
+
+                        target_idx_c = _map_ephem_to_target_idx_by_time(
+                            ephem=collapsed, targets=targets_tbl, dt_days=dt_days
+                        )
+                        keep_c = target_idx_c >= 0
+                        if not keep_c.any():
+                            continue
+                        if not keep_c.all():
+                            hit = np.nonzero(keep_c)[0]
+                            collapsed = collapsed.take(hit.tolist())
+                            target_idx_c = target_idx_c[hit]
+
+                        if max_targets is not None:
+                            m = target_idx_c < int(max_targets)
+                            if not m.any():
+                                continue
+                            if not m.all():
+                                hit = np.nonzero(m)[0]
+                                collapsed = collapsed.take(hit.tolist())
+                                target_idx_c = target_idx_c[hit]
+
+                        if bool(only_truth):
+                            mask = _filter_ephem_to_truth(
+                                ephem=collapsed, target_idx=target_idx_c, truth_keys=truth_keys_strategy
+                            )
+                            hit = np.nonzero(mask)[0]
+                            if hit.size == 0:
+                                continue
+                            collapsed = collapsed.take(hit.tolist())
+                            target_idx_c = target_idx_c[hit]
+
+                        if len(collapsed) == 0:
+                            continue
+
+                        orbit_id_c = np.asarray(_ephem_key_table(collapsed)["orbit_id"].to_pylist(), dtype=object)
+                        lon0 = collapsed.coordinates.lon.to_numpy(zero_copy_only=False).astype(np.float64)
+                        lat0 = collapsed.coordinates.lat.to_numpy(zero_copy_only=False).astype(np.float64)
+                        cov6 = collapsed.coordinates.covariance.to_matrix().astype(np.float64)
+                        cov_ll = cov6[:, 1:3, 1:3]
+
+                        for i in range(int(len(collapsed))):
+                            oid = str(orbit_id_c[i])
+                            if allowed_orbits and oid not in allowed_orbits:
+                                continue
+                            tidx = int(target_idx_c[i])
+                            if tidx < 0 or tidx >= len(targ_mjd):
+                                continue
+
+                            pred_pix = keys_map.get((oid, int(tidx)), np.array([], dtype=np.int64))
+                            if pred_pix.size == 0:
+                                continue
+
+                            if truth_frames_map is not None:
+                                hp_truth = truth_frames_map.get((oid, int(tidx)), np.array([], dtype=np.int64))
+                                if hp_truth.size == 0:
+                                    continue
+                                pred_pix = np.intersect1d(pred_pix, hp_truth, assume_unique=False)
+                                if pred_pix.size == 0:
+                                    continue
+
+                            obscode = str(targ_obscode[tidx])
+                            mjd_mid = float(targ_mjd[tidx])
+                            t_io0 = time.perf_counter()
+                            frames = _query_frames_for_pixels(
+                                conn=conn,
+                                obscode=obscode,
+                                exposure_mjd_mid=mjd_mid,
+                                healpixels=pred_pix,
+                            )
+                            obs = _load_observations_for_frames(
+                                db, frames, obs_cache=obs_cache, obs_cache_max_frames=int(obs_cache_max_frames)
+                            )
+                            io_sec = time.perf_counter() - t_io0
+                            det_sigma_floor_arcsec = _det_sigma_floor_arcsec_for_frames(frames=frames)
+
+                            for agg in aggs.values():
+                                agg.n_orbit_targets += 1
+                                agg.n_frames_loaded += int(len(frames))
+                                agg.n_observations_loaded += int(len(obs))
+                                agg.io_sec += float(io_sec)
+
+                            if len(obs) == 0:
+                                if bool(write_per_target_metrics):
+                                    for filt_name in aggs.keys():
+                                        per_target_rows.append(
+                                            dict(
+                                                stage2_run_dir=str(stage2_run_dir),
+                                                subset_dir=str(subset_dir),
+                                                strategy=str(variant_root_name),
+                                                variant_kind=str(variant_kind),
+                                                footprint=str(out_fp),
+                                                detection_filter=str(filt_name),
+                                                healpix_nside=int(healpix_nside),
+                                                orbit_id=str(oid),
+                                                target_idx=int(tidx),
+                                                obscode=str(obscode),
+                                                exposure_mjd_mid=float(mjd_mid),
+                                                n_frames_loaded=int(len(frames)),
+                                                n_observations_loaded=0,
+                                                n_accepted=0,
+                                                io_sec=float(io_sec),
+                                                prep_sec=0.0,
+                                                filter_sec=0.0,
+                                            )
+                                        )
+                                continue
+
+                            t_prep0 = time.perf_counter()
+                            prep = _prepare_observation_arrays(obs)
+                            prep_sec = time.perf_counter() - t_prep0
+                            for agg in aggs.values():
+                                agg.prep_sec += float(prep_sec)
+
+                            for filt_name, agg in aggs.items():
+                                try:
+                                    t_f0 = time.perf_counter()
+                                    keep = _detection_geometry_keep_mask(
+                                        prep=prep,
+                                        geometry=str(filt_name),
+                                        lon0_deg=float(lon0[i]),
+                                        lat0_deg=float(lat0[i]),
+                                        cov_ll_deg2=np.asarray(cov_ll[i], dtype=np.float64),
+                                        n_sigma=float(n_sigma),
+                                        polygon_vertices=int(polygon_vertices),
+                                        point_radius_arcsec=float(point_radius_arcsec),
+                                        cov_mc_num_samples=int(cov_mc_num_samples),
+                                        cov_mc_seed=int(cov_mc_seed),
+                                        det_sigma_floor_arcsec=float(det_sigma_floor_arcsec),
+                                        sample_lon_deg=None,
+                                        sample_lat_deg=None,
+                                    )
+                                    filt_sec = float(time.perf_counter() - t_f0)
+                                except BaseException as e:  # noqa: BLE001
+                                    if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                                        raise
+                                    agg.record_error(e)
+                                    continue
+
+                                n_after = int(np.count_nonzero(keep))
+                                if agg.n_after_prefilter is not None:
+                                    agg.n_after_prefilter += int(n_after)
+                                agg.filter_sec += float(filt_sec)
+
+                                if bool(write_per_target_metrics):
+                                    per_target_rows.append(
+                                        dict(
+                                            stage2_run_dir=str(stage2_run_dir),
+                                            subset_dir=str(subset_dir),
+                                            strategy=str(variant_root_name),
+                                            variant_kind=str(variant_kind),
+                                            footprint=str(out_fp),
+                                            detection_filter=str(filt_name),
+                                            healpix_nside=int(healpix_nside),
+                                            orbit_id=str(oid),
+                                            target_idx=int(tidx),
+                                            obscode=str(obscode),
+                                            exposure_mjd_mid=float(mjd_mid),
+                                            n_frames_loaded=int(len(frames)),
+                                            n_observations_loaded=int(len(obs)),
+                                            n_accepted=int(n_after),
+                                            io_sec=float(io_sec),
+                                            prep_sec=float(prep_sec),
+                                            filter_sec=float(filt_sec),
+                                        )
+                                    )
+
+                                if n_after > 0:
+                                    truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
+                                    rec = _recover_truth_obsids_for_orbit_target_masked(
+                                        truth_entries=truth_entries,
+                                        prep=prep,
+                                        accepted_mask=keep,
+                                        time_tol_sec=float(time_tol_sec),
+                                        dist_tol_arcsec=float(dist_tol_arcsec),
+                                    )
+                                    for truth_obsid in rec:
+                                        agg.recovered_truth_pairs.add((oid, str(truth_obsid)))
+
+                        continue
+
                     orbit_id = np.asarray(_ephem_key_table(ephem)["orbit_id"].to_pylist(), dtype=object)
                     lon = ephem.coordinates.lon.to_numpy(zero_copy_only=False).astype(np.float64)
                     lat = ephem.coordinates.lat.to_numpy(zero_copy_only=False).astype(np.float64)
