@@ -186,8 +186,10 @@ def _moc_pixels_from_polygon(
         # mocpy can raise a pyo3 PanicException if cdshealpix asserts; normalize to ValueError.
         raise ValueError(f"moc polygon rasterization failed: {type(e).__name__}: {e}") from e
 
-    # Convert to the exact order we need; uniq_hpx are HEALPix cell indices at nside=2**order.
-    pix = moc.to_order(int(order)).uniq_hpx.astype(np.int64, copy=False)
+    # Convert to the exact order we need. `flatten()` returns the HEALPix pixel indices
+    # (at nside = 2**order) suitable for `healpy` APIs. `uniq_hpx` is *not* guaranteed to
+    # be in [0, nside2npix(nside)) and can produce out-of-range indices.
+    pix = np.asarray(moc.to_order(int(order)).flatten(), dtype=np.int64)
     pix_set: set[int] = set(pix.tolist())
 
     # Match the existing healpy polygon behavior: always include a minimal disc at the center
