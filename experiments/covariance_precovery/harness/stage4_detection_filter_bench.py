@@ -113,7 +113,50 @@ class Stage4Coverage(qv.Table):
     recall = qv.Float64Column()
 
 
+class Stage4PerTarget(qv.Table):
+    """
+    One row per (orbit_id, target_idx, filter) processed in Stage 4.
+
+    This is used to compute per-target distributions (percentiles) for loaded frames,
+    evaluated detections, and accepted detections.
+    """
+
+    stage2_run_dir = qv.LargeStringColumn()
+    subset_dir = qv.LargeStringColumn()
+    strategy = qv.LargeStringColumn()
+    variant_kind = qv.LargeStringColumn(nullable=True)
+    footprint = qv.LargeStringColumn()
+    detection_filter = qv.LargeStringColumn()
+    healpix_nside = qv.Int64Column()
+
+    orbit_id = qv.LargeStringColumn()
+    target_idx = qv.Int64Column()
+    obscode = qv.LargeStringColumn()
+    exposure_mjd_mid = qv.Float64Column()
+
+    n_frames_loaded = qv.Int64Column()
+    n_observations_loaded = qv.Int64Column()
+    n_accepted = qv.Int64Column()
+
+    io_sec = qv.Float64Column()
+    prep_sec = qv.Float64Column()
+    filter_sec = qv.Float64Column()
+
+
 _ObsCacheKey = tuple[str, int, int]
+
+# Per-dataset astrometric uncertainty floors for innovation gating (arcsec).
+# These are *lower bounds* used when per-detection sigmas are missing or too small.
+#
+# Values are chosen to be below (or comparable to) typical uncertainties in the
+# current ATLAS/ZTF/NSC subset. In this subset, ZTF astrometric sigmas are NaN
+# in the stored observation records, so the floor is used for ZTF most often.
+_DET_SIGMA_FLOOR_ARCSEC_BY_DATASET: dict[str, float] = {
+    "atlas": 0.30,
+    "ztf": 0.10,
+    "nsc": 0.07,
+}
+_DET_SIGMA_FLOOR_ARCSEC_DEFAULT = 0.10
 
 
 @dataclass
@@ -413,6 +456,23 @@ def _query_frames_for_pixels(
     return out
 
 
+def _det_sigma_floor_arcsec_for_frames(*, frames: list[dict[str, object]]) -> float:
+    """
+    Return a conservative (max) sigma floor to apply for a loaded set of frames.
+
+    We do not have dataset_id stored per-detection in `ObservationsTable`, so for
+    mixed-dataset loads we apply the *largest* floor among frames. This only matters
+    when per-detection sigmas are missing/NaN.
+    """
+    if not frames:
+        return float(_DET_SIGMA_FLOOR_ARCSEC_DEFAULT)
+    floors: list[float] = []
+    for fr in frames:
+        ds = str(fr.get("dataset_id", "")).strip().lower()
+        floors.append(float(_DET_SIGMA_FLOOR_ARCSEC_BY_DATASET.get(ds, _DET_SIGMA_FLOOR_ARCSEC_DEFAULT)))
+    return float(max(floors)) if floors else float(_DET_SIGMA_FLOOR_ARCSEC_DEFAULT)
+
+
 def _load_observations_for_frames(
     db: PrecoveryDatabase,
     frames: list[dict[str, object]],
@@ -555,6 +615,7 @@ def _validate_detection_geometry(spec: str) -> tuple[str, float | None]:
         # covariance-derived (Gaussian)
         "cov_disc",
         "cov_ellipse",  # Mahalanobis ellipse using predicted covariance only
+        "innov_ellipse",  # Mahalanobis ellipse using (predicted + observational) covariance
         "cov_polygon_moc",  # ellipse boundary polygon membership (MOC naming; membership is polygon)
         "cov_mc_polygon_moc",  # perimeter polygon from covariance MC samples OR provided samples (convex hull)
         # sample-derived (variant ephemeris cloud)
@@ -585,6 +646,8 @@ class _ObsPrep:
     mjd_utc: np.ndarray  # (N,) float64
     ra_deg: np.ndarray  # (N,) float64
     dec_deg: np.ndarray  # (N,) float64
+    ra_sigma_deg: np.ndarray  # (N,) float64
+    dec_sigma_deg: np.ndarray  # (N,) float64
     ra_rad: np.ndarray  # (N,) float64
     dec_rad: np.ndarray  # (N,) float64
     sin_dec: np.ndarray  # (N,) float64
@@ -598,6 +661,8 @@ def _prepare_observation_arrays(obs: ObservationsTable) -> _ObsPrep:
     mjd = obs.time.mjd().to_numpy(zero_copy_only=False).astype(np.float64)
     ra_deg = obs.ra.to_numpy(zero_copy_only=False).astype(np.float64)
     dec_deg = obs.dec.to_numpy(zero_copy_only=False).astype(np.float64)
+    ra_sigma_deg = obs.ra_sigma.to_numpy(zero_copy_only=False).astype(np.float64)
+    dec_sigma_deg = obs.dec_sigma.to_numpy(zero_copy_only=False).astype(np.float64)
     ra_rad = np.deg2rad(ra_deg).astype(np.float64, copy=False)
     dec_rad = np.deg2rad(dec_deg).astype(np.float64, copy=False)
     sin_dec = np.sin(dec_rad)
@@ -606,6 +671,8 @@ def _prepare_observation_arrays(obs: ObservationsTable) -> _ObsPrep:
         mjd_utc=mjd,
         ra_deg=ra_deg,
         dec_deg=dec_deg,
+        ra_sigma_deg=ra_sigma_deg,
+        dec_sigma_deg=dec_sigma_deg,
         ra_rad=ra_rad,
         dec_rad=dec_rad,
         sin_dec=sin_dec,
@@ -640,6 +707,7 @@ def _detection_geometry_keep_mask(
     point_radius_arcsec: float,
     cov_mc_num_samples: int,
     cov_mc_seed: int,
+    det_sigma_floor_arcsec: float = float(_DET_SIGMA_FLOOR_ARCSEC_DEFAULT),
     sample_lon_deg: np.ndarray | None = None,
     sample_lat_deg: np.ndarray | None = None,
 ) -> np.ndarray:
@@ -685,6 +753,51 @@ def _detection_geometry_keep_mask(
     if geom == "cov_disc":
         r_deg = float(sig) * _sigma_major_deg_from_cov_ll(cov_ll_deg2=cov_ll_deg2, lat0_deg=float(lat0_deg))
         return _disc_keep_mask(prep=prep, lon0_deg=float(lon0_deg), lat0_deg=float(lat0_deg), radius_deg=float(r_deg))
+
+    if geom == "innov_ellipse":
+        # Innovation (observed + predicted) covariance gate in local tangent plane.
+        #
+        # Predicted covariance is provided as (lon,lat) deg^2. Convert to tangent-plane xy.
+        cov_xy, cos_lat = _cov_xy_from_cov_ll(
+            cov_ll_deg2=np.asarray(cov_ll_deg2, dtype=np.float64),
+            lat0_deg=float(lat0_deg),
+        )
+        a_p = float(cov_xy[0, 0])
+        b_p = float(cov_xy[0, 1])
+        d_p = float(cov_xy[1, 1])
+
+        # Observational 1-sigma uncertainties in degrees (diagonal-only).
+        floor_deg = float(det_sigma_floor_arcsec) / 3600.0
+        ra_sig = np.asarray(prep.ra_sigma_deg, dtype=np.float64)
+        dec_sig = np.asarray(prep.dec_sigma_deg, dtype=np.float64)
+        ra_sig = np.where(np.isfinite(ra_sig) & (ra_sig > 0.0), ra_sig, 0.0)
+        dec_sig = np.where(np.isfinite(dec_sig) & (dec_sig > 0.0), dec_sig, 0.0)
+        ra_sig = np.maximum(ra_sig, float(floor_deg))
+        dec_sig = np.maximum(dec_sig, float(floor_deg))
+
+        # Convert obs sigmas to the same tangent-plane x/y basis:
+        #   x = Δlon*cos(lat0), y = Δlat.
+        sig_x = ra_sig * float(cos_lat)
+        sig_y = dec_sig
+        var_x = sig_x * sig_x
+        var_y = sig_y * sig_y
+
+        # Total covariance per detection: [[a,b],[b,d]] where obs contributes only to diagonal.
+        a = a_p + var_x
+        b = np.full_like(a, b_p, dtype=np.float64)
+        d = d_p + var_y
+
+        # Residuals in the same tangent plane (degrees).
+        dlon = (prep.ra_deg - float(lon0_deg) + 180.0) % 360.0 - 180.0
+        x = dlon * float(cos_lat)
+        y = prep.dec_deg - float(lat0_deg)
+
+        # Fast 2x2 inverse chi^2: chi2 = [x y] Σ^{-1} [x y]^T.
+        det = a * d - b * b
+        det = np.where(np.isfinite(det) & (det > 0.0), det, np.inf)
+        chi2 = (x * x * d + y * y * a - 2.0 * x * y * b) / det
+        chi2 = np.where(np.isfinite(chi2), chi2, np.inf)
+        return chi2 <= float(sig) ** 2
 
     if geom == "cov_ellipse":
         fp = EllipseFootprint(
@@ -920,6 +1033,7 @@ def run_stage4_detection_filter_bench(
     max_orbits: int | None = None,
     max_targets: int | None = None,
     obs_cache_max_frames: int = 0,
+    write_per_target_metrics: bool = False,
 ) -> Path:
     """
     Stage 4 (atomic): benchmark detection-level filtering variants after loading observations.
@@ -927,6 +1041,7 @@ def run_stage4_detection_filter_bench(
     Outputs:
       - metrics.parquet: runtime + counts by (strategy, footprint, detection_filter)
       - coverage.parquet: truth-detection recall by (strategy, footprint, detection_filter)
+      - per_target.parquet (optional): per-(orbit,target,filter) counts + timings
     """
     if out_dir is None:
         out_dir = subset_dir / "artifacts" / "stage4"
@@ -1062,13 +1177,23 @@ def run_stage4_detection_filter_bench(
     if filters is None:
         # Defaults are geometry-only acceptance tests.
         # These are intentionally independent of how Stage 3 selected candidate frames.
-        filters = ["cov_ellipse@1", "cov_ellipse@2", "cov_ellipse@3", "cov_polygon_moc", "cov_disc"]
+        filters = [
+            "cov_ellipse@1",
+            "cov_ellipse@2",
+            "cov_ellipse@3",
+            "innov_ellipse@1",
+            "innov_ellipse@2",
+            "innov_ellipse@3",
+            "cov_polygon_moc",
+            "cov_disc",
+        ]
     filters = [str(x).strip() for x in filters if str(x).strip()]
     for f in filters:
         _ = _validate_detection_geometry(f)  # validate
 
     metrics_rows: list[dict[str, object]] = []
     coverage_rows: list[dict[str, object]] = []
+    per_target_rows: list[dict[str, object]] = []
 
     strategies_root = stage2_run_dir / "strategies"
     if not strategies_root.exists():
@@ -1239,6 +1364,7 @@ def run_stage4_detection_filter_bench(
                             db, frames, obs_cache=obs_cache, obs_cache_max_frames=int(obs_cache_max_frames)
                         )
                         io_sec = time.perf_counter() - t_io0
+                        det_sigma_floor_arcsec = _det_sigma_floor_arcsec_for_frames(frames=frames)
 
                         for agg in aggs.values():
                             agg.n_orbit_targets += 1
@@ -1247,6 +1373,29 @@ def run_stage4_detection_filter_bench(
                             agg.io_sec += float(io_sec)
 
                         if len(obs) == 0:
+                            if bool(write_per_target_metrics):
+                                for filt_name in aggs.keys():
+                                    per_target_rows.append(
+                                        dict(
+                                            stage2_run_dir=str(stage2_run_dir),
+                                            subset_dir=str(subset_dir),
+                                            strategy=name,
+                                            variant_kind=None,
+                                            footprint=str(footprint),
+                                            detection_filter=str(filt_name),
+                                            healpix_nside=int(healpix_nside),
+                                            orbit_id=str(oid),
+                                            target_idx=int(tidx),
+                                            obscode=str(obscode),
+                                            exposure_mjd_mid=float(mjd_mid),
+                                            n_frames_loaded=int(len(frames)),
+                                            n_observations_loaded=0,
+                                            n_accepted=0,
+                                            io_sec=float(io_sec),
+                                            prep_sec=0.0,
+                                            filter_sec=0.0,
+                                        )
+                                    )
                             continue
 
                         t_prep0 = time.perf_counter()
@@ -1269,6 +1418,7 @@ def run_stage4_detection_filter_bench(
                                     point_radius_arcsec=float(point_radius_arcsec),
                                     cov_mc_num_samples=int(cov_mc_num_samples),
                                     cov_mc_seed=int(cov_mc_seed),
+                                    det_sigma_floor_arcsec=float(det_sigma_floor_arcsec),
                                     sample_lon_deg=None,
                                     sample_lat_deg=None,
                                 )
@@ -1284,6 +1434,29 @@ def run_stage4_detection_filter_bench(
                                 agg.n_after_prefilter += int(n_after)
                             agg.filter_sec += float(filt_sec)
                             # no separate chi2 step (geometry-only)
+
+                            if bool(write_per_target_metrics):
+                                per_target_rows.append(
+                                    dict(
+                                        stage2_run_dir=str(stage2_run_dir),
+                                        subset_dir=str(subset_dir),
+                                        strategy=name,
+                                        variant_kind=None,
+                                        footprint=str(footprint),
+                                        detection_filter=str(filt_name),
+                                        healpix_nside=int(healpix_nside),
+                                        orbit_id=str(oid),
+                                        target_idx=int(tidx),
+                                        obscode=str(obscode),
+                                        exposure_mjd_mid=float(mjd_mid),
+                                        n_frames_loaded=int(len(frames)),
+                                        n_observations_loaded=int(len(obs)),
+                                        n_accepted=int(n_after),
+                                        io_sec=float(io_sec),
+                                        prep_sec=float(prep_sec),
+                                        filter_sec=float(filt_sec),
+                                    )
+                                )
 
                             if n_after > 0:
                                 truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
@@ -1521,6 +1694,7 @@ def run_stage4_detection_filter_bench(
                             db, frames, obs_cache=obs_cache, obs_cache_max_frames=int(obs_cache_max_frames)
                         )
                         io_sec = time.perf_counter() - t_io0
+                        det_sigma_floor_arcsec = _det_sigma_floor_arcsec_for_frames(frames=frames)
 
                         for agg in aggs.values():
                             agg.n_orbit_targets += 1
@@ -1551,6 +1725,7 @@ def run_stage4_detection_filter_bench(
                                     point_radius_arcsec=float(point_radius_arcsec),
                                     cov_mc_num_samples=int(cov_mc_num_samples),
                                     cov_mc_seed=int(cov_mc_seed),
+                                    det_sigma_floor_arcsec=float(det_sigma_floor_arcsec),
                                     sample_lon_deg=lon_g.astype(np.float64, copy=False),
                                     sample_lat_deg=lat_g.astype(np.float64, copy=False),
                                 )
@@ -1673,6 +1848,14 @@ def run_stage4_detection_filter_bench(
     metrics.to_parquet(str(run_dir / "metrics.parquet"))
     coverage.to_parquet(str(run_dir / "coverage.parquet"))
 
+    if bool(write_per_target_metrics):
+        per_target = (
+            Stage4PerTarget.empty()
+            if not per_target_rows
+            else Stage4PerTarget.from_pyarrow(pa.Table.from_pylist(per_target_rows))
+        )
+        per_target.to_parquet(str(run_dir / "per_target.parquet"))
+
     out_meta = dict(
         subset_dir=str(subset_dir),
         stage2_run_dir=str(stage2_run_dir),
@@ -1694,6 +1877,9 @@ def run_stage4_detection_filter_bench(
         max_orbits=None if max_orbits is None else int(max_orbits),
         max_targets=None if max_targets is None else int(max_targets),
         obs_cache_max_frames=int(obs_cache_max_frames),
+        write_per_target_metrics=bool(write_per_target_metrics),
+        det_sigma_floor_arcsec_by_dataset=dict(_DET_SIGMA_FLOOR_ARCSEC_BY_DATASET),
+        det_sigma_floor_arcsec_default=float(_DET_SIGMA_FLOOR_ARCSEC_DEFAULT),
         generated_at_utc=_now_utc(),
     )
     _write_json(run_dir / "meta.json", out_meta)
@@ -1769,8 +1955,10 @@ def main() -> None:
         default=None,
         help=(
             "Comma-separated list of Stage 4 detection geometries (acceptance tests). "
-            "Defaults: cov_ellipse@1,cov_ellipse@2,cov_ellipse@3,cov_polygon_moc,cov_disc. "
-            "Available: point_disc,cov_disc,cov_ellipse,cov_polygon_moc,cov_mc_polygon_moc,sample_perimeter_polygon_moc. "
+            "Defaults: cov_ellipse@1,cov_ellipse@2,cov_ellipse@3,innov_ellipse@1,innov_ellipse@2,innov_ellipse@3,"
+            "cov_polygon_moc,cov_disc. "
+            "Available: point_disc,cov_disc,cov_ellipse,innov_ellipse,cov_polygon_moc,cov_mc_polygon_moc,"
+            "sample_perimeter_polygon_moc. "
             "You can override sigma per-geometry using '@', e.g. cov_ellipse@1. "
             "Note: perimeter-based geometries (sample_perimeter_polygon_moc and cov_mc_polygon_moc) are only "
             "enabled for Monte Carlo variant kinds (e.g. mc_256), not sigma points."
@@ -1807,6 +1995,15 @@ def main() -> None:
             "Greatly reduces repeated disk reads across footprints. 0 disables."
         ),
     )
+    p.add_argument(
+        "--write-per-target-metrics",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Write per-(orbit,target,filter) metrics to per_target.parquet so we can compute "
+            "per-target distributions (percentiles) for loaded frames/detections/accepted detections."
+        ),
+    )
     args = p.parse_args()
 
     run_dir = run_stage4_detection_filter_bench(
@@ -1831,6 +2028,7 @@ def main() -> None:
         max_orbits=args.max_orbits,
         max_targets=args.max_targets,
         obs_cache_max_frames=int(args.obs_cache_max_frames),
+        write_per_target_metrics=bool(args.write_per_target_metrics),
     )
     print(f"run_dir={run_dir}")
     print(f"metrics_parquet={run_dir / 'metrics.parquet'}")

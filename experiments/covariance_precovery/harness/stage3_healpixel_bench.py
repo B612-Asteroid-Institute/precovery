@@ -673,6 +673,7 @@ def run_stage3_healpixel_bench(
     persist_geometry: bool = True,
     out_dir: Path | None = None,
     strategies: list[str] | None = None,
+    footprints: list[str] | None = None,
     only_truth: bool = False,
     compute_extra_frames: bool = False,
 ) -> Path:
@@ -703,6 +704,18 @@ def run_stage3_healpixel_bench(
     strategies_root = stage2_run_dir / "strategies"
     if not strategies_root.exists():
         raise FileNotFoundError(f"Missing Stage 2 strategies dir: {strategies_root}")
+
+    def _normalize_fp_list(lst: list[str]) -> set[str]:
+        out: set[str] = set()
+        for x in lst:
+            s = str(x).strip()
+            if s:
+                out.add(s)
+        return out
+
+    selected_footprints: set[str] | None = None
+    if footprints is not None:
+        selected_footprints = _normalize_fp_list(footprints)
 
     def _enabled(name: str) -> bool:
         return strategies is None or name in strategies
@@ -782,6 +795,8 @@ def run_stage3_healpixel_bench(
         )
 
         for footprint in active_footprints:
+            if selected_footprints is not None and str(footprint) not in selected_footprints:
+                continue
             t0 = time.perf_counter()
             n_rows_total = 0
             n_rows_used = 0
@@ -1124,6 +1139,8 @@ def run_stage3_healpixel_bench(
                 if (footprint in {"sample_polygon_moc"} and polygon_mode is not None)
                 else str(footprint)
             )
+            if selected_footprints is not None and str(out_fp) not in selected_footprints:
+                continue
             t0 = time.perf_counter()
             n_rows_total = 0
             n_rows_used = 0
@@ -1529,6 +1546,7 @@ def run_stage3_healpixel_bench(
         corridor_step_arcsec=float(corridor_step_arcsec),
         only_truth=bool(only_truth),
         compute_extra_frames=bool(compute_extra_frames),
+        footprints=(None if selected_footprints is None else sorted(selected_footprints)),
         n_truth_keys=int(len(truth_keys_tbl)),
         generated_at_utc=_now_utc(),
     )
@@ -1565,6 +1583,15 @@ def main() -> None:
         help="Comma-separated list of Stage2 strategy folder names to include (e.g. '2body_with_covariance,assist_mean').",
     )
     p.add_argument(
+        "--footprints",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated list of footprint output names to include "
+            "(e.g. 'cov_polygon_moc,cov_polygon_reconstructed_moc'). If omitted, runs all."
+        ),
+    )
+    p.add_argument(
         "--only-truth",
         action="store_true",
         help="Only evaluate keys present in truth crossmatch (much faster for full runs).",
@@ -1587,6 +1614,7 @@ def main() -> None:
     args = p.parse_args()
 
     strategies = None if args.strategies is None else [s.strip() for s in str(args.strategies).split(",") if s.strip()]
+    footprints = None if args.footprints is None else [s.strip() for s in str(args.footprints).split(",") if s.strip()]
     run_dir = run_stage3_healpixel_bench(
         subset_dir=Path(args.subset_dir),
         stage2_run_dir=Path(args.stage2_run_dir),
@@ -1599,6 +1627,7 @@ def main() -> None:
         corridor_radius_arcsec=float(args.corridor_radius_arcsec),
         corridor_step_arcsec=float(args.corridor_step_arcsec),
         strategies=strategies,
+        footprints=footprints,
         only_truth=bool(args.only_truth),
         compute_extra_frames=bool(args.compute_extra_frames),
         persist_geometry=bool(args.persist_geometry),
