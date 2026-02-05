@@ -1168,6 +1168,8 @@ def run_stage2_propagation_bench(
     max_orbits: int | None = None,
     orbit_ids: list[str] | None = None,
     max_window_centers: int | None = None,
+    targets_mjd_min: float | None = None,
+    targets_mjd_max: float | None = None,
     strategies: list[str] | None = None,
     mc_samples: list[int] | None = None,
     time_chunk_size: int = 0,
@@ -1187,6 +1189,11 @@ def run_stage2_propagation_bench(
     run_dir = out_dir / _utc_run_id()
     _ensure_dir(run_dir)
 
+    mjd_min = float(win.min_mjd) if targets_mjd_min is None else float(targets_mjd_min)
+    mjd_max = float(win.max_mjd) if targets_mjd_max is None else float(targets_mjd_max)
+    if not np.isfinite(mjd_min) or not np.isfinite(mjd_max) or mjd_max <= mjd_min:
+        raise ValueError(f"Invalid target MJD range: mjd_min={mjd_min} mjd_max={mjd_max}")
+
     # Propagation targets: by default, all distinct (obscode, exposure_mjd_mid) pairs in the subset range.
     # In truth-only recovery runs, restrict targets to only the exposure midpoints that are known
     # (from the truth crossmatch) to contain a matched truth detection.
@@ -1197,8 +1204,22 @@ def run_stage2_propagation_bench(
     else:
         # This is the true workload for per-frame ephemeris generation.
         target_codes, target_times_utc = _fetch_unique_exposure_midpoints(
-            db, start_mjd=float(win.min_mjd), end_mjd=float(win.max_mjd) + 1e-9
+            db, start_mjd=float(mjd_min), end_mjd=float(mjd_max) + 1e-9
         )
+
+    # Optional target-time window filter (applies to both truth-target and full-target modes).
+    if len(target_times_utc) > 0 and (
+        (targets_mjd_min is not None) or (targets_mjd_max is not None)
+    ):
+        mjd = target_times_utc.mjd().to_numpy(zero_copy_only=False).astype(np.float64)
+        m = (mjd >= float(mjd_min)) & (mjd < float(mjd_max) + 1e-9)
+        if not m.any():
+            target_codes = pa.array([], type=pa.large_string())
+            target_times_utc = Timestamp.from_mjd([], scale="utc")
+        elif not m.all():
+            idx = np.nonzero(m)[0]
+            target_codes = pc.take(target_codes, pa.array(idx, type=pa.int64()))
+            target_times_utc = target_times_utc.take(idx.tolist())
     if max_window_centers is not None:
         # Backwards-compat: this flag now caps the number of (obscode,time) targets.
         n = int(max_window_centers)
@@ -1260,7 +1281,7 @@ def run_stage2_propagation_bench(
     target_observers_tdb.to_parquet(str(inputs_dir / "target_observers_tdb.parquet"))
 
     # Window centers are now used *only* for the mixed strategy.
-    windows = db.frames.idx.window_centers(win.min_mjd, win.max_mjd, int(window_size_days))
+    windows = db.frames.idx.window_centers(float(mjd_min), float(mjd_max), int(window_size_days))
     windows.to_parquet(str(inputs_dir / "window_centers.parquet"))
 
     # Warm up JIT compilation / kernels (do not include in benchmark timings).
@@ -1460,6 +1481,8 @@ def run_stage2_propagation_bench(
         "window_size_days": int(window_size_days),
         "max_orbits": None if max_orbits is None else int(max_orbits),
         "max_window_centers": None if max_window_centers is None else int(max_window_centers),
+        "targets_mjd_min": float(mjd_min),
+        "targets_mjd_max": float(mjd_max),
         "strategies_requested": None if strategies is None else list(strategies),
         "mc_samples": [int(x) for x in mc_samples],
         "time_chunk_size": int(time_chunk_size),
@@ -1505,6 +1528,25 @@ def main() -> None:
         type=int,
         default=None,
         help="Deprecated name: now caps number of (obscode,time) targets used for benchmarking.",
+    )
+    p.add_argument(
+        "--targets-mjd-min",
+        type=float,
+        default=None,
+        help=(
+            "Minimum exposure midpoint MJD (UTC) to include as Stage 2 targets. "
+            "If omitted, uses the subset window minimum."
+        ),
+    )
+    p.add_argument(
+        "--targets-mjd-max",
+        type=float,
+        default=None,
+        help=(
+            "Maximum exposure midpoint MJD (UTC) to include as Stage 2 targets. "
+            "Targets are filtered to mjd < targets_mjd_max. "
+            "If omitted, uses the subset window maximum."
+        ),
     )
     p.add_argument(
         "--time-chunk-size",
@@ -1579,6 +1621,8 @@ def main() -> None:
         max_orbits=args.max_orbits,
         orbit_ids=(None if args.orbit_ids is None else [s.strip() for s in str(args.orbit_ids).split(',') if s.strip()]),
         max_window_centers=args.max_window_centers,
+        targets_mjd_min=args.targets_mjd_min,
+        targets_mjd_max=args.targets_mjd_max,
         strategies=_parse_strategies_arg(args.strategies),
         mc_samples=_parse_mc_samples_arg(args.mc_samples, default=[]),
         time_chunk_size=int(args.time_chunk_size),
