@@ -138,6 +138,10 @@ class Stage4PerTarget(qv.Table):
     n_observations_loaded = qv.Int64Column()
     n_accepted = qv.Int64Column()
 
+    # Truth crossmatch (aligned to targets). These let us compute per-object/target recall.
+    n_truth_matched = qv.Int64Column()
+    n_truth_recovered = qv.Int64Column()
+
     io_sec = qv.Float64Column()
     prep_sec = qv.Float64Column()
     filter_sec = qv.Float64Column()
@@ -1374,6 +1378,7 @@ def run_stage4_detection_filter_bench(
 
                         if len(obs) == 0:
                             if bool(write_per_target_metrics):
+                                truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
                                 for filt_name in aggs.keys():
                                     per_target_rows.append(
                                         dict(
@@ -1391,6 +1396,8 @@ def run_stage4_detection_filter_bench(
                                             n_frames_loaded=int(len(frames)),
                                             n_observations_loaded=0,
                                             n_accepted=0,
+                                            n_truth_matched=int(len(truth_entries)),
+                                            n_truth_recovered=0,
                                             io_sec=float(io_sec),
                                             prep_sec=0.0,
                                             filter_sec=0.0,
@@ -1436,6 +1443,18 @@ def run_stage4_detection_filter_bench(
                             # no separate chi2 step (geometry-only)
 
                             if bool(write_per_target_metrics):
+                                truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
+                                n_truth_matched = int(len(truth_entries))
+                                n_truth_recovered = 0
+                                if n_after > 0:
+                                    rec = _recover_truth_obsids_for_orbit_target_masked(
+                                        truth_entries=truth_entries,
+                                        prep=prep,
+                                        accepted_mask=keep,
+                                        time_tol_sec=float(time_tol_sec),
+                                        dist_tol_arcsec=float(dist_tol_arcsec),
+                                    )
+                                    n_truth_recovered = int(len(rec))
                                 per_target_rows.append(
                                     dict(
                                         stage2_run_dir=str(stage2_run_dir),
@@ -1452,6 +1471,8 @@ def run_stage4_detection_filter_bench(
                                         n_frames_loaded=int(len(frames)),
                                         n_observations_loaded=int(len(obs)),
                                         n_accepted=int(n_after),
+                                        n_truth_matched=int(n_truth_matched),
+                                        n_truth_recovered=int(n_truth_recovered),
                                         io_sec=float(io_sec),
                                         prep_sec=float(prep_sec),
                                         filter_sec=float(filt_sec),
@@ -1459,9 +1480,8 @@ def run_stage4_detection_filter_bench(
                                 )
 
                             if n_after > 0:
-                                truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
                                 rec = _recover_truth_obsids_for_orbit_target_masked(
-                                    truth_entries=truth_entries,
+                                    truth_entries=truth_by_orbit_target.get((oid, int(tidx)), []),
                                     prep=prep,
                                     accepted_mask=keep,
                                     time_tol_sec=float(time_tol_sec),
@@ -1731,6 +1751,7 @@ def run_stage4_detection_filter_bench(
 
                             if len(obs) == 0:
                                 if bool(write_per_target_metrics):
+                                    truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
                                     for filt_name in aggs.keys():
                                         per_target_rows.append(
                                             dict(
@@ -1748,6 +1769,8 @@ def run_stage4_detection_filter_bench(
                                                 n_frames_loaded=int(len(frames)),
                                                 n_observations_loaded=0,
                                                 n_accepted=0,
+                                                n_truth_matched=int(len(truth_entries)),
+                                                n_truth_recovered=0,
                                                 io_sec=float(io_sec),
                                                 prep_sec=0.0,
                                                 filter_sec=0.0,
@@ -1791,6 +1814,19 @@ def run_stage4_detection_filter_bench(
                                     agg.n_after_prefilter += int(n_after)
                                 agg.filter_sec += float(filt_sec)
 
+                                truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
+                                rec: list[str] = []
+                                if n_after > 0:
+                                    rec = _recover_truth_obsids_for_orbit_target_masked(
+                                        truth_entries=truth_entries,
+                                        prep=prep,
+                                        accepted_mask=keep,
+                                        time_tol_sec=float(time_tol_sec),
+                                        dist_tol_arcsec=float(dist_tol_arcsec),
+                                    )
+                                    for truth_obsid in rec:
+                                        agg.recovered_truth_pairs.add((oid, str(truth_obsid)))
+
                                 if bool(write_per_target_metrics):
                                     per_target_rows.append(
                                         dict(
@@ -1808,23 +1844,13 @@ def run_stage4_detection_filter_bench(
                                             n_frames_loaded=int(len(frames)),
                                             n_observations_loaded=int(len(obs)),
                                             n_accepted=int(n_after),
+                                            n_truth_matched=int(len(truth_entries)),
+                                            n_truth_recovered=int(len(rec)),
                                             io_sec=float(io_sec),
                                             prep_sec=float(prep_sec),
                                             filter_sec=float(filt_sec),
                                         )
                                     )
-
-                                if n_after > 0:
-                                    truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
-                                    rec = _recover_truth_obsids_for_orbit_target_masked(
-                                        truth_entries=truth_entries,
-                                        prep=prep,
-                                        accepted_mask=keep,
-                                        time_tol_sec=float(time_tol_sec),
-                                        dist_tol_arcsec=float(dist_tol_arcsec),
-                                    )
-                                    for truth_obsid in rec:
-                                        agg.recovered_truth_pairs.add((oid, str(truth_obsid)))
 
                         continue
 
@@ -1896,6 +1922,32 @@ def run_stage4_detection_filter_bench(
                             agg.io_sec += float(io_sec)
 
                         if len(obs) == 0:
+                            if bool(write_per_target_metrics):
+                                truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
+                                for filt_name in aggs.keys():
+                                    per_target_rows.append(
+                                        dict(
+                                            stage2_run_dir=str(stage2_run_dir),
+                                            subset_dir=str(subset_dir),
+                                            strategy=str(variant_root_name),
+                                            variant_kind=str(variant_kind),
+                                            footprint=str(out_fp),
+                                            detection_filter=str(filt_name),
+                                            healpix_nside=int(healpix_nside),
+                                            orbit_id=str(oid),
+                                            target_idx=int(tidx),
+                                            obscode=str(obscode),
+                                            exposure_mjd_mid=float(mjd_mid),
+                                            n_frames_loaded=int(len(frames)),
+                                            n_observations_loaded=0,
+                                            n_accepted=0,
+                                            n_truth_matched=int(len(truth_entries)),
+                                            n_truth_recovered=0,
+                                            io_sec=float(io_sec),
+                                            prep_sec=0.0,
+                                            filter_sec=0.0,
+                                        )
+                                    )
                             continue
 
                         t_prep0 = time.perf_counter()
@@ -1934,8 +1986,9 @@ def run_stage4_detection_filter_bench(
                                 agg.n_after_prefilter += int(n_after)
                             agg.filter_sec += float(filt_sec)
 
+                            truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
+                            rec: list[str] = []
                             if n_after > 0:
-                                truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
                                 rec = _recover_truth_obsids_for_orbit_target_masked(
                                     truth_entries=truth_entries,
                                     prep=prep,
@@ -1945,6 +1998,31 @@ def run_stage4_detection_filter_bench(
                                 )
                                 for truth_obsid in rec:
                                     agg.recovered_truth_pairs.add((oid, str(truth_obsid)))
+
+                            if bool(write_per_target_metrics):
+                                per_target_rows.append(
+                                    dict(
+                                        stage2_run_dir=str(stage2_run_dir),
+                                        subset_dir=str(subset_dir),
+                                        strategy=str(variant_root_name),
+                                        variant_kind=str(variant_kind),
+                                        footprint=str(out_fp),
+                                        detection_filter=str(filt_name),
+                                        healpix_nside=int(healpix_nside),
+                                        orbit_id=str(oid),
+                                        target_idx=int(tidx),
+                                        obscode=str(obscode),
+                                        exposure_mjd_mid=float(mjd_mid),
+                                        n_frames_loaded=int(len(frames)),
+                                        n_observations_loaded=int(len(obs)),
+                                        n_accepted=int(n_after),
+                                        n_truth_matched=int(len(truth_entries)),
+                                        n_truth_recovered=int(len(rec)),
+                                        io_sec=float(io_sec),
+                                        prep_sec=float(prep_sec),
+                                        filter_sec=float(filt_sec),
+                                    )
+                                )
 
                 for filt_name, agg in aggs.items():
                     runtime_total = float(agg.io_sec + agg.prep_sec + agg.filter_sec)
