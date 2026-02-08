@@ -11,7 +11,6 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import quivr as qv
-
 from adam_core.orbits import Orbits
 from adam_core.orbits.ephemeris import Ephemeris
 
@@ -70,7 +69,9 @@ def _orbit_epoch_mjd_utc_by_key(orbits: Orbits) -> dict[str, float]:
         keys = []
         for i, x in enumerate(obj_col.to_pylist()):
             s = "" if x is None else str(x).strip()
-            keys.append(_designation_from_object_id(s) if s else str(orbits.orbit_id[i].as_py()))
+            keys.append(
+                _designation_from_object_id(s) if s else str(orbits.orbit_id[i].as_py())
+            )
 
     t = orbits.coordinates.time.rescale("utc")
     mjd = np.asarray(t.mjd().to_numpy(zero_copy_only=False), dtype=np.float64)
@@ -161,7 +162,9 @@ def _effective_obs_sigma_arcsec(astro_sigma_arcsec: float | None) -> float:
     return float(s)
 
 
-def _innov_cov_ll_deg2(*, cov_ll_deg2: np.ndarray, lat0_deg: float, obs_sigma_arcsec: float) -> np.ndarray:
+def _innov_cov_ll_deg2(
+    *, cov_ll_deg2: np.ndarray, lat0_deg: float, obs_sigma_arcsec: float
+) -> np.ndarray:
     """
     Innovation-style covariance inflation in the local tangent plane:
 
@@ -221,7 +224,9 @@ def _fractional_parent_weights_nested(
     if ratio * nside_parent != nside_child:
         raise ValueError("nside_child must be an integer multiple of nside_parent")
     if ratio & (ratio - 1) != 0:
-        raise ValueError("nside_child / nside_parent must be a power of two for NESTED mapping")
+        raise ValueError(
+            "nside_child / nside_parent must be a power of two for NESTED mapping"
+        )
     k = int(np.log2(ratio))
     shift = int(2 * k)
     children_per_parent = int(ratio * ratio)
@@ -262,7 +267,9 @@ def _parent_pixels_and_weights_from_child_nested(
     if ratio * nside_parent != nside_child:
         raise ValueError("nside_child must be an integer multiple of nside_parent")
     if ratio & (ratio - 1) != 0:
-        raise ValueError("nside_child / nside_parent must be a power of two for NESTED mapping")
+        raise ValueError(
+            "nside_child / nside_parent must be a power of two for NESTED mapping"
+        )
     k = int(np.log2(ratio))
     shift = int(2 * k)
     children_per_parent = int(ratio * ratio)
@@ -296,6 +303,12 @@ class _GroupAgg:
     max_sigma_major_arcsec: float = 0.0
     sum_ellipse_area_deg2: float = 0.0
     max_ellipse_area_deg2: float = 0.0
+
+    # Predicted-covariance-only metrics (no observational variance added).
+    sum_sigma_major_pred_arcsec: float = 0.0
+    max_sigma_major_pred_arcsec: float = 0.0
+    sum_ellipse_area_pred_deg2: float = 0.0
+    max_ellipse_area_pred_deg2: float = 0.0
 
     abs_dt_min_days: float | None = None
     abs_dt_max_days: float | None = None
@@ -350,6 +363,11 @@ class Stage5IndexOnlyTimeSeries(qv.Table):
     ellipse_area_deg2_mean = qv.Float64Column(nullable=True)
     ellipse_area_deg2_max = qv.Float64Column(nullable=True)
 
+    sigma_major_pred_arcsec_mean = qv.Float64Column(nullable=True)
+    sigma_major_pred_arcsec_max = qv.Float64Column(nullable=True)
+    ellipse_area_pred_deg2_mean = qv.Float64Column(nullable=True)
+    ellipse_area_pred_deg2_max = qv.Float64Column(nullable=True)
+
 
 def run_stage5_index_only_density(
     *,
@@ -402,19 +420,27 @@ def run_stage5_index_only_density(
         orbits_parquet = subset_dir / "artifacts" / "orbits_selected_sbdb.parquet"
     orbits_parquet = Path(orbits_parquet)
     if not orbits_parquet.exists():
-        raise FileNotFoundError(f"Missing orbits parquet (needed for orbit epochs): {orbits_parquet}")
+        raise FileNotFoundError(
+            f"Missing orbits parquet (needed for orbit epochs): {orbits_parquet}"
+        )
 
     # Targets.
-    targets = FrameTimeTargets.from_parquet(str(stage2_run_dir / "inputs" / "frame_time_targets.parquet"))
+    targets = FrameTimeTargets.from_parquet(
+        str(stage2_run_dir / "inputs" / "frame_time_targets.parquet")
+    )
     targ_obscode = np.asarray(targets.obscode.to_pylist(), dtype=object)
-    targ_mjd = np.asarray(targets.time.mjd().to_numpy(zero_copy_only=False), dtype=np.float64)
+    targ_mjd = np.asarray(
+        targets.time.mjd().to_numpy(zero_copy_only=False), dtype=np.float64
+    )
     n_time_targets = int(len(targets))
     if max_targets is not None:
         n_time_targets = int(min(n_time_targets, int(max_targets)))
         targ_obscode = targ_obscode[:n_time_targets]
         targ_mjd = targ_mjd[:n_time_targets]
 
-    sampled_target_idx = _sample_target_indices(n=int(n_time_targets), max_sampled=max_sampled_targets)
+    sampled_target_idx = _sample_target_indices(
+        n=int(n_time_targets), max_sampled=max_sampled_targets
+    )
     sampled_keep: np.ndarray | None = None
     if sampled_target_idx is not None:
         sampled_keep = np.zeros(int(n_time_targets), dtype=bool)
@@ -473,7 +499,9 @@ def run_stage5_index_only_density(
     # Cache total-by-exposure for upper-bound fallback.
     total_cache: dict[tuple[str, float], tuple[int, int]] = {}
 
-    def _total_for_exposure(*, conn: sqlite3.Connection, obscode: str, exposure_mjd_mid: float) -> tuple[int, int]:
+    def _total_for_exposure(
+        *, conn: sqlite3.Connection, obscode: str, exposure_mjd_mid: float
+    ) -> tuple[int, int]:
         k = (str(obscode), float(exposure_mjd_mid))
         if k in total_cache:
             return total_cache[k]
@@ -504,8 +532,12 @@ def run_stage5_index_only_density(
         conn.execute(
             "CREATE TEMP TABLE pred (orbit_id TEXT, target_idx INTEGER, obscode TEXT, exposure_mjd_mid REAL, healpixel INTEGER, weight REAL)"
         )
-        conn.execute("CREATE INDEX IF NOT EXISTS pred_idx ON pred (obscode, exposure_mjd_mid, healpixel)")
-        conn.execute("CREATE INDEX IF NOT EXISTS pred_key_idx ON pred (orbit_id, target_idx)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS pred_idx ON pred (obscode, exposure_mjd_mid, healpixel)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS pred_key_idx ON pred (orbit_id, target_idx)"
+        )
         conn.commit()
 
         t_run0 = time.perf_counter()
@@ -552,11 +584,17 @@ def run_stage5_index_only_density(
                         orbit_key = orbit_key[hit]
                         n_rows_used = int(len(ephem))
 
-            lon = ephem.coordinates.lon.to_numpy(zero_copy_only=False).astype(np.float64)
-            lat = ephem.coordinates.lat.to_numpy(zero_copy_only=False).astype(np.float64)
+            lon = ephem.coordinates.lon.to_numpy(zero_copy_only=False).astype(
+                np.float64
+            )
+            lat = ephem.coordinates.lat.to_numpy(zero_copy_only=False).astype(
+                np.float64
+            )
 
             cov6 = None
-            if ephem.coordinates.covariance is not None and (not ephem.coordinates.covariance.is_all_nan()):
+            if ephem.coordinates.covariance is not None and (
+                not ephem.coordinates.covariance.is_all_nan()
+            ):
                 cov6 = ephem.coordinates.covariance.to_matrix().astype(np.float64)
             else:
                 raise ValueError(
@@ -570,7 +608,9 @@ def run_stage5_index_only_density(
             t_row0 = time.perf_counter()
             last_row_log_t = float(t_row0)
             for i in range(len(ephem)):
-                if (time.perf_counter() - float(last_row_log_t)) > 30.0 and len(ephem) > 0:
+                if (time.perf_counter() - float(last_row_log_t)) > 30.0 and len(
+                    ephem
+                ) > 0:
                     now = time.perf_counter()
                     frac = float(i) / float(len(ephem))
                     rate = float(i) / max(1e-9, float(now - float(t_row0)))
@@ -596,6 +636,14 @@ def run_stage5_index_only_density(
                 abs_dt = float(abs(dt_days))
 
                 cov_ll = cov6[i, 1:3, 1:3].astype(np.float64, copy=False)
+                sigma_major_pred_arcsec = sigma_major_arcsec_from_cov_ll_deg2(
+                    cov_ll_deg2=cov_ll, lat0_deg=float(lat[i])
+                )
+                ellipse_area_pred_deg2 = ellipse_area_deg2_from_cov_ll_deg2(
+                    cov_ll_deg2=cov_ll,
+                    lat0_deg=float(lat[i]),
+                    n_sigma=float(n_sigma),
+                )
                 cov_ll_eff = _innov_cov_ll_deg2(
                     cov_ll_deg2=cov_ll,
                     lat0_deg=float(lat[i]),
@@ -606,7 +654,9 @@ def run_stage5_index_only_density(
                     cov_ll_deg2=cov_ll_eff, lat0_deg=float(lat[i])
                 )
                 ellipse_area_deg2 = ellipse_area_deg2_from_cov_ll_deg2(
-                    cov_ll_deg2=cov_ll_eff, lat0_deg=float(lat[i]), n_sigma=float(n_sigma)
+                    cov_ll_deg2=cov_ll_eff,
+                    lat0_deg=float(lat[i]),
+                    n_sigma=float(n_sigma),
                 )
 
                 weights: dict[int, float] | None = None
@@ -682,7 +732,10 @@ def run_stage5_index_only_density(
                     if weights is None:
                         weights = {int(p): 1.0 for p in pix.tolist()}
                     else:
-                        weights = {int(p): float(weights.get(int(p), 0.0)) for p in pix.tolist()}
+                        weights = {
+                            int(p): float(weights.get(int(p), 0.0))
+                            for p in pix.tolist()
+                        }
 
                 n_pix = int(pix.size)
 
@@ -695,7 +748,9 @@ def run_stage5_index_only_density(
                     dt_days=dt_days,
                     abs_dt_days=abs_dt,
                     sigma_major_arcsec=float(sigma_major_arcsec),
+                    sigma_major_pred_arcsec=float(sigma_major_pred_arcsec),
                     ellipse_area_deg2=float(ellipse_area_deg2),
+                    ellipse_area_pred_deg2=float(ellipse_area_pred_deg2),
                     n_pred_pixels=int(n_pix),
                     upper_bound_all_frames=False,
                     upper_n_frames=0,
@@ -707,7 +762,9 @@ def run_stage5_index_only_density(
                     continue
                 if int(n_pix) > int(max_pixels_exact):
                     # Upper bound: the footprint is so large that we'd likely stop anyway.
-                    n_all, b_all = _total_for_exposure(conn=conn, obscode=obscode, exposure_mjd_mid=mjd_mid)
+                    n_all, b_all = _total_for_exposure(
+                        conn=conn, obscode=obscode, exposure_mjd_mid=mjd_mid
+                    )
                     key_info[k]["upper_bound_all_frames"] = True
                     key_info[k]["upper_n_frames"] = int(n_all)
                     key_info[k]["upper_sum_bytes"] = int(b_all)
@@ -715,10 +772,19 @@ def run_stage5_index_only_density(
                     continue
 
                 if weights is None:
-                    pred_rows.extend((oid, tidx, obscode, mjd_mid, int(h), 1.0) for h in pix.tolist())
+                    pred_rows.extend(
+                        (oid, tidx, obscode, mjd_mid, int(h), 1.0) for h in pix.tolist()
+                    )
                 else:
                     pred_rows.extend(
-                        (oid, tidx, obscode, mjd_mid, int(h), float(weights.get(int(h), 0.0)))
+                        (
+                            oid,
+                            tidx,
+                            obscode,
+                            mjd_mid,
+                            int(h),
+                            float(weights.get(int(h), 0.0)),
+                        )
                         for h in pix.tolist()
                     )
 
@@ -766,7 +832,9 @@ def run_stage5_index_only_density(
                 abs_dt = float(info["abs_dt_days"])
                 n_pix = int(info["n_pred_pixels"])
                 sig_arcsec = float(info["sigma_major_arcsec"])
+                sig_pred_arcsec = float(info["sigma_major_pred_arcsec"])
                 area_deg2 = float(info["ellipse_area_deg2"])
+                area_pred_deg2 = float(info["ellipse_area_pred_deg2"])
 
                 # Frames/bytes.
                 if bool(info["upper_bound_all_frames"]):
@@ -775,7 +843,9 @@ def run_stage5_index_only_density(
                     sum_w_bytes = float(info["upper_sum_weighted_bytes"])
                     upper = True
                 else:
-                    n_frames, sum_bytes, sum_w_bytes = exact_map.get((oid, tidx), (0, 0, 0.0))
+                    n_frames, sum_bytes, sum_w_bytes = exact_map.get(
+                        (oid, tidx), (0, 0, 0.0)
+                    )
                     upper = False
 
                 # Binning by |dt|.
@@ -801,10 +871,24 @@ def run_stage5_index_only_density(
                         a.n_upper_bound_all_frames += 1
                     if np.isfinite(sig_arcsec):
                         a.sum_sigma_major_arcsec += float(sig_arcsec)
-                        a.max_sigma_major_arcsec = max(float(a.max_sigma_major_arcsec), float(sig_arcsec))
+                        a.max_sigma_major_arcsec = max(
+                            float(a.max_sigma_major_arcsec), float(sig_arcsec)
+                        )
                     if np.isfinite(area_deg2):
                         a.sum_ellipse_area_deg2 += float(area_deg2)
-                        a.max_ellipse_area_deg2 = max(float(a.max_ellipse_area_deg2), float(area_deg2))
+                        a.max_ellipse_area_deg2 = max(
+                            float(a.max_ellipse_area_deg2), float(area_deg2)
+                        )
+                    if np.isfinite(sig_pred_arcsec):
+                        a.sum_sigma_major_pred_arcsec += float(sig_pred_arcsec)
+                        a.max_sigma_major_pred_arcsec = max(
+                            float(a.max_sigma_major_pred_arcsec), float(sig_pred_arcsec)
+                        )
+                    if np.isfinite(area_pred_deg2):
+                        a.sum_ellipse_area_pred_deg2 += float(area_pred_deg2)
+                        a.max_ellipse_area_pred_deg2 = max(
+                            float(a.max_ellipse_area_pred_deg2), float(area_pred_deg2)
+                        )
                     a.update_dt(abs_dt)
 
                 _update("abs")
@@ -814,7 +898,11 @@ def run_stage5_index_only_density(
             dt_part = float(time.perf_counter() - float(t_part0))
             part_times.append(dt_part)
             avg = float(np.mean(part_times)) if part_times else float("nan")
-            rem = float(avg) * float(max(0, len(part_files) - (p_i + 1))) if np.isfinite(avg) else float("nan")
+            rem = (
+                float(avg) * float(max(0, len(part_files) - (p_i + 1)))
+                if np.isfinite(avg)
+                else float("nan")
+            )
             elapsed = float(time.perf_counter() - float(t_run0))
             _log(
                 f"part {p_i+1}/{len(part_files)} DONE {pf.name}"
@@ -837,19 +925,39 @@ def run_stage5_index_only_density(
         bytes_per_exp = (float(sum_bytes) / float(n_t)) if n_t > 0 else float("nan")
         w_bytes_per_exp = (float(sum_w_bytes) / float(n_t)) if n_t > 0 else float("nan")
         frames_per_exp = (float(sum_frames) / float(n_t)) if n_t > 0 else float("nan")
-        bytes_per_hit_exp = (float(sum_bytes) / float(n_hit)) if n_hit > 0 else float("nan")
-        w_bytes_per_hit_exp = (float(sum_w_bytes) / float(n_hit)) if n_hit > 0 else float("nan")
-        frames_per_hit_exp = (float(sum_frames) / float(n_hit)) if n_hit > 0 else float("nan")
+        bytes_per_hit_exp = (
+            (float(sum_bytes) / float(n_hit)) if n_hit > 0 else float("nan")
+        )
+        w_bytes_per_hit_exp = (
+            (float(sum_w_bytes) / float(n_hit)) if n_hit > 0 else float("nan")
+        )
+        frames_per_hit_exp = (
+            (float(sum_frames) / float(n_hit)) if n_hit > 0 else float("nan")
+        )
 
         sig_mean = (float(a.sum_sigma_major_arcsec) / float(n_t)) if (n_t > 0) else None
         area_mean = (float(a.sum_ellipse_area_deg2) / float(n_t)) if (n_t > 0) else None
+        sig_pred_mean = (
+            (float(a.sum_sigma_major_pred_arcsec) / float(n_t)) if (n_t > 0) else None
+        )
+        area_pred_mean = (
+            (float(a.sum_ellipse_area_pred_deg2) / float(n_t)) if (n_t > 0) else None
+        )
 
         exp_obs_per_exp: float | None = None
-        if bytes_per_obs is not None and np.isfinite(w_bytes_per_exp) and float(bytes_per_obs) > 0.0:
+        if (
+            bytes_per_obs is not None
+            and np.isfinite(w_bytes_per_exp)
+            and float(bytes_per_obs) > 0.0
+        ):
             exp_obs_per_exp = float(w_bytes_per_exp) / float(bytes_per_obs)
 
         exp_obs_per_hit_exp: float | None = None
-        if bytes_per_obs is not None and np.isfinite(w_bytes_per_hit_exp) and float(bytes_per_obs) > 0.0:
+        if (
+            bytes_per_obs is not None
+            and np.isfinite(w_bytes_per_hit_exp)
+            and float(bytes_per_obs) > 0.0
+        ):
             exp_obs_per_hit_exp = float(w_bytes_per_hit_exp) / float(bytes_per_obs)
 
         out_rows.append(
@@ -864,8 +972,12 @@ def run_stage5_index_only_density(
                 direction=str(direction),
                 orbit_id=str(oid),
                 batch_id=int(bid),
-                abs_dt_min_days=(None if a.abs_dt_min_days is None else float(a.abs_dt_min_days)),
-                abs_dt_max_days=(None if a.abs_dt_max_days is None else float(a.abs_dt_max_days)),
+                abs_dt_min_days=(
+                    None if a.abs_dt_min_days is None else float(a.abs_dt_min_days)
+                ),
+                abs_dt_max_days=(
+                    None if a.abs_dt_max_days is None else float(a.abs_dt_max_days)
+                ),
                 n_targets=int(n_t),
                 n_targets_hit=int(n_hit),
                 hit_rate=(None if n_t <= 0 else float(n_hit) / float(n_t)),
@@ -874,21 +986,58 @@ def run_stage5_index_only_density(
                 sum_frames_touched=int(sum_frames),
                 sum_data_length_bytes=int(sum_bytes),
                 bytes_per_exposure=float(bytes_per_exp),
-                bytes_per_hit_exposure=(None if not np.isfinite(bytes_per_hit_exp) else float(bytes_per_hit_exp)),
-                sum_weighted_data_length_bytes=(None if not np.isfinite(sum_w_bytes) else float(sum_w_bytes)),
-                weighted_bytes_per_exposure=(None if not np.isfinite(w_bytes_per_exp) else float(w_bytes_per_exp)),
-                expected_obs_per_exposure=(None if exp_obs_per_exp is None else float(exp_obs_per_exp)),
-                weighted_bytes_per_hit_exposure=(
-                    None if not np.isfinite(w_bytes_per_hit_exp) else float(w_bytes_per_hit_exp)
+                bytes_per_hit_exposure=(
+                    None
+                    if not np.isfinite(bytes_per_hit_exp)
+                    else float(bytes_per_hit_exp)
                 ),
-                expected_obs_per_hit_exposure=(None if exp_obs_per_hit_exp is None else float(exp_obs_per_hit_exp)),
+                sum_weighted_data_length_bytes=(
+                    None if not np.isfinite(sum_w_bytes) else float(sum_w_bytes)
+                ),
+                weighted_bytes_per_exposure=(
+                    None if not np.isfinite(w_bytes_per_exp) else float(w_bytes_per_exp)
+                ),
+                expected_obs_per_exposure=(
+                    None if exp_obs_per_exp is None else float(exp_obs_per_exp)
+                ),
+                weighted_bytes_per_hit_exposure=(
+                    None
+                    if not np.isfinite(w_bytes_per_hit_exp)
+                    else float(w_bytes_per_hit_exp)
+                ),
+                expected_obs_per_hit_exposure=(
+                    None if exp_obs_per_hit_exp is None else float(exp_obs_per_hit_exp)
+                ),
                 frames_per_exposure=float(frames_per_exp),
-                frames_per_hit_exposure=(None if not np.isfinite(frames_per_hit_exp) else float(frames_per_hit_exp)),
+                frames_per_hit_exposure=(
+                    None
+                    if not np.isfinite(frames_per_hit_exp)
+                    else float(frames_per_hit_exp)
+                ),
                 n_upper_bound_all_frames=int(a.n_upper_bound_all_frames),
                 sigma_major_arcsec_mean=(None if sig_mean is None else float(sig_mean)),
-                sigma_major_arcsec_max=(None if n_t <= 0 else float(a.max_sigma_major_arcsec)),
-                ellipse_area_deg2_mean=(None if area_mean is None else float(area_mean)),
-                ellipse_area_deg2_max=(None if n_t <= 0 else float(a.max_ellipse_area_deg2)),
+                sigma_major_arcsec_max=(
+                    None if n_t <= 0 else float(a.max_sigma_major_arcsec)
+                ),
+                ellipse_area_deg2_mean=(
+                    None if area_mean is None else float(area_mean)
+                ),
+                ellipse_area_deg2_max=(
+                    None if n_t <= 0 else float(a.max_ellipse_area_deg2)
+                ),
+
+                sigma_major_pred_arcsec_mean=(
+                    None if sig_pred_mean is None else float(sig_pred_mean)
+                ),
+                sigma_major_pred_arcsec_max=(
+                    None if n_t <= 0 else float(a.max_sigma_major_pred_arcsec)
+                ),
+                ellipse_area_pred_deg2_mean=(
+                    None if area_pred_mean is None else float(area_pred_mean)
+                ),
+                ellipse_area_pred_deg2_max=(
+                    None if n_t <= 0 else float(a.max_ellipse_area_pred_deg2)
+                ),
             )
         )
 
@@ -910,12 +1059,18 @@ def run_stage5_index_only_density(
         polygon_vertices=int(polygon_vertices),
         batch_days=float(batch_days),
         max_pixels_exact=int(max_pixels_exact),
-        max_sampled_targets=(None if max_sampled_targets is None else int(max_sampled_targets)),
+        max_sampled_targets=(
+            None if max_sampled_targets is None else int(max_sampled_targets)
+        ),
         report_signed=bool(report_signed),
         bytes_per_obs=(None if bytes_per_obs is None else float(bytes_per_obs)),
         astro_sigma_arcsec=float(obs_sigma_arcsec_used),
-        astro_sigma_arcsec_arg=(None if astro_sigma_arcsec is None else float(astro_sigma_arcsec)),
-        bytes_per_exposure_max=(None if bytes_per_exposure_max is None else float(bytes_per_exposure_max)),
+        astro_sigma_arcsec_arg=(
+            None if astro_sigma_arcsec is None else float(astro_sigma_arcsec)
+        ),
+        bytes_per_exposure_max=(
+            None if bytes_per_exposure_max is None else float(bytes_per_exposure_max)
+        ),
         consecutive_batches=int(consecutive_batches),
         fractional_nside=(None if fractional_nside is None else int(fractional_nside)),
         generated_at_utc=_now_utc(),
@@ -923,7 +1078,9 @@ def run_stage5_index_only_density(
     _write_json(run_dir / "meta.json", meta_out)
 
     heur: dict[str, object] = dict(
-        bytes_per_exposure_max=(None if bytes_per_exposure_max is None else float(bytes_per_exposure_max)),
+        bytes_per_exposure_max=(
+            None if bytes_per_exposure_max is None else float(bytes_per_exposure_max)
+        ),
         consecutive_batches=int(consecutive_batches),
         bytes_per_obs=(None if bytes_per_obs is None else float(bytes_per_obs)),
     )
@@ -949,7 +1106,12 @@ def main() -> None:
     p.add_argument("--subset-dir", type=str, required=True)
     p.add_argument("--stage2-run-dir", type=str, required=True)
     p.add_argument("--strategy", type=str, default="2body_with_covariance")
-    p.add_argument("--footprint", type=str, default="cov_disc", choices=["point", "cov_disc", "cov_polygon_moc", "cov_mc"])
+    p.add_argument(
+        "--footprint",
+        type=str,
+        default="cov_disc",
+        choices=["point", "cov_disc", "cov_polygon_moc", "cov_mc"],
+    )
     p.add_argument("--healpix-nside", type=int, required=True)
     p.add_argument("--n-sigma", type=float, default=3.0)
     p.add_argument("--polygon-vertices", type=int, default=32)
@@ -1012,7 +1174,9 @@ def main() -> None:
         polygon_vertices=int(args.polygon_vertices),
         batch_days=float(args.batch_days),
         out_dir=None if args.out_dir is None else Path(args.out_dir),
-        orbits_parquet=None if args.orbits_parquet is None else Path(args.orbits_parquet),
+        orbits_parquet=None
+        if args.orbits_parquet is None
+        else Path(args.orbits_parquet),
         max_orbits=args.max_orbits,
         max_targets=args.max_targets,
         max_sampled_targets=args.max_sampled_targets,
@@ -1020,10 +1184,16 @@ def main() -> None:
         max_pixels_exact=int(args.max_pixels_exact),
         report_signed=bool(args.report_signed),
         bytes_per_obs=None if args.bytes_per_obs is None else float(args.bytes_per_obs),
-        astro_sigma_arcsec=None if args.astro_sigma_arcsec is None else float(args.astro_sigma_arcsec),
-        bytes_per_exposure_max=None if args.bytes_per_exposure_max is None else float(args.bytes_per_exposure_max),
+        astro_sigma_arcsec=None
+        if args.astro_sigma_arcsec is None
+        else float(args.astro_sigma_arcsec),
+        bytes_per_exposure_max=None
+        if args.bytes_per_exposure_max is None
+        else float(args.bytes_per_exposure_max),
         consecutive_batches=int(args.consecutive_batches),
-        fractional_nside=None if args.fractional_nside is None else int(args.fractional_nside),
+        fractional_nside=None
+        if args.fractional_nside is None
+        else int(args.fractional_nside),
         orbit_ids=(
             None
             if args.orbit_ids is None
@@ -1038,4 +1208,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
