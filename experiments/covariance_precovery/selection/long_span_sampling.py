@@ -78,7 +78,7 @@ def _fetch_partitioned_features(
     *,
     cfg: BqConfig,
     start_utc: datetime,
-    end_utc_exclusive: datetime,
+    end_utc: datetime,
     obscodes: list[str],
     max_rows_per_partition: int,
     max_partitions: int,
@@ -93,7 +93,7 @@ def _fetch_partitioned_features(
             count_designation_orbit_features_for_window(
                 cfg=cfg,
                 start_utc=start_utc,
-                end_utc=end_utc_exclusive,
+                end_utc=end_utc,
                 obscodes=obscodes,
                 partition_mod=partitions,
                 partition_idx=i,
@@ -117,7 +117,7 @@ def _fetch_partitioned_features(
             fetch_designation_orbit_features_for_window(
                 cfg=cfg,
                 start_utc=start_utc,
-                end_utc=end_utc_exclusive,
+                end_utc=end_utc,
                 obscodes=obscodes,
                 max_rows=int(max_rows_per_partition),
                 partition_mod=partitions,

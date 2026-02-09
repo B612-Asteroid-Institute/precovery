@@ -6,14 +6,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import quivr as qv
+import pyarrow as pa
+import pyarrow.dataset as ds
+import pyarrow.parquet as pq
 
 # NOTE: Use absolute imports so this file can be run as a script path.
+from experiments.covariance_precovery.data.gcs_copy import default_copy_tool
 from experiments.covariance_precovery.data.subset_db import (
     GCS_ROOT,
     download_full_index_only,
     write_index_only_manifest,
 )
-from experiments.covariance_precovery.selection.bq_select import BqConfig
+from experiments.covariance_precovery.selection.bq_select import (
+    BqConfig,
+    bq_table_ref,
+    export_bq_table_to_gcs_parquet,
+    materialize_designation_orbit_features_for_window_to_table,
+)
 from experiments.covariance_precovery.selection.covariance_severity import (
     compute_covariance_severity,
 )
@@ -28,12 +37,16 @@ from experiments.covariance_precovery.selection.long_span_sampling import (
 from experiments.covariance_precovery.selection.subset_designations import (
     read_subset_window,
 )
-from experiments.covariance_precovery.selection.subset_sampling import SamplingConfig
+from experiments.covariance_precovery.selection.subset_sampling import (
+    SamplingConfig,
+    select_designations_from_features,
+)
 from experiments.covariance_precovery.truth.precovery_truth_crossmatch import (
     crossmatch_truth_to_precovery_subset,
 )
 from experiments.covariance_precovery.truth.subset_truth_observations import (
-    fetch_and_persist_truth_observations_for_subset_selection,
+    TruthObservationByDesignation,
+    fetch_truth_observations_for_designations,
 )
 
 
@@ -46,6 +59,9 @@ class PopulateConfig:
     block_days: int = 90
     n_total_designations: int = 600
     seed: int = 0
+    bq_project_id: str = "moeyens-thor-dev"
+    bq_dataset_id: str = "ai_aleck_scratch"
+    gcs_export_prefix: str = "gs://ak-scratch/precovery/covariance_precovery/bq_exports"
 
 
 def _now_utc() -> str:
@@ -64,6 +80,7 @@ def populate_long_span_dataset(
     *,
     cfg: PopulateConfig,
     ensure_index_only: bool,
+    materialize_full_span_features: bool,
     select_designations: bool,
     fetch_orbits: bool,
     compute_cov_severity: bool,
@@ -101,6 +118,70 @@ def populate_long_span_dataset(
         )
 
     out: dict[str, Path] = {}
+
+    # Optional: materialize a single full-span features table in BQ and export to local Parquet.
+    full_span_features_parquet: Path | None = None
+    if bool(materialize_full_span_features):
+        stn_label = "_".join(sorted(str(s) for s in stns))
+        stn_label = "".join(c if (c.isalnum() or c == "_") else "_" for c in stn_label)
+        start_tag = win.start_utc.date().isoformat().replace("-", "")
+        end_tag = win.end_utc_exclusive.date().isoformat().replace("-", "")
+        table_id = f"precovery_designation_orbit_features__{stn_label}__{start_tag}_{end_tag}"
+
+        dest_table = bq_table_ref(
+            project_id=str(cfg.bq_project_id),
+            dataset_id=str(cfg.bq_dataset_id),
+            table_id=str(table_id),
+        )
+        materialize_designation_orbit_features_for_window_to_table(
+            cfg=BqConfig(),
+            start_utc=win.start_utc,
+            end_utc=win.end_utc_exclusive,
+            obscodes=stns,
+            destination_table=str(dest_table),
+            replace=True,
+        )
+
+        gcs_dir = f"{str(cfg.gcs_export_prefix).rstrip('/')}/{table_id}"
+        export_uri = f"{gcs_dir}/part-*.parquet"
+        export_bq_table_to_gcs_parquet(source_table=str(dest_table), destination_uri=str(export_uri))
+
+        local_shards_dir = artifacts / "bq_full_span_features_shards"
+        local_shards_dir.mkdir(parents=True, exist_ok=True)
+        copy_tool = default_copy_tool()
+        copy_tool.cp(str(gcs_dir), local_shards_dir, recursive=True)
+
+        parquet_files = sorted(p for p in local_shards_dir.rglob("*.parquet") if p.is_file())
+        if not parquet_files:
+            raise RuntimeError(f"No Parquet files downloaded under {local_shards_dir}")
+
+        merged = artifacts / "bq_designation_orbit_features_full_span.parquet"
+        dataset = ds.dataset([str(p) for p in parquet_files], format="parquet")
+        schema = dataset.schema
+        writer = pq.ParquetWriter(str(merged), schema=schema, compression="snappy")
+        try:
+            for batch in dataset.to_batches(batch_size=65536):
+                writer.write_table(pa.Table.from_batches([batch], schema=schema))
+        finally:
+            writer.close()
+
+        meta = {
+            "subset_dir": str(db_dir),
+            "obscodes": stns,
+            "bq_project_id": str(cfg.bq_project_id),
+            "bq_dataset_id": str(cfg.bq_dataset_id),
+            "bq_destination_table": str(dest_table),
+            "gcs_export_dir": str(gcs_dir),
+            "local_shards_dir": str(local_shards_dir),
+            "merged_parquet": str(merged),
+            "generated_at_utc": _now_utc(),
+        }
+        meta_path = artifacts / "bq_designation_orbit_features_full_span_meta.json"
+        meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+
+        full_span_features_parquet = merged
+        out["bq_full_span_features_parquet"] = merged
+        out["bq_full_span_features_meta_json"] = meta_path
     # Persist the block plan.
     blocks_meta = {
         "subset_dir": str(db_dir),
@@ -122,13 +203,28 @@ def populate_long_span_dataset(
 
     selected_path = artifacts / "selected_designations_long_span.parquet"
     if bool(select_designations):
-        selected_path = select_designations_across_blocks(
-            subset_dir=db_dir,
-            blocks=blocks,
-            sampling_cfg=SamplingConfig(n_total=int(cfg.n_total_designations), seed=int(cfg.seed)),
-            cfg=BqConfig(),
-            obscodes=stns,
-        )
+        if full_span_features_parquet is not None:
+            from experiments.covariance_precovery.selection.bq_select import (
+                DesignationOrbitWindowFeatures,
+            )
+
+            feats = DesignationOrbitWindowFeatures.from_parquet(str(full_span_features_parquet))
+            window_mid_mjd = 0.5 * (float(win.min_mjd) + float(win.max_mjd))
+            selected = select_designations_from_features(
+                features=feats,
+                window_mid_mjd=float(window_mid_mjd),
+                cfg=SamplingConfig(n_total=int(cfg.n_total_designations), seed=int(cfg.seed)),
+            )
+            selected_path = artifacts / "selected_designations_full_span.parquet"
+            selected.to_parquet(str(selected_path))
+        else:
+            selected_path = select_designations_across_blocks(
+                subset_dir=db_dir,
+                blocks=blocks,
+                sampling_cfg=SamplingConfig(n_total=int(cfg.n_total_designations), seed=int(cfg.seed)),
+                cfg=BqConfig(),
+                obscodes=stns,
+            )
     out["selected_designations_parquet"] = selected_path
 
     orbits_path = artifacts / "orbits_selected_sbdb.parquet"
@@ -153,13 +249,66 @@ def populate_long_span_dataset(
         out["cov_severity_parquet"] = sev_path
 
     if bool(fetch_truth):
-        truth = fetch_and_persist_truth_observations_for_subset_selection(
-            subset_dir=db_dir,
-            cfg=BqConfig(),
-            selected_designations_parquet=selected_path,
-        )
-        out["truth_observations_parquet"] = truth.truth_parquet
-        out["truth_observations_meta_json"] = truth.meta_json
+        # Fetch truth observations for the selected designations.
+        from experiments.covariance_precovery.selection.subset_sampling import SelectedDesignations
+
+        sel = SelectedDesignations.from_parquet(str(selected_path))
+        designations = [str(x) for x in sel.designation.to_pylist()]
+        if not designations:
+            raise ValueError("No selected designations; cannot fetch truth.")
+
+        if full_span_features_parquet is not None:
+            truth_all = fetch_truth_observations_for_designations(
+                cfg=BqConfig(),
+                designations=designations,
+                obscodes=stns,
+                start_utc=win.start_utc,
+                end_utc=win.end_utc_exclusive,
+            )
+            truth_windows_meta: dict[str, object] = {
+                "mode": "full_span",
+                "start_utc": win.start_utc.isoformat().replace("+00:00", "Z"),
+                "end_utc_exclusive": win.end_utc_exclusive.isoformat().replace("+00:00", "Z"),
+            }
+        else:
+            truth_all = TruthObservationByDesignation.empty()
+            for b in blocks:
+                t = fetch_truth_observations_for_designations(
+                    cfg=BqConfig(),
+                    designations=designations,
+                    obscodes=stns,
+                    start_utc=b.start_utc,
+                    end_utc=b.end_utc_exclusive,
+                )
+                truth_all = qv.concatenate([truth_all, t])
+            truth_windows_meta = {
+                "mode": "blocks",
+                "blocks": [
+                    {
+                        "label": b.label,
+                        "start_utc": b.start_utc.isoformat().replace("+00:00", "Z"),
+                        "end_utc_exclusive": b.end_utc_exclusive.isoformat().replace("+00:00", "Z"),
+                    }
+                    for b in blocks
+                ],
+            }
+
+        truth_parquet = artifacts / "truth_observations_selected.parquet"
+        truth_all.to_parquet(str(truth_parquet))
+        truth_meta = {
+            "subset_dir": str(db_dir),
+            "selected_designations_parquet": str(selected_path),
+            "n_selected_designations": int(len(designations)),
+            "n_truth_observations": int(len(truth_all)),
+            "obscodes": stns,
+            "truth_windows": truth_windows_meta,
+            "generated_at_utc": _now_utc(),
+        }
+        truth_meta_path = artifacts / "truth_observations_selected_meta.json"
+        truth_meta_path.write_text(json.dumps(truth_meta, indent=2, sort_keys=True) + "\n")
+
+        out["truth_observations_parquet"] = truth_parquet
+        out["truth_observations_meta_json"] = truth_meta_path
 
     if bool(crossmatch_truth):
         truth_parquet = out.get("truth_observations_parquet")
@@ -183,8 +332,12 @@ def populate_long_span_dataset(
         "block_days": int(cfg.block_days),
         "n_total_designations": int(cfg.n_total_designations),
         "seed": int(cfg.seed),
+        "bq_project_id": str(cfg.bq_project_id),
+        "bq_dataset_id": str(cfg.bq_dataset_id),
+        "gcs_export_prefix": str(cfg.gcs_export_prefix),
         "steps": {
             "ensure_index_only": bool(ensure_index_only),
+            "materialize_full_span_features": bool(materialize_full_span_features),
             "select_designations": bool(select_designations),
             "fetch_orbits": bool(fetch_orbits),
             "compute_cov_severity": bool(compute_cov_severity),
@@ -229,6 +382,23 @@ def main() -> None:
     p.add_argument("--n-total-designations", type=int, default=600)
     p.add_argument("--seed", type=int, default=0)
 
+    p.add_argument(
+        "--materialize-full-span-features",
+        action="store_true",
+        help=(
+            "If set, run a single full-span BQ group-by query, write results to a BQ table, "
+            "export to Parquet in GCS, download locally, and merge into one Parquet file."
+        ),
+    )
+    p.add_argument("--bq-project-id", type=str, default="moeyens-thor-dev")
+    p.add_argument("--bq-dataset-id", type=str, default="ai_aleck_scratch")
+    p.add_argument(
+        "--gcs-export-prefix",
+        type=str,
+        default="gs://ak-scratch/precovery/covariance_precovery/bq_exports",
+        help="GCS prefix for exported Parquet shards.",
+    )
+
     p.add_argument("--select-designations", action="store_true")
     p.add_argument("--fetch-orbits", action="store_true")
     p.add_argument("--compute-cov-severity", action="store_true")
@@ -249,11 +419,15 @@ def main() -> None:
         block_days=int(args.block_days),
         n_total_designations=int(args.n_total_designations),
         seed=int(args.seed),
+        bq_project_id=str(args.bq_project_id),
+        bq_dataset_id=str(args.bq_dataset_id),
+        gcs_export_prefix=str(args.gcs_export_prefix),
     )
 
     out = populate_long_span_dataset(
         cfg=cfg,
         ensure_index_only=bool(args.ensure_index_only),
+        materialize_full_span_features=bool(args.materialize_full_span_features),
         select_designations=bool(args.select_designations),
         fetch_orbits=bool(args.fetch_orbits),
         compute_cov_severity=bool(args.compute_cov_severity),
