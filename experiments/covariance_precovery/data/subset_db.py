@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+from datetime import datetime, timezone
 from math import floor
 from dataclasses import dataclass
 from pathlib import Path
@@ -108,6 +109,25 @@ def download_partition_data(
             dst_prefix = dest_db_dir / "data" / ds / ym
             dst_prefix.mkdir(parents=True, exist_ok=True)
             copy_tool.cp(src_glob, dst_prefix)
+
+
+def download_full_index_only(
+    *,
+    dest_db_dir: Path,
+    copy_tool: CopyTool | None = None,
+    gcs_root: str = GCS_ROOT,
+) -> None:
+    """
+    Download only the *full* production index + config (no data blobs).
+
+    This produces a local DB directory compatible with `PrecoveryDatabase.from_dir(...)`
+    when paired with an experiments-only lazy blob downloader.
+    """
+    dest_db_dir.mkdir(parents=True, exist_ok=True)
+    copy_tool = copy_tool or default_copy_tool()
+    root = str(gcs_root).rstrip("/")
+    copy_tool.cp(f"{root}/config.json", dest_db_dir / "config.json")
+    copy_tool.cp(f"{root}/index.db", dest_db_dir / "index.db")
 
 
 def build_trimmed_index_db(
@@ -251,6 +271,17 @@ def write_manifest(dest_db_dir: Path, spec: SubsetSpec) -> Path:
     return path
 
 
+def write_index_only_manifest(*, dest_db_dir: Path, gcs_root: str = GCS_ROOT) -> Path:
+    manifest = {
+        "mode": "full_index_only",
+        "gcs_root": str(gcs_root),
+        "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    path = Path(dest_db_dir) / "subset_manifest.json"
+    path.write_text(json.dumps(manifest, indent=2) + "\n")
+    return path
+
+
 def _parse_csv_list(arg: str) -> tuple[str, ...]:
     a = str(arg).strip()
     if a.lower() in {"all", "*"}:
@@ -269,18 +300,32 @@ def main(argv: Iterable[str] | None = None) -> None:
         help="Destination directory for the local subset DB (will be created).",
     )
     parser.add_argument(
+        "--index-only",
+        action="store_true",
+        help=(
+            "Download only config.json + the full index.db (no data blobs, no trimming). "
+            "Use this with experiments-only lazy blob downloading."
+        ),
+    )
+    parser.add_argument(
+        "--gcs-root",
+        type=str,
+        default=GCS_ROOT,
+        help="GCS root for the production precovery DB (default: complete_precovery_db).",
+    )
+    parser.add_argument(
         "--datasets",
-        required=True,
+        required=False,
         help="Comma-separated dataset IDs (e.g., atlas,ztf,nsc,skymapper).",
     )
     parser.add_argument(
         "--months",
-        required=True,
+        required=False,
         help="Comma-separated YYYY-MM values to include (e.g., 2019-08,2019-09).",
     )
     parser.add_argument(
         "--obscodes",
-        required=True,
+        required=False,
         help="Comma-separated observatory codes to include (e.g., I41,T05,T08,W84,Q05).",
     )
     parser.add_argument(
@@ -299,6 +344,15 @@ def main(argv: Iterable[str] | None = None) -> None:
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     dest = Path(args.dest).expanduser().resolve()
+
+    if bool(args.index_only):
+        download_full_index_only(dest_db_dir=dest, gcs_root=str(args.gcs_root))
+        write_index_only_manifest(dest_db_dir=dest, gcs_root=str(args.gcs_root))
+        return
+
+    if args.datasets is None or args.months is None or args.obscodes is None:
+        raise ValueError("--datasets, --months, and --obscodes are required unless --index-only is set.")
+
     spec = SubsetSpec(
         dataset_ids=_parse_csv_list(args.datasets),
         year_months=_parse_csv_list(args.months),

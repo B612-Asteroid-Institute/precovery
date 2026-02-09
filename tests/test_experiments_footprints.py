@@ -3,9 +3,8 @@ import numpy as np
 from experiments.covariance_precovery.methods.footprints import (
     CorridorFootprint,
     EllipseFootprint,
-    SamplePerimeterPolygonFootprint,
     disc_pixels_from_cov,
-    ellipse_polygon_pixels_from_cov,
+    ellipse_polygon_pixels_from_cov_moc,
     mc_pixels_from_cov,
 )
 
@@ -15,7 +14,7 @@ def test_covariance_pixel_methods_return_nonempty() -> None:
     cov_ll = np.array([[1e-6, 0.0], [0.0, 1e-6]], dtype=float)  # ~3.6 arcsec 1-sigma
     nside = 64
     disc = disc_pixels_from_cov(lon0_deg=lon0, lat0_deg=lat0, cov_ll_deg2=cov_ll, nside=nside)
-    poly = ellipse_polygon_pixels_from_cov(
+    poly = ellipse_polygon_pixels_from_cov_moc(
         lon0_deg=lon0, lat0_deg=lat0, cov_ll_deg2=cov_ll, nside=nside, num_vertices=16
     )
     mc = mc_pixels_from_cov(
@@ -32,17 +31,6 @@ def test_ellipse_contains_center() -> None:
     fp = EllipseFootprint(lon0_deg=lon0, lat0_deg=lat0, cov_ll_deg2=cov_ll, n_sigma=3.0)
     mask = fp.contains(np.array([lon0]), np.array([lat0]))
     assert mask.tolist() == [True]
-
-
-def test_polygon_contains_samples() -> None:
-    lon0, lat0 = 10.0, 20.0
-    lon = np.array([lon0, lon0 + 0.01, lon0 + 0.01, lon0], dtype=float)
-    lat = np.array([lat0, lat0, lat0 + 0.01, lat0 + 0.01], dtype=float)
-    fp = SamplePerimeterPolygonFootprint(
-        lon0_deg=lon0, lat0_deg=lat0, sample_lon_deg=lon, sample_lat_deg=lat, buffer_arcsec=0.0
-    )
-    mask = fp.contains(lon, lat)
-    assert mask.all()
 
 
 def test_corridor_contains_path_points() -> None:

@@ -117,10 +117,24 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Fetch adam_core Orbits for selected designations via SBDB.")
     p.add_argument("--subset-dir", type=str, required=True)
     p.add_argument("--batch-size", type=int, default=25)
+    p.add_argument(
+        "--selected-designations-parquet",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to selected designations parquet. "
+            "Defaults to <subset_dir>/artifacts/selected_designations.parquet."
+        ),
+    )
     args = p.parse_args()
 
     out = fetch_selected_orbits_via_sbdb(
         subset_dir=Path(args.subset_dir),
+        selected_designations_parquet=(
+            None
+            if args.selected_designations_parquet is None
+            else Path(args.selected_designations_parquet).expanduser().resolve()
+        ),
         batch_size=int(args.batch_size),
     )
     print(f"orbits_parquet={out.orbits_parquet}")

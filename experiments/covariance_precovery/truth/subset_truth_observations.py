@@ -185,11 +185,25 @@ def main() -> None:
 
     p = argparse.ArgumentParser(description="Persist truth observations for selected designations in a subset window.")
     p.add_argument("--subset-dir", type=str, required=True)
+    p.add_argument(
+        "--selected-designations-parquet",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to selected designations parquet. "
+            "Defaults to <subset_dir>/artifacts/selected_designations.parquet."
+        ),
+    )
     args = p.parse_args()
 
     out = fetch_and_persist_truth_observations_for_subset_selection(
         subset_dir=Path(args.subset_dir),
         cfg=BqConfig(),
+        selected_designations_parquet=(
+            None
+            if args.selected_designations_parquet is None
+            else Path(args.selected_designations_parquet).expanduser().resolve()
+        ),
     )
     print(f"truth_parquet={out.truth_parquet}")
     print(f"meta_json={out.meta_json}")

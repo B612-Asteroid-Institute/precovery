@@ -4,6 +4,7 @@ import json
 import sqlite3
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,8 @@ from adam_core.time import Timestamp
 from precovery.frame_db import HealpixFrame
 from precovery.observation import ObservationsTable
 from precovery.precovery_db import PrecoveryDatabase
+from ..data.lazy_blobs import LazyBlobConfig, ensure_blob_local
+from ..data.subset_db import GCS_ROOT
 from ..methods.footprints import (
     EllipseFootprint,
     FixedPolygonFootprint,
@@ -483,12 +486,16 @@ def _load_observations_for_frames(
     *,
     obs_cache: OrderedDict[_ObsCacheKey, ObservationsTable] | None = None,
     obs_cache_max_frames: int = 0,
+    ensure_data_uri_local: Callable[[str], None] | None = None,
 ) -> ObservationsTable:
     if not frames:
         return ObservationsTable.empty()
 
     out_list: list[ObservationsTable] = []
     for fr in frames:
+        if ensure_data_uri_local is not None:
+            ensure_data_uri_local(str(fr["data_uri"]))
+
         key = (str(fr["data_uri"]), int(fr["data_offset"]), int(fr["data_length"]))
         if obs_cache is not None and key in obs_cache:
             obs = obs_cache[key]
@@ -1038,6 +1045,8 @@ def run_stage4_detection_filter_bench(
     max_targets: int | None = None,
     obs_cache_max_frames: int = 0,
     write_per_target_metrics: bool = False,
+    lazy_download_blobs: bool = False,
+    gcs_root: str = GCS_ROOT,
 ) -> Path:
     """
     Stage 4 (atomic): benchmark detection-level filtering variants after loading observations.
@@ -1122,6 +1131,20 @@ def run_stage4_detection_filter_bench(
             pass
 
     db = PrecoveryDatabase.from_dir(str(subset_dir), allow_version_mismatch=True)
+
+    ensure_data_uri_local: Callable[[str], None] | None = None
+    if bool(lazy_download_blobs):
+        cfg = LazyBlobConfig(gcs_root=str(gcs_root))
+        ensured: set[str] = set()
+
+        def _ensure(uri: str) -> None:
+            u = str(uri)
+            if u in ensured:
+                return
+            ensure_blob_local(db_dir=Path(subset_dir), data_uri=u, cfg=cfg)
+            ensured.add(u)
+
+        ensure_data_uri_local = _ensure
 
     # Targets arrays for quick lookup by target_idx.
     targ_obscode = np.asarray(targets_tbl["obscode"].to_pylist(), dtype=object)
@@ -1365,7 +1388,11 @@ def run_stage4_detection_filter_bench(
                             healpixels=pred_pix,
                         )
                         obs = _load_observations_for_frames(
-                            db, frames, obs_cache=obs_cache, obs_cache_max_frames=int(obs_cache_max_frames)
+                            db,
+                            frames,
+                            obs_cache=obs_cache,
+                            obs_cache_max_frames=int(obs_cache_max_frames),
+                            ensure_data_uri_local=ensure_data_uri_local,
                         )
                         io_sec = time.perf_counter() - t_io0
                         det_sigma_floor_arcsec = _det_sigma_floor_arcsec_for_frames(frames=frames)
@@ -1738,7 +1765,11 @@ def run_stage4_detection_filter_bench(
                                 healpixels=pred_pix,
                             )
                             obs = _load_observations_for_frames(
-                                db, frames, obs_cache=obs_cache, obs_cache_max_frames=int(obs_cache_max_frames)
+                                db,
+                                frames,
+                                obs_cache=obs_cache,
+                                obs_cache_max_frames=int(obs_cache_max_frames),
+                                ensure_data_uri_local=ensure_data_uri_local,
                             )
                             io_sec = time.perf_counter() - t_io0
                             det_sigma_floor_arcsec = _det_sigma_floor_arcsec_for_frames(frames=frames)
@@ -1910,7 +1941,11 @@ def run_stage4_detection_filter_bench(
                             healpixels=pred_pix,
                         )
                         obs = _load_observations_for_frames(
-                            db, frames, obs_cache=obs_cache, obs_cache_max_frames=int(obs_cache_max_frames)
+                            db,
+                            frames,
+                            obs_cache=obs_cache,
+                            obs_cache_max_frames=int(obs_cache_max_frames),
+                            ensure_data_uri_local=ensure_data_uri_local,
                         )
                         io_sec = time.perf_counter() - t_io0
                         det_sigma_floor_arcsec = _det_sigma_floor_arcsec_for_frames(frames=frames)
@@ -2275,6 +2310,20 @@ def main() -> None:
             "per-target distributions (percentiles) for loaded frames/detections/accepted detections."
         ),
     )
+    p.add_argument(
+        "--lazy-download-blobs",
+        action="store_true",
+        help=(
+            "If set, download missing `frames_*.data` blobs from GCS on demand (experiments-only). "
+            "This enables using a local DB dir that contains only config.json + index.db initially."
+        ),
+    )
+    p.add_argument(
+        "--gcs-root",
+        type=str,
+        default=GCS_ROOT,
+        help="GCS root for the production precovery DB (default: complete_precovery_db).",
+    )
     args = p.parse_args()
 
     run_dir = run_stage4_detection_filter_bench(
@@ -2300,6 +2349,8 @@ def main() -> None:
         max_targets=args.max_targets,
         obs_cache_max_frames=int(args.obs_cache_max_frames),
         write_per_target_metrics=bool(args.write_per_target_metrics),
+        lazy_download_blobs=bool(args.lazy_download_blobs),
+        gcs_root=str(args.gcs_root),
     )
     print(f"run_dir={run_dir}")
     print(f"metrics_parquet={run_dir / 'metrics.parquet'}")

@@ -15,6 +15,8 @@ from precovery.healpix_geom import radec_to_healpixel
 from precovery.precovery_db import PrecoveryDatabase
 from precovery.spherical_geom import haversine_distance_deg
 
+from ..data.lazy_blobs import LazyBlobConfig, ensure_blob_local
+from ..data.subset_db import GCS_ROOT
 from ..selection.subset_designations import read_subset_window
 from .subset_truth_observations import TruthObservationByDesignation
 
@@ -99,6 +101,8 @@ def crossmatch_truth_to_precovery_subset(
     truth_parquet: Path | None = None,
     time_tol_sec: float = 60.0,
     dist_tol_arcsec: float = 5.0,
+    lazy_download_blobs: bool = False,
+    gcs_root: str = GCS_ROOT,
 ) -> CrossmatchResult:
     win = read_subset_window(subset_dir)
     win.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -114,6 +118,7 @@ def crossmatch_truth_to_precovery_subset(
 
     # Cache observations by (data_uri, offset, length).
     obs_cache: dict[tuple[str, int, int], tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]] = {}
+    ensured: set[str] = set()
 
     out_rows: list[dict[str, object]] = []
     for i in range(len(truth)):
@@ -142,6 +147,16 @@ def crossmatch_truth_to_precovery_subset(
             if key in obs_cache:
                 mjds, ras, decs, ids = obs_cache[key]
             else:
+                if bool(lazy_download_blobs):
+                    uri = str(fr["data_uri"])
+                    if uri not in ensured:
+                        ensure_blob_local(
+                            db_dir=Path(subset_dir),
+                            data_uri=uri,
+                            cfg=LazyBlobConfig(gcs_root=str(gcs_root)),
+                        )
+                        ensured.add(uri)
+
                 hf = HealpixFrame.from_kwargs(
                     dataset_id=[str(fr["dataset_id"])],
                     obscode=[str(fr["obscode"])],
@@ -241,12 +256,28 @@ def main() -> None:
     p.add_argument("--subset-dir", type=str, required=True)
     p.add_argument("--time-tol-sec", type=float, default=60.0)
     p.add_argument("--dist-tol-arcsec", type=float, default=5.0)
+    p.add_argument(
+        "--lazy-download-blobs",
+        action="store_true",
+        help=(
+            "If set, download missing `frames_*.data` blobs from GCS on demand (experiments-only). "
+            "Requires `index.db` to contain `data_uri` paths relative to the production layout."
+        ),
+    )
+    p.add_argument(
+        "--gcs-root",
+        type=str,
+        default=GCS_ROOT,
+        help="GCS root for the production precovery DB (default: complete_precovery_db).",
+    )
     args = p.parse_args()
 
     out = crossmatch_truth_to_precovery_subset(
         subset_dir=Path(args.subset_dir),
         time_tol_sec=float(args.time_tol_sec),
         dist_tol_arcsec=float(args.dist_tol_arcsec),
+        lazy_download_blobs=bool(args.lazy_download_blobs),
+        gcs_root=str(args.gcs_root),
     )
     print(f"crossmatch_parquet={out.out_parquet}")
     print(f"meta_json={out.out_meta_json}")
