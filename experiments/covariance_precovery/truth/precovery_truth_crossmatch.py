@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,18 @@ from ..data.lazy_blobs import LazyBlobConfig, ensure_blob_local
 from ..data.subset_db import GCS_ROOT
 from ..selection.subset_designations import read_subset_window
 from .subset_truth_observations import TruthObservationByDesignation
+
+
+@dataclass(frozen=True)
+class BlobCountResult:
+    """Result of pre-counting distinct frame data URIs needed to crossmatch truth."""
+
+    n_truth_obs: int
+    n_distinct_data_uris: int
+    time_tol_sec: float
+    by_obscode_truth_rows: dict[str, int]
+    out_json: Path
+    uris_txt: Path
 
 
 class TruthPrecoveryCrossmatch(qv.Table):
@@ -95,6 +108,82 @@ def _frames_for_truth(
     return out
 
 
+def count_distinct_data_uris_for_truth(
+    *,
+    subset_dir: Path,
+    truth_parquet: Path | None = None,
+    time_tol_sec: float = 60.0,
+    progress_interval: int = 2000,
+    artifacts_dir: Path | None = None,
+) -> BlobCountResult:
+    """
+    Count distinct frame data URIs (blobs) that would be needed to crossmatch the truth set.
+    Uses only the index and truth parquet; no blobs are downloaded.
+    """
+    win = read_subset_window(subset_dir)
+    out_dir = Path(artifacts_dir).expanduser().resolve() if artifacts_dir is not None else win.artifacts_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if truth_parquet is None:
+        truth_parquet = out_dir / "truth_observations_selected.parquet"
+    truth = TruthObservationByDesignation.from_parquet(str(truth_parquet))
+
+    config_path = Path(subset_dir) / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(f"Missing config at {config_path}")
+    config = json.loads(config_path.read_text())
+    nside = int(config.get("nside", 32))
+
+    dt_days = float(time_tol_sec) / 86400.0
+    index_db = Path(subset_dir) / "index.db"
+    distinct_uris: set[str] = set()
+    by_obscode_rows: dict[str, int] = defaultdict(int)
+
+    for i in range(len(truth)):
+        obscode = str(truth.obscode[i].as_py())
+        by_obscode_rows[obscode] += 1
+        mjd = float(truth.time_mjd_utc[i].as_py())
+        ra = float(truth.ra_deg[i].as_py())
+        dec = float(truth.dec_deg[i].as_py())
+        hp = int(radec_to_healpixel(ra, dec, nside))
+        frames = _frames_for_truth(
+            index_db=index_db,
+            obscode=obscode,
+            healpixel=hp,
+            mjd=mjd,
+            dt_days=dt_days,
+        )
+        for fr in frames:
+            distinct_uris.add(str(fr["data_uri"]))
+        if progress_interval > 0 and (i + 1) % progress_interval == 0:
+            print(f"  blob pre-count: {i + 1}/{len(truth)} truth rows, {len(distinct_uris)} distinct URIs so far")
+
+    out_json = out_dir / "truth_precovery_blob_count.json"
+    uris_txt = out_dir / "truth_precovery_blob_uris.txt"
+    uris_txt.write_text("".join(f"{u}\n" for u in sorted(distinct_uris)))
+    meta = {
+        "subset_dir": str(subset_dir),
+        "artifacts_dir": str(out_dir),
+        "truth_parquet": str(truth_parquet),
+        "n_truth_obs": int(len(truth)),
+        "n_distinct_data_uris": int(len(distinct_uris)),
+        "data_uris_txt": str(uris_txt),
+        "time_tol_sec": float(time_tol_sec),
+        "healpix_nside": int(nside),
+        "by_obscode_truth_rows": dict(sorted(by_obscode_rows.items())),
+        "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    out_json.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+
+    return BlobCountResult(
+        n_truth_obs=len(truth),
+        n_distinct_data_uris=len(distinct_uris),
+        time_tol_sec=time_tol_sec,
+        by_obscode_truth_rows=dict(by_obscode_rows),
+        out_json=out_json,
+        uris_txt=uris_txt,
+    )
+
+
 def crossmatch_truth_to_precovery_subset(
     *,
     subset_dir: Path,
@@ -103,13 +192,15 @@ def crossmatch_truth_to_precovery_subset(
     dist_tol_arcsec: float = 5.0,
     lazy_download_blobs: bool = False,
     gcs_root: str = GCS_ROOT,
+    artifacts_dir: Path | None = None,
 ) -> CrossmatchResult:
     win = read_subset_window(subset_dir)
-    win.artifacts_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(artifacts_dir).expanduser().resolve() if artifacts_dir is not None else win.artifacts_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
     db = PrecoveryDatabase.from_dir(str(subset_dir), allow_version_mismatch=True)
 
     if truth_parquet is None:
-        truth_parquet = win.artifacts_dir / "truth_observations_selected.parquet"
+        truth_parquet = out_dir / "truth_observations_selected.parquet"
     truth = TruthObservationByDesignation.from_parquet(str(truth_parquet))
 
     nside = int(db.frames.healpix_nside)
@@ -228,22 +319,24 @@ def crossmatch_truth_to_precovery_subset(
         )
 
     out_tbl = TruthPrecoveryCrossmatch.from_pyarrow(pa.Table.from_pylist(out_rows))
-    out_parquet = win.artifacts_dir / "truth_precovery_crossmatch.parquet"
+    out_parquet = out_dir / "truth_precovery_crossmatch.parquet"
     out_tbl.to_parquet(str(out_parquet))
 
     n_matched = int(sum(1 for r in out_rows if r["matched"]))
     meta = {
         "subset_dir": str(subset_dir),
+        "artifacts_dir": str(out_dir),
         "truth_parquet": str(truth_parquet),
         "n_truth_obs": int(len(truth)),
         "n_matched": n_matched,
         "match_rate": (0.0 if len(truth) == 0 else float(n_matched) / float(len(truth))),
+        "n_data_files": int(len(ensured)),
         "time_tol_sec": float(time_tol_sec),
         "dist_tol_arcsec": float(dist_tol_arcsec),
         "healpix_nside": int(nside),
         "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
-    out_meta = win.artifacts_dir / "truth_precovery_crossmatch_meta.json"
+    out_meta = out_dir / "truth_precovery_crossmatch_meta.json"
     out_meta.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
 
     return CrossmatchResult(out_parquet=out_parquet, out_meta_json=out_meta)
@@ -254,8 +347,19 @@ def main() -> None:
 
     p = argparse.ArgumentParser(description="Crossmatch truth observations to detections in a local precovery subset.")
     p.add_argument("--subset-dir", type=str, required=True)
+    p.add_argument(
+        "--artifacts-dir",
+        type=str,
+        default=None,
+        help="Optional output directory for artifacts (defaults to <subset_dir>/artifacts).",
+    )
     p.add_argument("--time-tol-sec", type=float, default=60.0)
     p.add_argument("--dist-tol-arcsec", type=float, default=5.0)
+    p.add_argument(
+        "--count-blobs-only",
+        action="store_true",
+        help="Only count distinct frame data URIs needed for crossmatch (no download, no crossmatch). Writes truth_precovery_blob_count.json.",
+    )
     p.add_argument(
         "--lazy-download-blobs",
         action="store_true",
@@ -272,12 +376,26 @@ def main() -> None:
     )
     args = p.parse_args()
 
+    if bool(args.count_blobs_only):
+        res = count_distinct_data_uris_for_truth(
+            subset_dir=Path(args.subset_dir),
+            truth_parquet=None,
+            time_tol_sec=float(args.time_tol_sec),
+            artifacts_dir=(None if args.artifacts_dir is None else Path(args.artifacts_dir)),
+        )
+        print(f"n_truth_obs={res.n_truth_obs}")
+        print(f"n_distinct_data_uris={res.n_distinct_data_uris}")
+        print(f"blob_count_json={res.out_json}")
+        print(f"data_uris_txt={res.uris_txt}")
+        return
+
     out = crossmatch_truth_to_precovery_subset(
         subset_dir=Path(args.subset_dir),
         time_tol_sec=float(args.time_tol_sec),
         dist_tol_arcsec=float(args.dist_tol_arcsec),
         lazy_download_blobs=bool(args.lazy_download_blobs),
         gcs_root=str(args.gcs_root),
+        artifacts_dir=(None if args.artifacts_dir is None else Path(args.artifacts_dir)),
     )
     print(f"crossmatch_parquet={out.out_parquet}")
     print(f"meta_json={out.out_meta_json}")

@@ -23,13 +23,15 @@ from ..methods.footprints import (
     corridor_path_lonlat_deg_from_samples,
     corridor_pixels_from_samples,
     disc_pixels_from_cov,
-    ellipse_boundary_vertices_lonlat_deg_from_cov,
     ellipse_polygon_pixels_from_cov_moc,
+    ellipse_boundary_vertices_lonlat_deg_from_cov,
     mc_pixels_from_cov,
     perimeter_polygon_from_samples,
     sample_pixels_direct,
     sample_perimeter_polygon_pixels_moc,
 )
+from ..selection.designation_normalization import normalize_designation
+from ..selection.subset_designations import read_subset_window
 
 
 def _ensure_dir(p: Path) -> None:
@@ -104,12 +106,7 @@ class Stage3Coverage(qv.Table):
     n_extra_frames = qv.Int64Column(nullable=True)
 
 def _designation_from_object_id(object_id: str) -> str:
-    s = str(object_id).strip()
-    if s.startswith("(") and s.endswith(")") and len(s) >= 3:
-        # Provisional designation stored as "(2019 NY21)".
-        return s[1:-1].strip()
-    # Otherwise first token is the numeric designation (e.g. "191305 (2003 HQ20)").
-    return s.split()[0].strip()
+    return normalize_designation(str(object_id))
 
 
 def _read_stage2_targets(stage2_run_dir: Path) -> pa.Table:
@@ -300,7 +297,9 @@ def _map_times_to_target_idx_by_obscode(
     return out
 
 
-def _read_truth_observations_table(*, subset_dir: Path, targets: pa.Table) -> pa.Table:
+def _read_truth_observations_table(
+    *, subset_dir: Path, targets: pa.Table, inputs_artifacts_dir: Path | None = None
+) -> pa.Table:
     """
     Return matched truth observations aligned to Stage 2 targets as:
       (orbit_id, target_idx, healpixel)
@@ -309,7 +308,11 @@ def _read_truth_observations_table(*, subset_dir: Path, targets: pa.Table) -> pa
     - target_idx is Stage 2's exposure-time index
     - healpixel is the healpixel of the truth observation (nside = subset frames nside)
     """
-    artifacts_dir = subset_dir / "artifacts"
+    artifacts_dir = (
+        Path(inputs_artifacts_dir).expanduser().resolve()
+        if inputs_artifacts_dir is not None
+        else (subset_dir / "artifacts")
+    )
     truth_path = artifacts_dir / "truth_precovery_crossmatch.parquet"
     orbits_path = artifacts_dir / "orbits_selected_sbdb.parquet"
     if not truth_path.exists():
@@ -319,9 +322,25 @@ def _read_truth_observations_table(*, subset_dir: Path, targets: pa.Table) -> pa
 
     truth = pq.read_table(
         str(truth_path),
-        columns=["matched", "designation", "obscode", "match_time_mjd_utc", "healpixel"],
+        columns=[
+            "matched",
+            "designation",
+            "obscode",
+            "match_dataset_id",
+            "match_exposure_id",
+            "healpixel",
+        ],
     )
     truth = truth.filter(pc.equal(truth["matched"], True))
+    if truth.num_rows == 0:
+        return TruthObservations.empty().table
+
+    # Keep only rows with exposure identifiers so we can align to exposure midpoints.
+    m_has = pc.and_(
+        pc.invert(pc.is_null(truth["match_exposure_id"])),
+        pc.invert(pc.is_null(truth["match_dataset_id"])),
+    )
+    truth = truth.filter(m_has)
     if truth.num_rows == 0:
         return TruthObservations.empty().table
 
@@ -337,23 +356,77 @@ def _read_truth_observations_table(*, subset_dir: Path, targets: pa.Table) -> pa
         }
     )
 
-    truth = truth.select(["designation", "obscode", "match_time_mjd_utc", "healpixel"])
+    truth = truth.select(
+        ["designation", "obscode", "match_dataset_id", "match_exposure_id", "healpixel"]
+    )
     truth = truth.join(orbit_map, keys=["designation"], join_type="inner")
     if truth.num_rows == 0:
         return TruthObservations.empty().table
 
-    t_obscode = np.asarray(truth["obscode"].to_pylist(), dtype=object)
-    t_time = np.asarray(truth["match_time_mjd_utc"].to_numpy(zero_copy_only=False), dtype=np.float64)
-    t_orbit = np.asarray(truth["orbit_id"].to_pylist(), dtype=object)
-    t_hpix = np.asarray(truth["healpixel"].to_numpy(zero_copy_only=False), dtype=np.int64)
+    # Align truth to Stage 2 targets by exposure midpoint, not `match_time_mjd_utc`.
+    # `match_time_mjd_utc` can be significantly offset from `frames.exposure_mjd_mid` for
+    # some data sources; Stage 3/4 use exposure midpoints as the key.
+    win = read_subset_window(subset_dir)
+    index_db = Path(win.index_db)
+    if not index_db.exists():
+        raise FileNotFoundError(f"Missing subset index.db: {index_db}")
 
-    # Map match_time_mjd_utc -> nearest target_idx per obscode (within 60s), using Timestamp matching.
-    t_time_utc = Timestamp.from_mjd(t_time.tolist(), scale="utc")
+    ds = [str(x) for x in truth["match_dataset_id"].to_pylist()]
+    code = [str(x) for x in truth["obscode"].to_pylist()]
+    exp = [str(x) for x in truth["match_exposure_id"].to_pylist()]
+    keys = list(zip(ds, code, exp))
+    uniq = sorted(set(keys))
+    if not uniq:
+        return TruthObservations.empty().table
+
+    import sqlite3
+
+    conn = sqlite3.connect(str(index_db))
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS frames_truth_join_idx "
+            "ON frames(dataset_id, obscode, exposure_id)"
+        )
+        conn.execute(
+            "CREATE TEMP TABLE truth_keys (dataset_id TEXT, obscode TEXT, exposure_id TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO truth_keys (dataset_id, obscode, exposure_id) VALUES (?, ?, ?)",
+            uniq,
+        )
+        conn.execute("CREATE INDEX truth_keys_idx ON truth_keys (dataset_id, obscode, exposure_id)")
+        rows = conn.execute(
+            """
+            SELECT t.dataset_id, t.obscode, t.exposure_id, f.exposure_mjd_mid
+            FROM frames f
+            INNER JOIN truth_keys t
+              ON f.dataset_id = t.dataset_id
+             AND f.obscode = t.obscode
+             AND f.exposure_id = t.exposure_id
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    mid_by_key: dict[tuple[str, str, str], float] = {
+        (str(r[0]), str(r[1]), str(r[2])): float(r[3]) for r in rows
+    }
+    mjd_mid = [mid_by_key.get((ds, oc, ex)) for ds, oc, ex in keys]
+    ok_mid = np.asarray([x is not None for x in mjd_mid], dtype=bool)
+    if not ok_mid.any():
+        return TruthObservations.empty().table
+
+    mjd_mid_f = np.asarray([float(x) for x in np.asarray(mjd_mid, dtype=object)[ok_mid].tolist()], dtype=np.float64)
+    t_obscode = np.asarray(truth["obscode"].to_pylist(), dtype=object)[ok_mid]
+    t_orbit = np.asarray(truth["orbit_id"].to_pylist(), dtype=object)[ok_mid]
+    t_hpix = np.asarray(truth["healpixel"].to_numpy(zero_copy_only=False), dtype=np.int64)[ok_mid]
+
+    t_time_utc = Timestamp.from_mjd(mjd_mid_f.tolist(), scale="utc")
     target_idx = _map_times_to_target_idx_by_obscode(
         obscode=t_obscode,
         time_utc=t_time_utc,
         targets=targets,
-        dt_sec=60.0,
+        dt_sec=0.1,
         precision="us",
     )
     ok = target_idx >= 0
@@ -672,6 +745,7 @@ def run_stage3_healpixel_bench(
     corridor_step_arcsec: float = 30.0,
     persist_geometry: bool = True,
     out_dir: Path | None = None,
+    inputs_artifacts_dir: Path | None = None,
     strategies: list[str] | None = None,
     footprints: list[str] | None = None,
     only_truth: bool = False,
@@ -693,7 +767,9 @@ def run_stage3_healpixel_bench(
 
     targets_tbl = _read_stage2_targets(stage2_run_dir)
     frames_pixels = _read_frames_pixels_table(subset_dir=subset_dir, targets=targets_tbl)
-    truth_obs_tbl = _read_truth_observations_table(subset_dir=subset_dir, targets=targets_tbl)
+    truth_obs_tbl = _read_truth_observations_table(
+        subset_dir=subset_dir, targets=targets_tbl, inputs_artifacts_dir=inputs_artifacts_dir
+    )
     truth_keys_tbl = _truth_keys_from_truth_observations(truth_obs_tbl)
     # NOTE: truth_unique tables are computed per-strategy after filtering to the
     # orbits present in that strategy's Stage 2 outputs.
@@ -1715,6 +1791,13 @@ def run_stage3_healpixel_bench(
     out_meta = dict(
         subset_dir=str(subset_dir),
         stage2_run_dir=str(stage2_run_dir),
+        inputs_artifacts_dir=str(
+            (
+                Path(inputs_artifacts_dir).expanduser().resolve()
+                if inputs_artifacts_dir is not None
+                else (Path(subset_dir) / "artifacts")
+            )
+        ),
         healpix_nside=int(healpix_nside),
         n_sigma=float(n_sigma),
         polygon_vertices=int(polygon_vertices),
@@ -1738,6 +1821,12 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Stage 3: atomic healpixel intersection runner (consumes Stage 2 ephemerides).")
     p.add_argument("--subset-dir", type=str, required=True)
     p.add_argument("--stage2-run-dir", type=str, required=True)
+    p.add_argument(
+        "--inputs-artifacts-dir",
+        type=str,
+        default=None,
+        help="Directory containing truth_precovery_crossmatch.parquet and orbits_selected_sbdb.parquet (default: <subset_dir>/artifacts).",
+    )
     p.add_argument(
         "--out-dir",
         type=str,
@@ -1798,6 +1887,7 @@ def main() -> None:
         stage2_run_dir=Path(args.stage2_run_dir),
         out_dir=None if args.out_dir is None else Path(args.out_dir),
         healpix_nside=int(args.healpix_nside),
+        inputs_artifacts_dir=None if args.inputs_artifacts_dir is None else Path(args.inputs_artifacts_dir),
         n_sigma=float(args.n_sigma),
         polygon_vertices=int(args.polygon_vertices),
         cov_mc_num_samples=int(args.cov_mc_num_samples),

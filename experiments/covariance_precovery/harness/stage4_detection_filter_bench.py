@@ -30,6 +30,7 @@ from ..methods.footprints import (
     ellipse_boundary_vertices_lonlat_deg_from_cov,
     perimeter_polygon_from_samples,
 )
+from ..selection.subset_designations import read_subset_window
 from .stage3_healpixel_bench import (
     _collapse_variant_ephemeris_group,
     _designation_from_object_id,
@@ -91,7 +92,7 @@ class Stage4Metrics(qv.Table):
     n_orbit_targets = qv.Int64Column()
     n_frames_loaded = qv.Int64Column()
     n_observations_loaded = qv.Int64Column()
-    n_after_prefilter = qv.Int64Column(nullable=True)
+    n_accepted = qv.Int64Column(nullable=True)
 
     io_sec = qv.Float64Column()
     prep_sec = qv.Float64Column()
@@ -172,7 +173,7 @@ class _FilterAgg:
     n_orbit_targets: int = 0
     n_frames_loaded: int = 0
     n_observations_loaded: int = 0
-    n_after_prefilter: int | None = 0
+    n_accepted: int | None = 0
 
     # timings
     io_sec: float = 0.0
@@ -219,7 +220,9 @@ def _truth_matches_empty() -> pa.Table:
     )
 
 
-def _read_truth_matches_table(*, subset_dir: Path, targets: pa.Table) -> pa.Table:
+def _read_truth_matches_table(
+    *, subset_dir: Path, targets: pa.Table, inputs_artifacts_dir: Path | None = None
+) -> pa.Table:
     """
     Return matched truth detections aligned to Stage 2 targets as:
       (orbit_id, target_idx, truth_obsid, truth_time_mjd_utc, truth_ra_deg, truth_dec_deg)
@@ -228,7 +231,11 @@ def _read_truth_matches_table(*, subset_dir: Path, targets: pa.Table) -> pa.Tabl
     observation IDs can differ across sources/ingests. Stage 4 recall is evaluated in the
     same crossmatch sense: (time, sky position) within the truth tolerances.
     """
-    artifacts_dir = subset_dir / "artifacts"
+    artifacts_dir = (
+        Path(inputs_artifacts_dir).expanduser().resolve()
+        if inputs_artifacts_dir is not None
+        else (subset_dir / "artifacts")
+    )
     truth_path = artifacts_dir / "truth_precovery_crossmatch.parquet"
     orbits_path = artifacts_dir / "orbits_selected_sbdb.parquet"
     if not truth_path.exists():
@@ -295,7 +302,9 @@ def _read_truth_matches_table(*, subset_dir: Path, targets: pa.Table) -> pa.Tabl
     return out.table.filter(m)
 
 
-def _read_truth_frame_keys_table(*, subset_dir: Path, targets: pa.Table) -> pa.Table:
+def _read_truth_frame_keys_table(
+    *, subset_dir: Path, targets: pa.Table, inputs_artifacts_dir: Path | None = None
+) -> pa.Table:
     """
     Return truth-matched frame keys aligned to Stage 2 targets as:
       (orbit_id, target_idx, healpixel)
@@ -303,7 +312,11 @@ def _read_truth_frame_keys_table(*, subset_dir: Path, targets: pa.Table) -> pa.T
     This is used for an optional Stage 4 speed-up where we only load observations from frames
     that are known (from truth crossmatch) to contain a true detection for that orbit/target.
     """
-    artifacts_dir = subset_dir / "artifacts"
+    artifacts_dir = (
+        Path(inputs_artifacts_dir).expanduser().resolve()
+        if inputs_artifacts_dir is not None
+        else (subset_dir / "artifacts")
+    )
     truth_path = artifacts_dir / "truth_precovery_crossmatch.parquet"
     orbits_path = artifacts_dir / "orbits_selected_sbdb.parquet"
     if not truth_path.exists():
@@ -313,9 +326,31 @@ def _read_truth_frame_keys_table(*, subset_dir: Path, targets: pa.Table) -> pa.T
 
     truth = pq.read_table(
         str(truth_path),
-        columns=["matched", "designation", "obscode", "match_time_mjd_utc", "healpixel"],
+        columns=[
+            "matched",
+            "designation",
+            "obscode",
+            "match_dataset_id",
+            "match_exposure_id",
+            "healpixel",
+        ],
     )
     truth = truth.filter(pc.equal(truth["matched"], True))
+    if truth.num_rows == 0:
+        return pa.table(
+            {
+                "orbit_id": pa.array([], pa.large_string()),
+                "target_idx": pa.array([], pa.int64()),
+                "healpixel": pa.array([], pa.int64()),
+            }
+        )
+
+    # Keep only rows with exposure identifiers so we can align to exposure midpoints.
+    m_has = pc.and_(
+        pc.invert(pc.is_null(truth["match_exposure_id"])),
+        pc.invert(pc.is_null(truth["match_dataset_id"])),
+    )
+    truth = truth.filter(m_has)
     if truth.num_rows == 0:
         return pa.table(
             {
@@ -336,7 +371,9 @@ def _read_truth_frame_keys_table(*, subset_dir: Path, targets: pa.Table) -> pa.T
             "orbit_id": orbits["orbit_id"],
         }
     )
-    truth = truth.select(["designation", "obscode", "match_time_mjd_utc", "healpixel"])
+    truth = truth.select(
+        ["designation", "obscode", "match_dataset_id", "match_exposure_id", "healpixel"]
+    )
     truth = truth.join(orbit_map, keys=["designation"], join_type="inner")
     if truth.num_rows == 0:
         return pa.table(
@@ -347,14 +384,75 @@ def _read_truth_frame_keys_table(*, subset_dir: Path, targets: pa.Table) -> pa.T
             }
         )
 
-    t_obscode = np.asarray(truth["obscode"].to_pylist(), dtype=object)
-    t_time = np.asarray(truth["match_time_mjd_utc"].to_numpy(zero_copy_only=False), dtype=np.float64)
-    t_time_utc = Timestamp.from_mjd(t_time.tolist(), scale="utc")
+    # Align truth to Stage 2 targets by exposure midpoint, not `match_time_mjd_utc`.
+    win = read_subset_window(subset_dir)
+    index_db = Path(win.index_db)
+    if not index_db.exists():
+        raise FileNotFoundError(f"Missing subset index.db: {index_db}")
+
+    ds = [str(x) for x in truth["match_dataset_id"].to_pylist()]
+    code = [str(x) for x in truth["obscode"].to_pylist()]
+    exp = [str(x) for x in truth["match_exposure_id"].to_pylist()]
+    keys = list(zip(ds, code, exp))
+    uniq = sorted(set(keys))
+    if not uniq:
+        return pa.table(
+            {
+                "orbit_id": pa.array([], pa.large_string()),
+                "target_idx": pa.array([], pa.int64()),
+                "healpixel": pa.array([], pa.int64()),
+            }
+        )
+
+    conn = sqlite3.connect(str(index_db))
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS frames_truth_join_idx "
+            "ON frames(dataset_id, obscode, exposure_id)"
+        )
+        conn.execute(
+            "CREATE TEMP TABLE truth_keys (dataset_id TEXT, obscode TEXT, exposure_id TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO truth_keys (dataset_id, obscode, exposure_id) VALUES (?, ?, ?)",
+            uniq,
+        )
+        conn.execute("CREATE INDEX truth_keys_idx ON truth_keys (dataset_id, obscode, exposure_id)")
+        rows = conn.execute(
+            """
+            SELECT t.dataset_id, t.obscode, t.exposure_id, f.exposure_mjd_mid
+            FROM frames f
+            INNER JOIN truth_keys t
+              ON f.dataset_id = t.dataset_id
+             AND f.obscode = t.obscode
+             AND f.exposure_id = t.exposure_id
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    mid_by_key: dict[tuple[str, str, str], float] = {
+        (str(r[0]), str(r[1]), str(r[2])): float(r[3]) for r in rows
+    }
+    mjd_mid = [mid_by_key.get((ds, oc, ex)) for ds, oc, ex in keys]
+    ok_mid = np.asarray([x is not None for x in mjd_mid], dtype=bool)
+    if not ok_mid.any():
+        return pa.table(
+            {
+                "orbit_id": pa.array([], pa.large_string()),
+                "target_idx": pa.array([], pa.int64()),
+                "healpixel": pa.array([], pa.int64()),
+            }
+        )
+
+    t_obscode = np.asarray(truth["obscode"].to_pylist(), dtype=object)[ok_mid]
+    mjd_mid_f = np.asarray([float(x) for x in np.asarray(mjd_mid, dtype=object)[ok_mid].tolist()], dtype=np.float64)
+    t_time_utc = Timestamp.from_mjd(mjd_mid_f.tolist(), scale="utc")
     target_idx = _map_times_to_target_idx_by_obscode(
         obscode=t_obscode,
         time_utc=t_time_utc,
         targets=targets,
-        dt_sec=60.0,
+        dt_sec=0.1,
         precision="us",
     )
     ok = target_idx >= 0
@@ -1036,6 +1134,7 @@ def run_stage4_detection_filter_bench(
     corridor_radius_arcsec: float = 30.0,
     corridor_step_arcsec: float = 30.0,
     out_dir: Path | None = None,
+    inputs_artifacts_dir: Path | None = None,
     strategies: list[str] | None = None,
     filters: list[str] | None = None,
     footprints: list[str] | None = None,
@@ -1061,6 +1160,12 @@ def run_stage4_detection_filter_bench(
     _ensure_dir(out_dir)
     run_dir = out_dir / stage2_run_dir.name
     _ensure_dir(run_dir)
+
+    resolved_inputs_artifacts_dir = (
+        Path(inputs_artifacts_dir).expanduser().resolve()
+        if inputs_artifacts_dir is not None
+        else (Path(subset_dir) / "artifacts")
+    )
 
     def _normalize_fp_list(items: list[str]) -> set[str]:
         return {str(x).strip() for x in items if str(x).strip()}
@@ -1115,13 +1220,17 @@ def run_stage4_detection_filter_bench(
         selected_footprints = _footprints_for_set(footprint_set)
 
     targets_tbl = _read_stage2_targets(stage2_run_dir)
-    truth_all = _read_truth_matches_table(subset_dir=subset_dir, targets=targets_tbl)
-    truth_frame_keys_tbl = _read_truth_frame_keys_table(subset_dir=subset_dir, targets=targets_tbl)
+    truth_all = _read_truth_matches_table(
+        subset_dir=subset_dir, targets=targets_tbl, inputs_artifacts_dir=resolved_inputs_artifacts_dir
+    )
+    truth_frame_keys_tbl = _read_truth_frame_keys_table(
+        subset_dir=subset_dir, targets=targets_tbl, inputs_artifacts_dir=resolved_inputs_artifacts_dir
+    )
 
     # Truth tolerances (match sense): keep consistent with the truth crossmatch writer.
     time_tol_sec = 60.0
     dist_tol_arcsec = 5.0
-    meta_path = subset_dir / "artifacts" / "truth_precovery_crossmatch_meta.json"
+    meta_path = resolved_inputs_artifacts_dir / "truth_precovery_crossmatch_meta.json"
     if meta_path.exists():
         try:
             meta = json.loads(meta_path.read_text())
@@ -1368,6 +1477,38 @@ def run_stage4_detection_filter_bench(
                         cov_row = None if cov_ll is None else cov_ll[i]
                         pred_pix = keys_map.get((oid, int(tidx)), np.array([], dtype=np.int64))
                         if pred_pix.size == 0:
+                            # Stage 3 may legitimately produce an empty selection for an (orbit,target)
+                            # truth key (e.g. footprint misses all observed frame pixels). In truth-only
+                            # evaluation we still want this counted as an evaluated orbit-target with
+                            # zero frames/observations loaded.
+                            for agg in aggs.values():
+                                agg.n_orbit_targets += 1
+                            if bool(write_per_target_metrics):
+                                truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
+                                for filt_name in aggs.keys():
+                                    per_target_rows.append(
+                                        dict(
+                                            stage2_run_dir=str(stage2_run_dir),
+                                            subset_dir=str(subset_dir),
+                                            strategy=str(name),
+                                            variant_kind=None,
+                                            footprint=str(footprint),
+                                            detection_filter=str(filt_name),
+                                            healpix_nside=int(healpix_nside),
+                                            orbit_id=str(oid),
+                                            target_idx=int(tidx),
+                                            obscode=str(targ_obscode[tidx]),
+                                            exposure_mjd_mid=float(targ_mjd[tidx]),
+                                            n_frames_loaded=0,
+                                            n_observations_loaded=0,
+                                            n_accepted=0,
+                                            n_truth_matched=int(len(truth_entries)),
+                                            n_truth_recovered=0,
+                                            io_sec=0.0,
+                                            prep_sec=0.0,
+                                            filter_sec=0.0,
+                                        )
+                                    )
                             continue
 
                         if truth_frames_map is not None:
@@ -1464,8 +1605,8 @@ def run_stage4_detection_filter_bench(
                                 continue
 
                             n_after = int(np.count_nonzero(keep))
-                            if agg.n_after_prefilter is not None:
-                                agg.n_after_prefilter += int(n_after)
+                            if agg.n_accepted is not None:
+                                agg.n_accepted += int(n_after)
                             agg.filter_sec += float(filt_sec)
                             # no separate chi2 step (geometry-only)
 
@@ -1531,7 +1672,7 @@ def run_stage4_detection_filter_bench(
                             n_orbit_targets=int(agg.n_orbit_targets),
                             n_frames_loaded=int(agg.n_frames_loaded),
                             n_observations_loaded=int(agg.n_observations_loaded),
-                            n_after_prefilter=(None if agg.n_after_prefilter is None else int(agg.n_after_prefilter)),
+                            n_accepted=(None if agg.n_accepted is None else int(agg.n_accepted)),
                             io_sec=float(agg.io_sec),
                             prep_sec=float(agg.prep_sec),
                             filter_sec=float(agg.filter_sec),
@@ -1745,6 +1886,34 @@ def run_stage4_detection_filter_bench(
 
                             pred_pix = keys_map.get((oid, int(tidx)), np.array([], dtype=np.int64))
                             if pred_pix.size == 0:
+                                for agg in aggs.values():
+                                    agg.n_orbit_targets += 1
+                                if bool(write_per_target_metrics):
+                                    truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
+                                    for filt_name in aggs.keys():
+                                        per_target_rows.append(
+                                            dict(
+                                                stage2_run_dir=str(stage2_run_dir),
+                                                subset_dir=str(subset_dir),
+                                                strategy=str(variant_root_name),
+                                                variant_kind=str(variant_kind),
+                                                footprint=str(out_fp),
+                                                detection_filter=str(filt_name),
+                                                healpix_nside=int(healpix_nside),
+                                                orbit_id=str(oid),
+                                                target_idx=int(tidx),
+                                                obscode=str(targ_obscode[tidx]),
+                                                exposure_mjd_mid=float(targ_mjd[tidx]),
+                                                n_frames_loaded=0,
+                                                n_observations_loaded=0,
+                                                n_accepted=0,
+                                                n_truth_matched=int(len(truth_entries)),
+                                                n_truth_recovered=0,
+                                                io_sec=0.0,
+                                                prep_sec=0.0,
+                                                filter_sec=0.0,
+                                            )
+                                        )
                                 continue
 
                             if truth_frames_map is not None:
@@ -1841,8 +2010,8 @@ def run_stage4_detection_filter_bench(
                                     continue
 
                                 n_after = int(np.count_nonzero(keep))
-                                if agg.n_after_prefilter is not None:
-                                    agg.n_after_prefilter += int(n_after)
+                                if agg.n_accepted is not None:
+                                    agg.n_accepted += int(n_after)
                                 agg.filter_sec += float(filt_sec)
 
                                 truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
@@ -1921,6 +2090,34 @@ def run_stage4_detection_filter_bench(
                         if keys_map is not None:
                             pred_pix = keys_map.get((oid, int(tidx)), np.array([], dtype=np.int64))
                             if pred_pix.size == 0:
+                                for agg in aggs.values():
+                                    agg.n_orbit_targets += 1
+                                if bool(write_per_target_metrics):
+                                    truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
+                                    for filt_name in aggs.keys():
+                                        per_target_rows.append(
+                                            dict(
+                                                stage2_run_dir=str(stage2_run_dir),
+                                                subset_dir=str(subset_dir),
+                                                strategy=str(variant_root_name),
+                                                variant_kind=str(variant_kind),
+                                                footprint=str(out_fp),
+                                                detection_filter=str(filt_name),
+                                                healpix_nside=int(healpix_nside),
+                                                orbit_id=str(oid),
+                                                target_idx=int(tidx),
+                                                obscode=str(targ_obscode[tidx]),
+                                                exposure_mjd_mid=float(targ_mjd[tidx]),
+                                                n_frames_loaded=0,
+                                                n_observations_loaded=0,
+                                                n_accepted=0,
+                                                n_truth_matched=int(len(truth_entries)),
+                                                n_truth_recovered=0,
+                                                io_sec=0.0,
+                                                prep_sec=0.0,
+                                                filter_sec=0.0,
+                                            )
+                                        )
                                 continue
 
                         if truth_frames_map is not None:
@@ -2017,8 +2214,8 @@ def run_stage4_detection_filter_bench(
                                 continue
 
                             n_after = int(np.count_nonzero(keep))
-                            if agg.n_after_prefilter is not None:
-                                agg.n_after_prefilter += int(n_after)
+                            if agg.n_accepted is not None:
+                                agg.n_accepted += int(n_after)
                             agg.filter_sec += float(filt_sec)
 
                             truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
@@ -2073,7 +2270,7 @@ def run_stage4_detection_filter_bench(
                             n_orbit_targets=int(agg.n_orbit_targets),
                             n_frames_loaded=int(agg.n_frames_loaded),
                             n_observations_loaded=int(agg.n_observations_loaded),
-                            n_after_prefilter=(None if agg.n_after_prefilter is None else int(agg.n_after_prefilter)),
+                            n_accepted=(None if agg.n_accepted is None else int(agg.n_accepted)),
                             io_sec=float(agg.io_sec),
                             prep_sec=float(agg.prep_sec),
                             filter_sec=float(agg.filter_sec),
@@ -2166,6 +2363,7 @@ def run_stage4_detection_filter_bench(
         subset_dir=str(subset_dir),
         stage2_run_dir=str(stage2_run_dir),
         stage3_run_dir=str(stage3_run_dir),
+        inputs_artifacts_dir=str(resolved_inputs_artifacts_dir),
         truth_frames_only=bool(truth_frames_only),
         healpix_nside=int(healpix_nside),
         n_sigma=float(n_sigma),
@@ -2208,6 +2406,12 @@ def main() -> None:
     )
     p.add_argument("--subset-dir", type=str, required=True)
     p.add_argument("--stage2-run-dir", type=str, required=True)
+    p.add_argument(
+        "--inputs-artifacts-dir",
+        type=str,
+        default=None,
+        help="Directory containing truth_precovery_crossmatch.parquet and orbits_selected_sbdb.parquet (default: <subset_dir>/artifacts).",
+    )
     p.add_argument(
         "--out-dir",
         type=str,
@@ -2333,6 +2537,7 @@ def main() -> None:
         truth_frames_only=bool(args.truth_frames_only),
         out_dir=None if args.out_dir is None else Path(args.out_dir),
         healpix_nside=int(args.healpix_nside),
+        inputs_artifacts_dir=None if args.inputs_artifacts_dir is None else Path(args.inputs_artifacts_dir),
         n_sigma=float(args.n_sigma),
         polygon_vertices=int(args.polygon_vertices),
         cov_mc_num_samples=int(args.cov_mc_num_samples),
