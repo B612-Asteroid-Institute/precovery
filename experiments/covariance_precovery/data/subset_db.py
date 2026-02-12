@@ -156,7 +156,9 @@ def build_trimmed_index_db(
     obscode_list = ",".join("?" for _ in spec.obscodes) if use_obscode_filter else ""
 
     with sqlite3.connect(out_tmp) as conn:
-        conn.execute("PRAGMA journal_mode=WAL;")
+        # Use DELETE journaling for a temporary DB that will be renamed.
+        # WAL uses sidecar files (<db>-wal/<db>-shm) which would not be moved by `Path.replace()`.
+        conn.execute("PRAGMA journal_mode=DELETE;")
         conn.execute("PRAGMA synchronous=NORMAL;")
 
         # Create tables + indexes matching FrameIndex._create_tables

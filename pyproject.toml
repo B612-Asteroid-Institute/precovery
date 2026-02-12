@@ -35,7 +35,7 @@ dependencies = [
     "healpy",
     "requests",
     "rebound==4.5.0",
-    "adam-core>=0.5.4",
+    "adam-core @ file:///Users/aleck/Code/adam-core",
     "pip>=25.3",
     "mocpy>=0.19.1",
 ]

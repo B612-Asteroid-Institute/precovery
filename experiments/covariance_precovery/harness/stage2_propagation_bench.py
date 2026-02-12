@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import platform
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +34,18 @@ from ..selection.designation_normalization import normalize_designation
 _LOG = logging.getLogger(__name__)
 _PROGRESS_LOG_EVERY_SEC = 30.0
 
+# Stage 2 ASSIST ephemeris chunk sizing (RAM-driven).
+# Policy (as requested):
+# - Use a fixed fraction of total system RAM as the ephemeris memory budget.
+# - Use a fixed (non-calibrated) effective bytes-per-ephemeris-row constant.
+# - Choose the largest time chunk such that:
+#     n_orbits * n_targets_in_chunk <= max_rows_fit
+# where:
+#     max_rows_fit = floor(max_ephem_usage_bytes / EPHEM_EFFECTIVE_BYTES_PER_ROW)
+_EPHEM_RAM_BUDGET_FRAC = 0.50
+# Fixed effective bytes/row; intentionally NOT calibrated dynamically.
+_EPHEM_EFFECTIVE_BYTES_PER_ROW = 125.0
+
 
 def _progress_maybe_log(
     *,
@@ -53,7 +68,7 @@ def _progress_maybe_log(
     if (now - float(last_log_t)) < float(every_sec) and i < n:
         return last_log_t
     frac = float(i) / float(n)
-    _LOG.debug(
+    _LOG.info(
         "%s progress %d/%d (%.1f%%) elapsed=%.1fs%s",
         str(label),
         int(i),
@@ -63,6 +78,97 @@ def _progress_maybe_log(
         ("" if not extra else f" {extra}"),
     )
     return float(now)
+
+
+def _system_total_ram_bytes() -> int:
+    """
+    Return total physical system RAM in bytes.
+
+    Uses platform-specific mechanisms:
+    - macOS: `sysctl -n hw.memsize`
+    - Linux: `/proc/meminfo` (MemTotal)
+    - Fallback: `os.sysconf` if available
+    """
+    try:
+        if platform.system() == "Darwin":
+            out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True).strip()
+            return int(out)
+        if platform.system() == "Linux":
+            with open("/proc/meminfo", "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        parts = line.split()
+                        # kB
+                        return int(parts[1]) * 1024
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if hasattr(os, "sysconf"):
+            pages = int(os.sysconf("SC_PHYS_PAGES"))
+            page_size = int(os.sysconf("SC_PAGE_SIZE"))
+            return int(pages * page_size)
+    except Exception:  # noqa: BLE001
+        pass
+    raise RuntimeError("Could not determine total system RAM size")
+
+
+def _resolve_time_chunk_size_from_ram_budget(*, n_orbits: int, n_targets: int) -> tuple[int, dict[str, object]]:
+    """
+    Compute the time-chunk size (number of observer targets per chunk) based on:
+    - a fixed fraction of total system RAM (_EPHEM_RAM_BUDGET_FRAC)
+    - a fixed effective bytes/row (_EPHEM_EFFECTIVE_BYTES_PER_ROW)
+
+    Returns (chunk_size, meta).
+    """
+    n_orbits = int(n_orbits)
+    n_targets = int(n_targets)
+    n_total_rows = int(n_orbits * n_targets)
+    if n_targets <= 0:
+        return 0, {
+            "system_ram_bytes": None,
+            "ephem_ram_budget_frac": float(_EPHEM_RAM_BUDGET_FRAC),
+            "ephem_max_usage_bytes": None,
+            "ephem_effective_bytes_per_row": float(_EPHEM_EFFECTIVE_BYTES_PER_ROW),
+            "ephem_max_rows_fit": 0,
+            "resolved_time_chunk_size": 0,
+            "n_total_ephem_rows": int(n_total_rows),
+        }
+    if n_orbits <= 0:
+        # Degenerate: no orbits => no work; still return a minimal chunk.
+        return 1, {
+            "system_ram_bytes": None,
+            "ephem_ram_budget_frac": float(_EPHEM_RAM_BUDGET_FRAC),
+            "ephem_max_usage_bytes": None,
+            "ephem_effective_bytes_per_row": float(_EPHEM_EFFECTIVE_BYTES_PER_ROW),
+            "ephem_max_rows_fit": 0,
+            "resolved_time_chunk_size": 1,
+            "n_total_ephem_rows": int(n_total_rows),
+        }
+
+    system_ram = int(_system_total_ram_bytes())
+    max_usage = int(float(_EPHEM_RAM_BUDGET_FRAC) * float(system_ram))
+    bpr = float(_EPHEM_EFFECTIVE_BYTES_PER_ROW)
+    if not np.isfinite(bpr) or bpr <= 0.0:
+        raise ValueError(f"Invalid ephemeris bytes-per-row constant: {bpr}")
+
+    max_rows_fit = int(max_usage // int(bpr))
+    # time_chunk is targets per chunk.
+    chunk = int(max_rows_fit // n_orbits)
+    # Avoid a zero chunk: we must make forward progress for any non-empty workload.
+    if chunk <= 0:
+        chunk = 1
+    chunk = int(min(chunk, n_targets))
+
+    return int(chunk), {
+        "system_ram_bytes": int(system_ram),
+        "ephem_ram_budget_frac": float(_EPHEM_RAM_BUDGET_FRAC),
+        "ephem_max_usage_bytes": int(max_usage),
+        "ephem_effective_bytes_per_row": float(bpr),
+        "ephem_max_rows_fit": int(max_rows_fit),
+        "resolved_time_chunk_size": int(chunk),
+        "n_total_ephem_rows": int(n_total_rows),
+        "n_ephem_rows_per_chunk_est": int(int(chunk) * int(n_orbits)),
+    }
 
 
 def _run_with_strategy_logs(
@@ -1211,13 +1317,31 @@ def _run_chunked_assist_ephemeris(
     compute_sec = 0.0
     io_sec = 0.0
     n_targets = int(len(target_observers_utc))
-    n_chunks = int((n_targets + int(time_chunk_size) - 1) // int(time_chunk_size))
+    n_orbits = int(len(orbits))
+    if int(time_chunk_size) != 0:
+        _LOG.warning(
+            "Ignoring time_chunk_size=%s; chunking is now RAM-budget driven.", str(time_chunk_size)
+        )
+    chunk, _chunk_meta = _resolve_time_chunk_size_from_ram_budget(
+        n_orbits=int(n_orbits), n_targets=int(n_targets)
+    )
+    if chunk <= 0:
+        return 0, 0.0, 0.0
+    n_chunks = int((n_targets + int(chunk) - 1) // int(chunk))
     total_rows = 0
     part = 0
     t0 = time.perf_counter()
     last_log_t = t0
-    for i0 in range(0, n_targets, int(time_chunk_size)):
-        i1 = min(i0 + int(time_chunk_size), n_targets)
+    _LOG.info(
+        "stage2 assist ephem chunking: n_orbits=%d n_targets=%d chunk=%d n_chunks=%d budget_frac=%.2f",
+        int(n_orbits),
+        int(n_targets),
+        int(chunk),
+        int(n_chunks),
+        float(_chunk_meta.get("ephem_ram_budget_frac", _EPHEM_RAM_BUDGET_FRAC)),
+    )
+    for i0 in range(0, n_targets, int(chunk)):
+        i1 = min(i0 + int(chunk), n_targets)
         obs_utc = target_observers_utc[i0:i1]
         t_compute0 = time.perf_counter()
         ephem = assist.generate_ephemeris(
@@ -1239,7 +1363,10 @@ def _run_chunked_assist_ephemeris(
             n=int(n_chunks),
             t0=float(t0),
             last_log_t=float(last_log_t),
-            extra=f"rows={int(total_rows)} compute_sec={compute_sec:.1f} io_sec={io_sec:.1f}",
+            extra=(
+                f"orbits={int(n_orbits)} targets_per_chunk={int(chunk)} "
+                f"rows={int(total_rows)} compute_sec={compute_sec:.1f} io_sec={io_sec:.1f}"
+            ),
         )
     return int(total_rows), float(compute_sec), float(io_sec)
 
@@ -1296,6 +1423,11 @@ def _run_strategy_assist_window_then_2body(
         total_rows = 0
         part = 0
         n_orb = int(len(orbits_all))
+        resolved_chunk, chunk_meta = _resolve_time_chunk_size_from_ram_budget(
+            n_orbits=int(n_orb),
+            n_targets=int(len(target_observers_utc)),
+        )
+        step = int(resolved_chunk)
         pending_rows = 0
         prop_batches: list[Orbits] = []
         obs_batches: list[Observers] = []
@@ -1324,8 +1456,8 @@ def _run_strategy_assist_window_then_2body(
             take_idx = (int(cidx) * int(n_orb) + np.arange(n_orb, dtype=np.int64)).tolist()
             orbits_center = orbits_at_centers.take(take_idx)
 
-            for j0 in range(0, int(len(idx)), int(time_chunk_size)):
-                j1 = min(j0 + int(time_chunk_size), int(len(idx)))
+            for j0 in range(0, int(len(idx)), int(step)):
+                j1 = min(j0 + int(step), int(len(idx)))
                 sub = idx[j0:j1]
                 t_compute0 = time.perf_counter()
                 obs_tdb = target_observers_tdb.take(sub)
@@ -1374,6 +1506,8 @@ def _run_strategy_assist_window_then_2body(
         n_rows = int(total_rows)
     except Exception as e:  # noqa: BLE001
         err = f"{type(e).__name__}: {e}"
+        resolved_chunk = None
+        chunk_meta = {}
 
     _write_strategy_meta(
         strat_dir,
@@ -1386,6 +1520,12 @@ def _run_strategy_assist_window_then_2body(
             n_window_centers=int(len(windows)),
             n_rows=n_rows,
             time_chunk_size=int(time_chunk_size),
+            resolved_time_chunk_size=resolved_chunk,
+            **{
+                k: v
+                for k, v in dict(chunk_meta).items()
+                if str(k) != "resolved_time_chunk_size"
+            },
             two_body_max_processes=None if max_processes is None else int(max_processes),
             ephem_batch_max_rows=int(ephem_batch_max_rows),
             ephem_ray_chunk_size=int(ephem_ray_chunk_size),
@@ -1484,6 +1624,11 @@ def _run_strategy_assist_window_then_2body_variants(
             variants = variants.take(keep_idx)
 
         n_var = int(len(variants))
+        resolved_chunk, chunk_meta = _resolve_time_chunk_size_from_ram_budget(
+            n_orbits=int(n_var),
+            n_targets=int(len(target_observers_utc)),
+        )
+        step = int(resolved_chunk)
 
         if bool(write_variants_orbits):
             t_io0 = time.perf_counter()
@@ -1593,8 +1738,8 @@ def _run_strategy_assist_window_then_2body_variants(
                     continue
                 variants_center = variants_center.take(keep.tolist())
 
-            for j0 in range(0, int(len(idx)), int(time_chunk_size)):
-                j1 = min(j0 + int(time_chunk_size), int(len(idx)))
+            for j0 in range(0, int(len(idx)), int(step)):
+                j1 = min(j0 + int(step), int(len(idx)))
                 sub = idx[j0:j1]
                 obs_tdb = target_observers_tdb.take(sub)
 
@@ -1648,6 +1793,8 @@ def _run_strategy_assist_window_then_2body_variants(
         n_rows = int(total_rows)
     except Exception as e:  # noqa: BLE001
         err = f"{type(e).__name__}: {e}"
+        resolved_chunk = None
+        chunk_meta = {}
 
     # Persist bad-orbit report (if any) for later rollups / debugging.
     bad_orbits_json: str | None = None
@@ -1678,6 +1825,12 @@ def _run_strategy_assist_window_then_2body_variants(
             n_window_centers=int(len(windows)),
             n_rows=n_rows,
             time_chunk_size=int(time_chunk_size),
+            resolved_time_chunk_size=resolved_chunk,
+            **{
+                k: v
+                for k, v in dict(chunk_meta).items()
+                if str(k) != "resolved_time_chunk_size"
+            },
             ephem_batch_max_rows=int(ephem_batch_max_rows),
             ephem_ray_chunk_size=int(ephem_ray_chunk_size),
             n_bad_orbits=int(len(bad_orbit_ids)),
@@ -1737,6 +1890,10 @@ def _run_strategy_assist_mean(
         out_ephem_dir = strat_dir / "mean_ephemeris"
         _ensure_dir(out_ephem_dir)
         assist = ASSISTPropagator()
+        resolved_chunk, chunk_meta = _resolve_time_chunk_size_from_ram_budget(
+            n_orbits=int(len(orbits_mean)),
+            n_targets=int(len(target_observers_utc)),
+        )
         n_rows, compute_sec, io_sec = _run_chunked_assist_ephemeris(
             assist=assist,
             orbits=orbits_mean,
@@ -1749,6 +1906,8 @@ def _run_strategy_assist_mean(
         )
     except Exception as e:  # noqa: BLE001
         err = f"{type(e).__name__}: {e}"
+        resolved_chunk = None
+        chunk_meta = {}
 
     _write_strategy_meta(
         strat_dir,
@@ -1761,6 +1920,8 @@ def _run_strategy_assist_mean(
             n_window_centers=int(len(windows)),
             n_rows=n_rows,
             time_chunk_size=int(time_chunk_size),
+            resolved_time_chunk_size=resolved_chunk,
+            **{k: v for k, v in dict(chunk_meta).items()},
             runtime_sec=float(compute_sec),
             io_sec=float(io_sec),
             runtime_total_sec=float(compute_sec + io_sec),
@@ -1826,6 +1987,8 @@ def _run_strategy_assist_variants(
         if truth_targets_by_orbit is not None:
             if target_codes is None or target_times_utc is None:
                 raise ValueError("truth_targets_by_orbit requires target_codes and target_times_utc")
+            resolved_chunk = None
+            chunk_meta = {}
 
             variants_all: VariantOrbits | None = None
             total_rows = 0
@@ -1891,6 +2054,10 @@ def _run_strategy_assist_variants(
             )
             compute_sec += time.perf_counter() - t_compute0
             n_var = int(len(variants))
+            resolved_chunk, chunk_meta = _resolve_time_chunk_size_from_ram_budget(
+                n_orbits=int(len(variants)),
+                n_targets=int(len(target_observers_utc)),
+            )
 
             if bool(write_variants_orbits):
                 t_io0 = time.perf_counter()
@@ -1911,6 +2078,8 @@ def _run_strategy_assist_variants(
             io_sec += float(io2_sec)
     except Exception as e:  # noqa: BLE001
         err = f"{type(e).__name__}: {e}"
+        resolved_chunk = None
+        chunk_meta = {}
 
     _write_strategy_meta(
         strat_dir,
@@ -1923,6 +2092,8 @@ def _run_strategy_assist_variants(
             n_window_centers=int(len(windows)),
             n_rows=n_rows,
             time_chunk_size=int(time_chunk_size),
+            resolved_time_chunk_size=resolved_chunk,
+            **{k: v for k, v in dict(chunk_meta).items()},
             layout_note=(
                 "Store VariantOrbits and Ephemeris separately. "
                 "Default: each ephemeris part is (variants × time_chunk). "
@@ -2062,12 +2233,14 @@ def run_stage2_propagation_bench(
         target_codes = target_codes.slice(0, n)
         target_times_utc = target_times_utc[:n]
 
-    # Default: disable time chunking (single batch over all targets). Chunking can be
-    # re-enabled by passing a positive time_chunk_size if memory becomes a problem.
-    if int(time_chunk_size) <= 0:
-        time_chunk_size = int(len(target_times_utc))
-    else:
-        time_chunk_size = int(min(int(time_chunk_size), int(len(target_times_utc))))
+    # `time_chunk_size` is treated as a memory guard, not a performance knob:
+    # - <0 => disable chunking (one large batch over all targets)
+    # -  0 => auto (pick the largest safe chunk based on ephemeris output row bounds)
+    # - >0 => explicit target batch size
+    #
+    # The actual chunk size can depend on the number of (variant) orbits in a given strategy,
+    # so we pass this through and let the chunked writers resolve it per call.
+    time_chunk_size = int(time_chunk_size)
 
     # Use the provided orbits parquet path (do not silently replace it with a subset default).
     # This lets callers run controlled samples (e.g., 20 truth-matched orbits) for benchmarking.
@@ -2422,8 +2595,8 @@ def main() -> None:
         type=int,
         default=0,
         help=(
-            "Chunk size over (obscode,time) targets (default: 0 disables chunking; run all targets in one batch). "
-            "Use a positive value only if memory becomes a problem."
+            "Deprecated/ignored: time chunks are now RAM-budget driven. "
+            "This flag is accepted for backwards compatibility but does not affect chunking."
         ),
     )
     p.add_argument(

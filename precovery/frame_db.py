@@ -184,6 +184,15 @@ class FrameIndex:
                 """
             )
         )
+        # Additive + safe: supports fast distinct-target enumeration at scale.
+        self.dbconn.execute(
+            sq.text(
+                """
+                CREATE INDEX IF NOT EXISTS frames_exposure_mjd_mid_obscode_idx
+                ON frames(exposure_mjd_mid, obscode);
+                """
+            )
+        )
         self.dbconn.commit()
         # Refresh reflected table handles if we were opened in read mode and reflected already.
         try:
@@ -226,61 +235,57 @@ class FrameIndex:
         datasets: Optional[set[str]] = None,
     ) -> WindowCenters:
         """Return the midpoint and obscode of all time windows with data in them."""
+        # Fast path (experiment-proven): compute distinct (obscode, window_id) pairs
+        # in SQLite, rather than streaming all frames and uniquing in Python.
+        import sqlite3
 
-        # Build base query with minimal columns
-        query = sq.select(self.frames.c.obscode, self.frames.c.exposure_mjd_mid,).where(
-            (self.frames.c.exposure_mjd_mid < end_mjd)
-            & (self.frames.c.exposure_mjd_mid >= start_mjd)
-        )
+        # Extract on-disk DB path from SQLAlchemy URI.
+        db_path = str(self.db_uri).replace("sqlite:///", "").split("?")[0]
+        conn = sqlite3.connect(db_path)
+        try:
+            # Note: we do not create indices here because this method is used in read-only mode.
+            # Indices are created in `migrate()` and `_create_tables()`.
+            q = """
+            SELECT obscode,
+                   CAST(((exposure_mjd_mid - ?) / ?) AS INTEGER) AS window_id
+            FROM frames
+            WHERE exposure_mjd_mid >= ?
+              AND exposure_mjd_mid < ?
+            """
+            params: list[object] = [float(start_mjd), float(window_size_days), float(start_mjd), float(end_mjd)]
+            if datasets is not None and len(datasets) > 0:
+                ds = sorted({str(x).strip() for x in datasets if str(x).strip()})
+                if ds:
+                    qs = ",".join(["?"] * len(ds))
+                    q += f" AND dataset_id IN ({qs})\n"
+                    params.extend(ds)
+            q += """
+            GROUP BY obscode, window_id
+            ORDER BY window_id ASC, obscode ASC
+            """
+            cur = conn.execute(q, params)
 
-        if datasets is not None:
-            query = query.where(self.frames.c.dataset_id.in_(list(datasets)))
+            obscodes: list[str] = []
+            centers: list[float] = []
+            while True:
+                rows = cur.fetchmany(100000)
+                if not rows:
+                    break
+                for code, wid in rows:
+                    obscodes.append(str(code))
+                    w = int(wid)
+                    centers.append(float(start_mjd) + (float(w) + 0.5) * float(window_size_days))
+        finally:
+            conn.close()
 
-        # Execute query and fetch results in chunks
-        chunk_size = 100000
-        obscodes: List[str] = []
-        mjds: List[float] = []
-        result = self.dbconn.execution_options(stream_results=True).execute(query)
-
-        while True:
-            chunk: Sequence[Row[Tuple[str, float]]] = result.fetchmany(chunk_size)
-            if not chunk:
-                break
-            # Unzip the chunk directly into the lists
-            chunk_obscodes, chunk_mjds = zip(*chunk)
-            obscodes.extend(chunk_obscodes)
-            mjds.extend(chunk_mjds)
-
-        if not mjds:  # or `if not mjds:` - they'll have the same length
+        if not centers:
             return WindowCenters.empty()
 
-        # Process results using PyArrow for better performance
-        mjds_arr = pa.array(mjds)
-        window_ids = pc.floor(
-            pc.divide(
-                pc.subtract(mjds_arr, pa.scalar(start_mjd)), pa.scalar(window_size_days)
-            )
-        )
-
-        # Group by obscode and window_id using PyArrow
-        unique_pairs = set((obs, wid.as_py()) for obs, wid in zip(obscodes, window_ids))
-
-        if not unique_pairs:
-            return WindowCenters.empty()
-
-        final_obscodes, final_window_ids = zip(*unique_pairs)
-
-        # Calculate window centers
-        window_starts = [start_mjd + wid * window_size_days for wid in final_window_ids]
-        window_center_mjds = [ws + window_size_days / 2 for ws in window_starts]
-
-        # Return as WindowCenters
-        window_centers: WindowCenters = WindowCenters.from_kwargs(
-            obscode=final_obscodes,
-            time=Timestamp.from_mjd(window_center_mjds, scale="utc"),
-            window_size_days=pa.repeat(window_size_days, len(window_center_mjds)),
+        return WindowCenters.from_kwargs(
+            obscode=obscodes,
+            time=Timestamp.from_mjd(pa.array(centers, type=pa.float64()), scale="utc"),
+            window_size_days=pa.repeat(int(window_size_days), len(centers)),
         ).sort_by(["time.days", "time.nanos"])
-        return window_centers
 
     def propagation_targets(
         self,
@@ -653,6 +658,8 @@ class FrameIndex:
             sq.Column("data_length", sq.Integer, nullable=False),
             # Create index on midpoint mjd, healpixel, obscode
             sq.Index("fast_query", "exposure_mjd_mid", "healpixel", "obscode"),
+            # Supports fast distinct-target enumeration.
+            sq.Index("frames_exposure_mjd_mid_obscode_idx", "exposure_mjd_mid", "obscode"),
             # Add the window centers index
             sq.Index("window_centers_idx", "exposure_mjd_mid", "dataset_id", "obscode"),
         )

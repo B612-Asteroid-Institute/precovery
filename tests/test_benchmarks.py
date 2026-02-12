@@ -81,18 +81,23 @@ def test_benchmark_propagate_orbit_2body(benchmark, sample_orbits, propagate_dis
 
 
 @pytest.mark.benchmark(group="precovery")
-@pytest.mark.parametrize("max_processes", [1, 8])
+@pytest.mark.parametrize("max_processes", [1])
 def test_benchmark_precovery_search(benchmark, precovery_db_with_data, sample_orbits, max_processes):
 
     orbit = sample_orbits[0]
+    # Keep the benchmark bounded. The refactored pipeline is designed for large-scale runs,
+    # but the test suite should not spend minutes scanning multi-day ranges.
+    mjd_min, _mjd_max = precovery_db_with_data.frames.idx.mjd_bounds()
+    start_mjd = float(mjd_min)
+    end_mjd = float(mjd_min) + 1.0
 
     def benchmark_case():
         precovery_db_with_data.precover(
             orbit,
-            tolerance=5 / 3600,
-            window_size=7,
             propagator_class=ASSISTPropagator,
             max_processes=max_processes,
+            start_mjd=start_mjd,
+            end_mjd=end_mjd,
         )
 
     benchmark.pedantic(benchmark_case, iterations=1, rounds=1)

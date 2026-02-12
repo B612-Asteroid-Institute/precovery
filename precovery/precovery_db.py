@@ -1260,6 +1260,46 @@ class PrecoveryDatabase:
                         f"Failed to read limiting magnitudes parquet cache file: {e}"
                     )
 
+    def _refresh_limiting_magnitudes_cache_if_needed(self) -> None:
+        """
+        Refresh the limiting magnitudes cache only if the parquet file changed on disk.
+
+        This keeps tests (which may write the parquet after DB creation) correct, without
+        imposing repeated I/O/Arrow parsing overhead on the production hot path.
+        """
+        parq_name = getattr(self.config, "limiting_magnitudes_parquet_file", None)
+        if not parq_name:
+            return
+        parq_path = os.path.join(self.directory, parq_name)
+        try:
+            mtime = os.path.getmtime(parq_path)
+        except OSError:
+            return
+
+        last = getattr(self, "_limit_mags_cache_mtime", None)
+        if last is not None and float(last) == float(mtime):
+            return
+        self._load_limiting_magnitudes_cache()
+        self._limit_mags_cache_mtime = float(mtime)
+
+    def _refresh_config_if_needed(self) -> None:
+        """
+        Refresh config.json only if it changed on disk.
+
+        This avoids per-call JSON parse overhead in the common case, while still supporting
+        tests/workflows that modify config.json after DB creation.
+        """
+        cfg_path = os.path.join(self.directory, "config.json")
+        try:
+            mtime = os.path.getmtime(cfg_path)
+        except OSError:
+            return
+        last = getattr(self, "_config_mtime", None)
+        if last is not None and float(last) == float(mtime):
+            return
+        self.config = Config.from_json(cfg_path)
+        self._config_mtime = float(mtime)
+
     @classmethod
     def from_dir(
         cls,
@@ -1341,10 +1381,12 @@ class PrecoveryDatabase:
         covariance_polygon_vertices: int = 32,
         covariance_mc_num_samples: int = 64,
         covariance_mc_seed: int = 0,
+        *,
+        propagation_strategy: str = "assist_window_then_2body_variants:sigma_points",
+        target_chunk_size: int = 10_000,
     ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
         """
-        Find observations which match orbit in the database. Observations are
-        searched in descending order by mjd.
+        Find observations which match orbit in the database.
 
         orbit: The orbit to match.
 
@@ -1361,132 +1403,38 @@ class PrecoveryDatabase:
         Tuple[PrecoveryCandidates, FrameCandidates]
             Precovery candidate observations and frame candidates.
         """
-        # basically:
-        """
-        find all windows between start and end of given size
-        for each window:
-            propagate to window center
-            for each unique epoch,obscode in window:
-                propagate to epoch
-                find frames which match healpix of propagation
-                for each matching frame
-                    find matching observations
-                    for each matching observation
-                        yield match
-        """
+        # NOTE: This method is now a thin wrapper around the performance-first pipeline
+        # in `precovery.search`. We keep legacy parameters in the signature, but most of
+        # them are intentionally ignored (no backwards compatibility guarantees).
+        if len(orbit) != 1:
+            raise ValueError("PrecoveryDatabase.precover currently supports exactly one orbit.")
 
-        if propagator_class is None:
-            raise ValueError("A propagator must be provided to run precovery")
-
-        assert len(orbit) == 1, "Use precovery_many for multiple orbits"
-
-        orbit_id = orbit.orbit_id[0].as_py()
-
-        # Normalize the orbit timescale to utc for comparisons
-        orbit = orbit.set_column(
-            "coordinates.time", orbit.coordinates.time.rescale("utc")
-        )
+        # Refresh config only if changed on disk.
+        try:
+            self._refresh_config_if_needed()
+        except Exception:
+            pass
 
         if datasets is not None:
             self._warn_for_missing_datasets(datasets)
 
-        if start_mjd is None or end_mjd is None:
-            first, last = self.frames.idx.mjd_bounds(datasets=datasets)
-            if start_mjd is None:
-                start_mjd = first
-            if end_mjd is None:
-                end_mjd = last
+        # Normalize orbit timescale for consistent propagation behavior.
+        orbit = orbit.set_column("coordinates.time", orbit.coordinates.time.rescale("utc"))
 
-        logger.info(
-            f"precovering orbit {orbit_id} from {start_mjd} to {end_mjd}, window={window_size}, datasets={datasets or 'all'}"
-        )
+        from precovery.search.search import precover_orbit
 
-        windows = self.frames.idx.window_centers(
-            start_mjd, end_mjd, window_size, datasets=datasets
-        )
-        logger.info(f"Searching {len(windows)} windows")
-        if len(windows) == 0:
-            return PrecoveryCandidates.empty(), FrameCandidates.empty()
-
-        # Runtime configuration overrides that must be respected inside `check_window`, which
-        # re-opens the DB from disk.
-        #
-        # Only pass overrides that are explicitly set on this instance; otherwise we can
-        # clobber values coming from config.json (e.g., tests that edit config.json after
-        # creating the DB).
-        config_overrides: dict[str, Any] = {}
-
-        faint_margin = getattr(self.config, "faint_frame_skip_margin_mag", 0.0)
-        try:
-            faint_margin_f = float(faint_margin) if faint_margin is not None else 0.0
-        except Exception:
-            faint_margin_f = 0.0
-        if faint_margin_f != 0.0:
-            config_overrides["faint_frame_skip_margin_mag"] = faint_margin_f
-        max_faint = getattr(self.config, "max_mag_residual_fainter_mag", None)
-        if max_faint is not None:
-            config_overrides["max_mag_residual_fainter_mag"] = float(max_faint)
-
-        max_bright = getattr(self.config, "max_mag_residual_brighter_mag", None)
-        if max_bright is not None:
-            config_overrides["max_mag_residual_brighter_mag"] = float(max_bright)
-
-        # Search all windows across all observatory codes in one pass so parallelism can
-        # be applied across obscodes (not serialized per-obscode).
-        candidates, frame_candidates = self._check_windows(
-            windows,
-            orbit,
-            tolerance,
-            propagator_class,
+        return precover_orbit(
+            db=self,
+            orbit=orbit,
+            start_mjd=start_mjd,
+            end_mjd=end_mjd,
             datasets=datasets,
-            max_processes=max_processes,
-            match_method=match_method,
-            n_sigma=n_sigma,
-            covariance_polygon_vertices=covariance_polygon_vertices,
-            covariance_mc_num_samples=covariance_mc_num_samples,
-            covariance_mc_seed=covariance_mc_seed,
-            config_overrides=config_overrides or None,
+            window_size_days=int(window_size),
+            propagation_strategy=str(propagation_strategy),
+            n_sigma=float(n_sigma),
+            target_chunk_size=int(target_chunk_size),
+            max_processes=(1 if max_processes is None else int(max_processes)),
         )
-
-        # convert these to our new output formats
-        # Predicted magnitudes / mag_residual are computed during the search (in `_check_frames()`)
-        # to avoid recomputation and to support rejection labeling.
-
-        # Null out the temporary aberrated_coordinates column before returning
-        if len(candidates) > 0:
-            candidates = candidates.set_column(
-                "aberrated_coordinates",
-                CartesianCoordinates.from_kwargs(
-                    x=pa.nulls(len(candidates), type=pa.float64()),
-                    y=pa.nulls(len(candidates), type=pa.float64()),
-                    z=pa.nulls(len(candidates), type=pa.float64()),
-                    vx=pa.nulls(len(candidates), type=pa.float64()),
-                    vy=pa.nulls(len(candidates), type=pa.float64()),
-                    vz=pa.nulls(len(candidates), type=pa.float64()),
-                    time=candidates.time,
-                    origin=Origin.from_kwargs(code=pa.repeat("SUN", len(candidates))),
-                    frame="ecliptic",
-                ),
-            )
-        if len(frame_candidates) > 0:
-            frame_candidates = frame_candidates.set_column(
-                "aberrated_coordinates",
-                CartesianCoordinates.from_kwargs(
-                    x=pa.nulls(len(frame_candidates), type=pa.float64()),
-                    y=pa.nulls(len(frame_candidates), type=pa.float64()),
-                    z=pa.nulls(len(frame_candidates), type=pa.float64()),
-                    vx=pa.nulls(len(frame_candidates), type=pa.float64()),
-                    vy=pa.nulls(len(frame_candidates), type=pa.float64()),
-                    vz=pa.nulls(len(frame_candidates), type=pa.float64()),
-                    time=frame_candidates.exposure_time_mid,
-                    origin=Origin.from_kwargs(
-                        code=pa.repeat("SUN", len(frame_candidates))
-                    ),
-                    frame="ecliptic",
-                ),
-            )
-
-        return candidates, frame_candidates
 
     # mypy helper: `_attach_magnitudes()` is implemented once, but it preserves the concrete
     # table type (PrecoveryCandidates in -> PrecoveryCandidates out; FrameCandidates in ->

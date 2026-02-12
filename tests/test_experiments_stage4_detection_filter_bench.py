@@ -155,8 +155,16 @@ def test_stage4_smoke_writes_parquets(tmp_path: Path, precovery_db_with_data) ->
                 "matched": pa.array([True], pa.bool_()),
                 "designation": pa.array([designation], pa.large_string()),
                 "obscode": pa.array([str(obscode)], pa.large_string()),
-                "match_time_mjd_utc": pa.array([float(mjd_mid)], pa.float64()),
-                "match_observation_id": pa.array([obsid_s], pa.large_string()),
+                    # Frame-key fields used by Stage 4 optional truth-frame speedups.
+                    "match_dataset_id": pa.array([str(dataset_id)], pa.large_string()),
+                    "match_exposure_id": pa.array([str(exposure_id)], pa.large_string()),
+                    "healpixel": pa.array([int(healpixel)], pa.int64()),
+                    # Stage 4 harness expects truth_* columns (we evaluate recall by time/sky position,
+                    # not by observation_id).
+                    "truth_obsid": pa.array([obsid_s], pa.large_string()),
+                    "truth_time_mjd_utc": pa.array([float(mjd_mid)], pa.float64()),
+                    "truth_ra_deg": pa.array([float(ra0)], pa.float64()),
+                    "truth_dec_deg": pa.array([float(dec0)], pa.float64()),
             }
         ),
         artifacts / "truth_precovery_crossmatch.parquet",
@@ -217,6 +225,20 @@ def test_stage4_smoke_writes_parquets(tmp_path: Path, precovery_db_with_data) ->
             / "part-000000.parquet"
         )
     )
+
+    # Minimal Stage 3 selected_keys artifacts (required by Stage 4 harness).
+    stage3_run_dir = subset_dir / "artifacts" / "stage3" / stage2_run_dir.name
+    keys_tbl = pa.table(
+        {
+            "orbit_id": pa.array([designation], pa.large_string()),
+            "target_idx": pa.array([0], pa.int64()),
+            "healpixel": pa.array([int(healpixel)], pa.int64()),
+        }
+    )
+    for footprint in ["point", "cov_disc", "cov_mc", "cov_polygon_moc"]:
+        p = stage3_run_dir / "selected_keys" / "2body_with_covariance" / footprint
+        p.mkdir(parents=True, exist_ok=True)
+        pq.write_table(keys_tbl, p / "selected_keys_unique.parquet")
 
     run_dir = run_stage4_detection_filter_bench(
         subset_dir=subset_dir,
