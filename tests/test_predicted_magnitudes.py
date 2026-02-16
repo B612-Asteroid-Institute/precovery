@@ -1,5 +1,4 @@
 import pyarrow.compute as pc
-from adam_assist import ASSISTPropagator
 from adam_core.orbits.orbits import PhysicalParameters
 
 from precovery.healpix_geom import radec_to_healpixel
@@ -28,7 +27,7 @@ def test_pred_mag_populated_for_hits(precovery_db, sample_orbits):
         "ds", bundle_into_frames(object_observations + extra_observations)
     )
 
-    matches, misses = precovery_db.precover(orbit, propagator_class=ASSISTPropagator)
+    matches, misses = precovery_db.precover(orbit)
     assert len(matches) == 3
     assert len(misses) == 0
 
@@ -70,9 +69,7 @@ def test_pred_mag_populated_for_misses(precovery_db, sample_orbits):
     precovery_db.frames.add_dataset("ds")
     precovery_db.frames.add_frames("ds", bundle_into_frames(obs))
 
-    matches, misses = precovery_db.precover(
-        orbit, tolerance=1.0 * ARCSEC, propagator_class=ASSISTPropagator
-    )
+    matches, misses = precovery_db.precover(orbit, tolerance=1.0 * ARCSEC)
     assert len(matches) == 0
     assert len(misses) > 0
     assert pc.all(pc.is_finite(misses.pred_mag)).as_py()
@@ -112,7 +109,6 @@ def test_faint_frame_skip_avoids_observation_fetch(
 
     matches, misses = db.precover(
         orbit,
-        propagator_class=ASSISTPropagator,
         start_mjd=mjd - 1,
         end_mjd=mjd + 1,
     )
@@ -149,7 +145,6 @@ def test_faint_frame_skip_respects_runtime_margin_override(tmp_path, sample_orbi
 
     matches, misses = db.precover(
         orbit,
-        propagator_class=ASSISTPropagator,
         start_mjd=mjd - 1,
         end_mjd=mjd + 1,
         max_processes=1,

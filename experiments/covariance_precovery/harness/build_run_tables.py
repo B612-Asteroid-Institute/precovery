@@ -337,11 +337,25 @@ def build_run_tables(
         vk = None if pd.isna(r["variant_kind"]) else str(r["variant_kind"])
         fp = str(r["footprint"])
         strat_key = strat if vk is None else f"{strat}:{vk}"
-        p = stage3_run_dir / "selected_keys" / strat_key / fp / "selected_keys_unique.parquet"
-        if not p.exists():
-            # Incomplete Stage3 outputs: treat as empty selection for this combo.
-            continue
-        sk = pq.read_table(p, columns=["orbit_id", "target_idx", "healpixel"]).to_pandas()
+        d = stage3_run_dir / "selected_keys" / strat_key / fp
+        p_unique = d / "selected_keys_unique.parquet"
+        files: list[Path]
+        parts_dir = d / "parts"
+        if parts_dir.exists():
+            files = sorted([x for x in parts_dir.glob("*.parquet") if x.is_file()])
+        else:
+            files = []
+        if not files:
+            if p_unique.exists():
+                files = [p_unique]
+            else:
+                # Incomplete Stage3 outputs: treat as empty selection for this combo.
+                continue
+
+        sk_frames: list[pd.DataFrame] = []
+        for p in files:
+            sk_frames.append(pq.read_table(p, columns=["orbit_id", "target_idx", "healpixel"]).to_pandas())
+        sk = pd.concat(sk_frames, ignore_index=True) if sk_frames else pd.DataFrame(columns=["orbit_id", "target_idx", "healpixel"])
         sk["strategy"] = strat
         sk["variant_kind"] = vk
         sk["footprint"] = fp

@@ -94,7 +94,6 @@ def test_benchmark_precovery_search(benchmark, precovery_db_with_data, sample_or
     def benchmark_case():
         precovery_db_with_data.precover(
             orbit,
-            propagator_class=ASSISTPropagator,
             max_processes=max_processes,
             start_mjd=start_mjd,
             end_mjd=end_mjd,

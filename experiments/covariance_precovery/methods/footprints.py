@@ -6,6 +6,14 @@ from typing import Literal, Protocol
 import healpy as hp
 import numpy as np
 
+from precovery.search.geometry import (
+    ellipse_boundary_vertices_lonlat_deg_from_cov as _ellipse_boundary_vertices_lonlat_deg_from_cov_shared,
+    healpix_order_from_nside as _healpix_order_from_nside_shared,
+    local_tangent_basis as _local_tangent_basis_shared,
+    normalize_unit as _normalize_unit_shared,
+    safe_sqrtm_2x2 as _safe_sqrtm_2x2_shared,
+)
+
 
 def _wrap_delta_lon_deg(lon_deg: np.ndarray, lon0_deg: float) -> np.ndarray:
     """
@@ -27,33 +35,18 @@ def _tangent_xy_deg(lon_deg: np.ndarray, lat_deg: np.ndarray, lon0_deg: float, l
 
 
 def _safe_sqrtm_2x2(c: np.ndarray) -> np.ndarray:
-    c = 0.5 * (c + c.T)
-    w, v = np.linalg.eigh(c)
-    w = np.maximum(w, 0.0)
-    return v @ np.diag(np.sqrt(w)) @ v.T
+    return _safe_sqrtm_2x2_shared(np.asarray(c, dtype=np.float64))
 
 
 def _normalize_unit(v: np.ndarray) -> np.ndarray:
-    n = np.linalg.norm(v, axis=-1, keepdims=True)
-    n = np.where(n > 0, n, 1.0)
-    return v / n
+    return _normalize_unit_shared(np.asarray(v, dtype=np.float64))
 
 
 def _local_tangent_basis(lon0_deg: float, lat0_deg: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Return (center, east, north) unit vectors at (lon0, lat0) on the unit sphere.
     """
-    c = np.asarray(hp.ang2vec(float(lon0_deg), float(lat0_deg), lonlat=True), dtype=np.float64)
-    c = _normalize_unit(c)
-    z = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-    e = np.cross(z, c)
-    if float(np.linalg.norm(e)) < 1e-12:
-        # Near the poles, pick a different reference axis.
-        x = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-        e = np.cross(x, c)
-    e = _normalize_unit(e)
-    n = _normalize_unit(np.cross(c, e))
-    return c, e, n
+    return _local_tangent_basis_shared(float(lon0_deg), float(lat0_deg))
 
 
 def _ellipse_boundary_lonlat_deg_from_cov(
@@ -71,32 +64,13 @@ def _ellipse_boundary_lonlat_deg_from_cov(
     to the unit sphere using the exponential map. This avoids longitude wrap issues and
     guarantees lat stays within [-90, 90].
     """
-    V = max(int(num_vertices), 8)
-    angles = np.linspace(0.0, 2.0 * np.pi, V, endpoint=False)
-    unit = np.stack([np.cos(angles), np.sin(angles)], axis=1)  # (V, 2)
-
-    cos_lat = float(np.cos(np.deg2rad(lat0_deg)))
-    cos_lat = cos_lat if np.isfinite(cos_lat) and abs(cos_lat) > 1e-12 else 1e-12
-    A = np.array([[cos_lat, 0.0], [0.0, 1.0]], dtype=np.float64)
-    cov_xy = A @ cov_ll_deg2 @ A.T
-    S = _safe_sqrtm_2x2(cov_xy)
-    pts_xy_deg = (unit @ S.T) * float(n_sigma)  # (V,2) in tangent-plane degrees
-
-    # Exponential map from tangent plane to sphere.
-    c, e, n = _local_tangent_basis(float(lon0_deg), float(lat0_deg))
-    d = (np.deg2rad(pts_xy_deg[:, 0])[:, None] * e[None, :]) + (
-        np.deg2rad(pts_xy_deg[:, 1])[:, None] * n[None, :]
-    )  # (V,3) in radians along tangent basis
-    r = np.linalg.norm(d, axis=1)
-    r_safe = np.where(r > 0, r, 1.0)
-    dir_u = d / r_safe[:, None]
-    v = (np.cos(r)[:, None] * c[None, :]) + (np.sin(r)[:, None] * dir_u)
-    v = _normalize_unit(v)
-
-    lon_poly, lat_poly = hp.vec2ang(v, lonlat=True)
-    lon_poly = np.asarray(lon_poly, dtype=np.float64) % 360.0
-    lat_poly = np.asarray(lat_poly, dtype=np.float64)
-    return lon_poly, lat_poly
+    return _ellipse_boundary_vertices_lonlat_deg_from_cov_shared(
+        lon0_deg=float(lon0_deg),
+        lat0_deg=float(lat0_deg),
+        cov_ll_deg2=np.asarray(cov_ll_deg2, dtype=np.float64),
+        n_sigma=float(n_sigma),
+        num_vertices=int(num_vertices),
+    )
 
 
 def ellipse_boundary_vertices_lonlat_deg_from_cov(
@@ -133,12 +107,7 @@ def _healpix_order_from_nside(nside: int) -> int:
     """
     MOC/HEALPix "order" is log2(nside) and requires power-of-two nside.
     """
-    n = int(nside)
-    if n <= 0:
-        raise ValueError("nside must be > 0")
-    if (n & (n - 1)) != 0:
-        raise ValueError(f"nside must be a power of two, got {nside}")
-    return int(np.log2(n))
+    return _healpix_order_from_nside_shared(int(nside))
 
 
 def _moc_pixels_from_polygon(

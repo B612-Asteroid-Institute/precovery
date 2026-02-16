@@ -42,7 +42,11 @@ _PROGRESS_LOG_EVERY_SEC = 30.0
 #     n_orbits * n_targets_in_chunk <= max_rows_fit
 # where:
 #     max_rows_fit = floor(max_ephem_usage_bytes / EPHEM_EFFECTIVE_BYTES_PER_ROW)
-_EPHEM_RAM_BUDGET_FRAC = 0.50
+# NOTE: In practice, the effective peak memory per ephemeris row in the ASSIST variant
+# ephemeris path can be substantially higher than `_EPHEM_EFFECTIVE_BYTES_PER_ROW`
+# due to intermediate arrays and per-column overhead. We keep the bytes/row constant
+# fixed (as requested) and tune the budget fraction to avoid spill/thrash.
+_EPHEM_RAM_BUDGET_FRAC = 0.10
 # Fixed effective bytes/row; intentionally NOT calibrated dynamically.
 _EPHEM_EFFECTIVE_BYTES_PER_ROW = 125.0
 

@@ -8,6 +8,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import quivr as qv
 from adam_assist import ASSISTPropagator
+from adam_core.coordinates.cartesian import CartesianCoordinates
 from adam_core.dynamics.ephemeris import generate_ephemeris_2body
 from adam_core.dynamics.propagation import propagate_2body
 from adam_core.observers import Observers
@@ -17,6 +18,7 @@ from adam_core.orbits.variants import VariantOrbits
 from adam_core.time import Timestamp
 
 from .reconstruction import reconstruct_cov_ll_from_sigma_point_cloud
+from .covariance import attach_cov_ll_to_ephemeris
 
 
 PropagationStrategy = Literal[
@@ -54,15 +56,36 @@ def _sigma_point_variants_at_epoch(*, orbit_at_epoch: Orbits) -> tuple[Orbits, n
         coordinates=variants.coordinates,
         physical_parameters=variants.physical_parameters,
     )
-    # Defensive: drop any non-finite variant states (rare but possible for pathological covariances).
+    # Defensive: keep variant count constant for JAX shape stability.
+    #
+    # If some variant states are non-finite (pathological covariances), we replace those
+    # states with the nominal orbit state and set their covariance weight to zero. This
+    # preserves K while preventing NaNs/Infs from poisoning propagation or covariance
+    # reconstruction.
     vals = v_orbits.coordinates.values
     finite = np.isfinite(vals).all(axis=1)
     if not bool(np.all(finite)):
-        idx = np.nonzero(finite)[0].tolist()
-        if not idx:
-            raise ValueError("Sigma-point variants produced no finite states.")
-        v_orbits = v_orbits.take(idx)
-        w_cov = w_cov[np.nonzero(finite)[0]]
+        nominal = orbit_at_epoch.coordinates.values[0]
+        vals2 = np.asarray(vals, dtype=np.float64).copy()
+        bad = np.nonzero(~finite)[0]
+        vals2[bad, :] = nominal[None, :]
+        # Rebuild coordinates with sanitized values (CartesianCoordinates.values is a property).
+        coords = v_orbits.coordinates
+        coords2 = CartesianCoordinates.from_kwargs(
+            x=vals2[:, 0],
+            y=vals2[:, 1],
+            z=vals2[:, 2],
+            vx=vals2[:, 3],
+            vy=vals2[:, 4],
+            vz=vals2[:, 5],
+            time=coords.time,
+            covariance=coords.covariance,
+            origin=coords.origin,
+            frame=coords.frame,
+        )
+        v_orbits = v_orbits.set_column("coordinates", coords2)
+        w_cov = np.asarray(w_cov, dtype=np.float64).copy()
+        w_cov[bad] = 0.0
     return v_orbits, w_cov
 
 
@@ -176,6 +199,7 @@ def predict_targets(
         cov_ll = reconstruct_cov_ll_from_sigma_point_cloud(
             lon0_deg=lon0, lat0_deg=lat0, lon_samples_deg=lon_s, lat_samples_deg=lat_s, weights_cov=w_cov
         )
+        mean_ephem = attach_cov_ll_to_ephemeris(ephem=mean_ephem, cov_ll_deg2=cov_ll)
         return TargetPrediction(ephem=mean_ephem, cov_ll_deg2=cov_ll)
 
     # Default: assist_window_then_2body_variants:sigma_points
@@ -248,6 +272,7 @@ def predict_targets(
             cov_ll = reconstruct_cov_ll_from_sigma_point_cloud(
                 lon0_deg=lon0, lat0_deg=lat0, lon_samples_deg=lon_s, lat_samples_deg=lat_s, weights_cov=w_cov
             )
+            ephem_nom = attach_cov_ll_to_ephemeris(ephem=ephem_nom, cov_ll_deg2=cov_ll)
 
             idx_parts.append(np.asarray(idx_chunk, dtype=np.int64))
             out_ephem_parts.append(ephem_nom)
@@ -307,6 +332,7 @@ def predict_observations_in_frame(
         cov_ll = reconstruct_cov_ll_from_sigma_point_cloud(
             lon0_deg=lon0, lat0_deg=lat0, lon_samples_deg=lon_s, lat_samples_deg=lat_s, weights_cov=w_cov
         )
+        mean_ephem = attach_cov_ll_to_ephemeris(ephem=mean_ephem, cov_ll_deg2=cov_ll)
         return TargetPrediction(ephem=mean_ephem, cov_ll_deg2=cov_ll)
 
     # Window-then-2body variants, but for a single frame we choose reference epoch = mean time.
@@ -334,5 +360,6 @@ def predict_observations_in_frame(
     cov_ll = reconstruct_cov_ll_from_sigma_point_cloud(
         lon0_deg=lon0, lat0_deg=lat0, lon_samples_deg=lon_s, lat_samples_deg=lat_s, weights_cov=w_cov
     )
+    eph_nom = attach_cov_ll_to_ephemeris(ephem=eph_nom, cov_ll_deg2=cov_ll)
     return TargetPrediction(ephem=eph_nom, cov_ll_deg2=cov_ll)
 

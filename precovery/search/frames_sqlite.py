@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from array import array
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +33,9 @@ def fetch_frames_for_target_triples_sqlite(
         raise ValueError("Triple arrays must have the same length.")
 
     ds = sorted({str(x).strip() for x in (datasets or set()) if str(x).strip()})
+    n = int(len(obscodes))
+    mjd = np.asarray(exposure_mjd_mid, dtype=np.float64)
+    hpix = np.asarray(healpixels, dtype=np.int64)
 
     conn = sqlite3.connect(str(index_db))
     try:
@@ -46,17 +50,17 @@ def fetch_frames_for_target_triples_sqlite(
             ") WITHOUT ROWID"
         )
 
-        rows = list(
-            zip(
-                (str(x) for x in obscodes),
-                (float(x) for x in np.asarray(exposure_mjd_mid, dtype=np.float64).tolist()),
-                (int(x) for x in np.asarray(healpixels, dtype=np.int64).tolist()),
+        insert_batch = 100_000
+        for start in range(0, n, int(insert_batch)):
+            stop = min(n, start + int(insert_batch))
+            rows = [
+                (str(obscodes[i]), float(mjd[i]), int(hpix[i]))
+                for i in range(int(start), int(stop))
+            ]
+            conn.executemany(
+                "INSERT OR IGNORE INTO tmp_targets(obscode, exposure_mjd_mid, healpixel) VALUES (?,?,?)",
+                rows,
             )
-        )
-        conn.executemany(
-            "INSERT OR IGNORE INTO tmp_targets(obscode, exposure_mjd_mid, healpixel) VALUES (?,?,?)",
-            rows,
-        )
 
         q = """
         SELECT
@@ -85,7 +89,51 @@ def fetch_frames_for_target_triples_sqlite(
             params.extend(ds)
 
         cur = conn.execute(q, params)
-        out = cur.fetchall()
+        # Stream results to reduce peak memory for large joins.
+        fetch_batch = 100_000
+        ids: list[object] = []
+        dataset_ids: list[object] = []
+        obscodes2: list[object] = []
+        exposure_ids: list[object] = []
+        filters: list[object] = []
+        exposure_mjd_starts = array("d")
+        exposure_mjd_mids = array("d")
+        exposure_durations = array("d")
+        hpix_out = array("q")
+        data_uris: list[object] = []
+        data_offsets = array("q")
+        data_lengths = array("q")
+
+        while True:
+            out = cur.fetchmany(int(fetch_batch))
+            if not out:
+                break
+            for (
+                id_i,
+                dataset_id_i,
+                obscode_i,
+                exposure_id_i,
+                filter_i,
+                mjd_start_i,
+                mjd_mid_i,
+                duration_i,
+                hp_i,
+                uri_i,
+                off_i,
+                len_i,
+            ) in out:
+                ids.append(id_i)
+                dataset_ids.append(dataset_id_i)
+                obscodes2.append(obscode_i)
+                exposure_ids.append(exposure_id_i)
+                filters.append(filter_i)
+                exposure_mjd_starts.append(float(mjd_start_i))
+                exposure_mjd_mids.append(float(mjd_mid_i))
+                exposure_durations.append(float(duration_i))
+                hpix_out.append(int(hp_i))
+                data_uris.append(uri_i)
+                data_offsets.append(int(off_i))
+                data_lengths.append(int(len_i))
     finally:
         try:
             conn.execute("DROP TABLE IF EXISTS tmp_targets")
@@ -93,23 +141,8 @@ def fetch_frames_for_target_triples_sqlite(
             pass
         conn.close()
 
-    if not out:
+    if not ids:
         return HealpixFrame.empty()
-
-    (
-        ids,
-        dataset_ids,
-        obscodes2,
-        exposure_ids,
-        filters,
-        exposure_mjd_starts,
-        exposure_mjd_mids,
-        exposure_durations,
-        hpix,
-        data_uris,
-        data_offsets,
-        data_lengths,
-    ) = zip(*out)
 
     return HealpixFrame.from_kwargs(
         id=ids,
@@ -120,7 +153,7 @@ def fetch_frames_for_target_triples_sqlite(
         exposure_mjd_start=exposure_mjd_starts,
         exposure_mjd_mid=exposure_mjd_mids,
         exposure_duration=exposure_durations,
-        healpixel=hpix,
+        healpixel=hpix_out,
         data_uri=data_uris,
         data_offset=data_offsets,
         data_length=data_lengths,

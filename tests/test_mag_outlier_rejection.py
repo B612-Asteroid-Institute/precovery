@@ -1,5 +1,4 @@
 import pyarrow.compute as pc
-from adam_assist import ASSISTPropagator
 from precovery.config import Config
 from precovery.precovery_db import PrecoveryDatabase
 from precovery.sourcecatalog import bundle_into_frames
@@ -31,7 +30,6 @@ def test_detection_mag_outlier_rejected(tmp_path, sample_orbits):
 
     matches, misses = db.precover(
         orbit,
-        propagator_class=ASSISTPropagator,
         start_mjd=mjd - 1,
         end_mjd=mjd + 1,
     )
@@ -64,7 +62,6 @@ def test_detection_mag_outlier_rejected_fainter(tmp_path, sample_orbits):
 
     matches, misses = db.precover(
         orbit,
-        propagator_class=ASSISTPropagator,
         start_mjd=mjd - 1,
         end_mjd=mjd + 1,
     )

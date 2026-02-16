@@ -1,70 +1,129 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import quivr as qv
+import time
 from adam_core.orbits import Orbits
-from adam_core.time import Timestamp
+from adam_core.coordinates.cartesian import CartesianCoordinates
+from adam_core.coordinates.origin import Origin
 
 from precovery.precovery_db import (
     REJECT_REASON_LIMITING_MAGNITUDE,
     REJECT_REASON_MAG_RESIDUAL,
     FrameCandidates,
     PrecoveryCandidates,
-    candidates_from_ephem,
 )
 
-from .detection_filter import innov_ellipse_keep_mask
 from .footprints import CovPolygonReconstructedMoc
 from .frames_sqlite import fetch_frames_for_pixels_sqlite
 from .propagation import (
     PropagationStrategy,
     TargetPrediction,
-    predict_observations_in_frame,
     predict_targets,
 )
 from .targets import enumerate_distinct_frame_time_targets_sqlite
 from .types import FrameTimeTargets, TargetPixels
+from .metrics import SearchAgg, SearchMetrics, metrics_row
+from .protocols import SearchDB
+from .stages import (
+    build_candidates_for_hits,
+    compute_faint_skip_mask,
+    frame_candidates_from_frames_and_ephem,
+    gate_frame_observations,
+    index_db_path,
+    load_observations_for_frames,
+    refresh_runtime_state,
+    align_frames_to_targets,
+)
 
-
-def _index_db_path(db) -> Path:
-    uri = db.frames.idx.db_uri
-    s = str(uri).replace("sqlite:///", "").split("?")[0]
-    return Path(s)
-
-
-def _arrow_lookup(needles: pa.Array, keys: pa.Array, values: pa.Array) -> pa.Array:
-    if len(keys) == 0:
-        return pa.nulls(len(needles), type=pa.float64())
-    idx = pc.fill_null(pc.index_in(needles, value_set=keys), -1)
-    valid = pc.greater_equal(idx, 0)
-    idx_safe = pc.cast(pc.if_else(valid, idx, 0), pa.int64())
-    out = pc.take(values, idx_safe)
-    return pc.if_else(valid, out, None)
-
-def _timestamp_key(days: pa.Array, nanos: pa.Array) -> pa.Array:
+def _process_targets_chunk_ray_worker(
+    *,
+    db_dir: str,
+    allow_version_mismatch: bool,
+    orbit: Orbits,
+    orbit_id: str,
+    targets: FrameTimeTargets,
+    t0: int,
+    t1: int,
+    tolerance: float | None,
+    start_mjd: float,
+    end_mjd: float,
+    datasets: set[str] | None,
+    window_size_days: int,
+    n_sigma: float,
+    propagation_max_processes: int | None,
+    want_per_target_metrics: bool,
+) -> tuple[PrecoveryCandidates, FrameCandidates, SearchAgg]:
     """
-    Build an int64 composite key for Timestamp alignment:
-      key = days*NANOS_IN_DAY + nanos
-
-    We use this because (at least) pyarrow does not support `index_in()` over struct keys.
+    Ray worker: open DB locally and process one target chunk end-to-end.
     """
-    nanos_in_day = pa.scalar(86_400_000_000_000, type=pa.int64())
-    return pc.add_checked(pc.multiply_checked(days, nanos_in_day), nanos)
+    import quivr as qv
 
+    from precovery.precovery_db import PrecoveryDatabase
+
+    db = PrecoveryDatabase.from_dir(
+        str(db_dir),
+        create=False,
+        mode="r",
+        allow_version_mismatch=bool(allow_version_mismatch),
+    )
+    refresh_runtime_state(db)
+
+    start = int(t0)
+    stop = int(t1)
+    targets_chunk = targets[slice(start, stop)]
+
+    limit_keys, limit_vals, faint_margin, max_faint, max_bright = _load_search_constants(db)
+    idx_db = index_db_path(db)
+
+    agg = SearchAgg()
+    if want_per_target_metrics:
+        agg.enable_per_target()
+
+    c_list, f_list = _process_targets_chunk(
+        db=db,
+        orbit=orbit,
+        orbit_id=str(orbit_id),
+        targets_chunk=targets_chunk,
+        tolerance=tolerance,
+        start_mjd=float(start_mjd),
+        end_mjd=float(end_mjd),
+        datasets=datasets,
+        window_size_days=int(window_size_days),
+        footprint=CovPolygonReconstructedMoc(
+            n_sigma=float(n_sigma),
+            polygon_vertices=int(DEFAULT_FOOTPRINT_POLYGON_VERTICES),
+        ),
+        n_sigma=float(n_sigma),
+        max_processes=propagation_max_processes,
+        limit_keys=limit_keys,
+        limit_vals=limit_vals,
+        faint_margin=float(faint_margin),
+        max_faint=max_faint,
+        max_bright=max_bright,
+        idx_db=idx_db,
+        metrics=agg,
+    )
+
+    c = qv.concatenate(c_list) if c_list else PrecoveryCandidates.empty()
+    f = qv.concatenate(f_list) if f_list else FrameCandidates.empty()
+    return PrecoveryCandidates.from_pyarrow(c.table), FrameCandidates.from_pyarrow(f.table), agg
+
+
+DEFAULT_PROPAGATION_STRATEGY: PropagationStrategy = "assist_window_then_2body_variants:sigma_points"
+DEFAULT_FOOTPRINT_POLYGON_VERTICES: int = 32
 
 def enumerate_targets(
-    *, db, start_mjd: float, end_mjd: float, datasets: set[str] | None
+    *, db: SearchDB, start_mjd: float, end_mjd: float, datasets: set[str] | None
 ) -> FrameTimeTargets:
     """
     Stage 1: enumerate distinct (obscode, exposure_mjd_mid) targets.
 
     Uses raw sqlite GROUP BY (experiment-proven hot path).
     """
-    idx_db = _index_db_path(db)
+    idx_db = index_db_path(db)
     codes, mjd_mid, times_utc = enumerate_distinct_frame_time_targets_sqlite(
         index_db=idx_db,
         start_mjd=float(start_mjd),
@@ -73,13 +132,13 @@ def enumerate_targets(
     )
     return FrameTimeTargets.from_kwargs(obscode=codes, exposure_mjd_mid=mjd_mid, time=times_utc)
 
-
 def targets_to_pixels(
     *,
     targets: FrameTimeTargets,
     pred: TargetPrediction,
     footprint: CovPolygonReconstructedMoc,
     nside: int,
+    metrics: SearchAgg | None = None,
 ) -> TargetPixels:
     """
     Stage 3: footprint → explode to (obscode, exposure_mjd_mid, healpixel) triples.
@@ -98,12 +157,29 @@ def targets_to_pixels(
     lat0 = pred.ephem.coordinates.lat.to_numpy(zero_copy_only=False).astype(np.float64)
 
     for i in range(int(len(pred.ephem))):
+        t_fp_one = time.perf_counter() if metrics is not None and metrics.per_target_rows is not None else None
         px = footprint.pixels_for_prediction(
             lon0_deg=float(lon0[i]),
             lat0_deg=float(lat0[i]),
             cov_ll_deg2=pred.cov_ll_deg2[i],
             nside=int(nside),
         )
+        if metrics is not None and metrics.per_target_rows is not None:
+            metrics.per_target_rows.append(
+                dict(
+                    obscode=str(targets.obscode[i].as_py()),
+                    exposure_mjd_mid=float(targets.exposure_mjd_mid[i].as_py()),
+                    target_row=int(i),
+                    n_predicted_pixels=int(px.size),
+                    n_frames_joined=0,
+                    n_frames_loaded=0,
+                    n_observations_loaded=0,
+                    n_accepted=0,
+                    footprint_sec=None if t_fp_one is None else float(time.perf_counter() - t_fp_one),
+                    io_sec=None,
+                    filter_sec=None,
+                )
+            )
         if px.size == 0:
             continue
         code_i = str(targets.obscode[i].as_py())
@@ -120,48 +196,6 @@ def targets_to_pixels(
         exposure_mjd_mid=mjd_out,
         healpixel=hpix_out,
     )
-
-
-def _frame_candidates_from_frames_and_ephem(
-    *,
-    frames,
-    ephem,
-    orbit_id: str,
-) -> FrameCandidates:
-    from precovery.healpix_geom import radec_to_healpixel
-
-    if len(frames) == 0:
-        return FrameCandidates.empty()
-
-    healpix_id = pa.array(
-        radec_to_healpixel(
-            ephem.coordinates.lon.to_numpy(zero_copy_only=False),
-            ephem.coordinates.lat.to_numpy(zero_copy_only=False),
-            nside=2**15,
-        ).astype(np.int64),
-        type=pa.int64(),
-    )
-
-    return FrameCandidates.from_kwargs(
-        exposure_time_start=Timestamp.from_mjd(frames.exposure_mjd_start, scale="utc"),
-        exposure_time_mid=Timestamp.from_mjd(frames.exposure_mjd_mid, scale="utc"),
-        filter=frames.filter,
-        obscode=frames.obscode,
-        exposure_id=frames.exposure_id,
-        exposure_duration=frames.exposure_duration,
-        dataset_id=frames.dataset_id,
-        healpix_id=healpix_id,
-        pred_ra_deg=ephem.coordinates.lon,
-        pred_dec_deg=ephem.coordinates.lat,
-        pred_vra_degpday=ephem.coordinates.vlon,
-        pred_vdec_degpday=ephem.coordinates.vlat,
-        pred_mag=pa.nulls(len(frames), type=pa.float64()),
-        rejected=pa.repeat(False, len(frames)),
-        rejected_reason=pa.array([None] * len(frames), type=pa.large_string()),
-        aberrated_coordinates=ephem.aberrated_coordinates,
-        orbit_id=pa.repeat(str(orbit_id), len(frames)),
-    )
-
 
 def _apply_mag_residual_rejection(
     *,
@@ -207,19 +241,218 @@ def _apply_mag_residual_rejection(
     )
 
 
+def _resolve_bounds(
+    *, db: SearchDB, start_mjd: float | None, end_mjd: float | None, datasets: set[str] | None
+) -> tuple[float, float]:
+    if start_mjd is None or end_mjd is None:
+        first, last = db.frames.idx.mjd_bounds(datasets=datasets)
+        start_mjd = first if start_mjd is None else float(start_mjd)
+        end_mjd = last if end_mjd is None else float(end_mjd)
+    return float(start_mjd), float(end_mjd)
+
+
+def _load_search_constants(db: SearchDB) -> tuple[pa.Array, pa.Array, float, object, object]:
+    """
+    Pull config/cache-like values once per run.
+    """
+    limit_keys = getattr(db, "_limit_codefid_keys", pa.array([], type=pa.large_string()))
+    limit_vals = getattr(db, "_limit_codefid_vals", pa.array([], type=pa.float64()))
+    faint_margin = float(getattr(db.config, "faint_frame_skip_margin_mag", 0.0) or 0.0)
+    max_faint = getattr(db.config, "max_mag_residual_fainter_mag", None)
+    max_bright = getattr(db.config, "max_mag_residual_brighter_mag", None)
+    return limit_keys, limit_vals, faint_margin, max_faint, max_bright
+
+
+def _process_targets_chunk(
+    *,
+    db: SearchDB,
+    orbit: Orbits,
+    orbit_id: str,
+    targets_chunk: FrameTimeTargets,
+    tolerance: float | None,
+    start_mjd: float,
+    end_mjd: float,
+    datasets: set[str] | None,
+    window_size_days: int,
+    footprint: CovPolygonReconstructedMoc,
+    n_sigma: float,
+    max_processes: int | None,
+    limit_keys: pa.Array,
+    limit_vals: pa.Array,
+    faint_margin: float,
+    max_faint: object,
+    max_bright: object,
+    idx_db,
+    metrics: SearchAgg | None,
+) -> tuple[list[PrecoveryCandidates], list[FrameCandidates]]:
+    """
+    Process one chunk of distinct (obscode, time) targets end-to-end.
+
+    This is the primary "atomic" unit for profiling: it contains the per-chunk hot path
+    (propagate -> footprint -> join frames -> IO -> filter -> photometry).
+    """
+    if len(targets_chunk) == 0:
+        return [], []
+
+    codes_chunk = targets_chunk.obscode
+    times_chunk = targets_chunk.time
+
+    t_prop = time.perf_counter() if metrics is not None else None
+    pred: TargetPrediction = predict_targets(
+        orbit=orbit,
+        obscode=codes_chunk,
+        times_utc=times_chunk,
+        start_mjd=float(start_mjd),
+        window_size_days=int(window_size_days),
+        strategy=DEFAULT_PROPAGATION_STRATEGY,
+        max_processes=max_processes,
+    )
+    if metrics is not None and t_prop is not None:
+        metrics.propagate_sec += float(time.perf_counter() - t_prop)
+    if len(pred.ephem) == 0:
+        return [], []
+    if metrics is not None:
+        metrics.n_predicted_rows += int(len(pred.ephem))
+
+    t_fp = time.perf_counter() if metrics is not None else None
+    pixels = targets_to_pixels(
+        targets=targets_chunk,
+        pred=pred,
+        footprint=footprint,
+        nside=int(db.frames.healpix_nside),
+        metrics=metrics,
+    )
+    if metrics is not None and t_fp is not None:
+        metrics.footprint_sec += float(time.perf_counter() - t_fp)
+    if len(pixels) == 0:
+        return [], []
+    if metrics is not None:
+        metrics.n_predicted_pixels += int(len(pixels))
+
+    t_join = time.perf_counter() if metrics is not None else None
+    frames = fetch_frames_for_pixels_sqlite(index_db=idx_db, pixels=pixels, datasets=datasets)
+    if metrics is not None and t_join is not None:
+        metrics.join_frames_sec += float(time.perf_counter() - t_join)
+    if len(frames) == 0:
+        return [], []
+    if metrics is not None:
+        metrics.n_frames_joined += int(len(frames))
+
+    frame_rows, target_rows = align_frames_to_targets(frames=frames, targets=targets_chunk)
+    if frame_rows.size == 0:
+        return [], []
+
+    frames2 = frames.take(frame_rows.tolist())
+    ephem_for_frames = pred.ephem.take(target_rows.tolist())
+    frame_cands = frame_candidates_from_frames_and_ephem(
+        frames=frames2, ephem=ephem_for_frames, orbit_id=str(orbit_id)
+    )
+
+    t_photo_frames = time.perf_counter() if metrics is not None else None
+    try:
+        frame_cands_mag = db._attach_magnitudes(frame_cands, orbit)  # noqa: SLF001
+    except Exception:
+        frame_cands_mag = frame_cands
+    if metrics is not None and t_photo_frames is not None:
+        metrics.photometry_sec += float(time.perf_counter() - t_photo_frames)
+
+    too_faint = compute_faint_skip_mask(
+        db=db,
+        frame_cands=frame_cands_mag,
+        limit_keys=limit_keys,
+        limit_vals=limit_vals,
+        faint_margin=float(faint_margin),
+    )
+
+    # Batch-load observations for non-faint frames.
+    active_idx = [i for i in range(len(frames2)) if not bool(too_faint[i].as_py())]
+    t_io_batch = time.perf_counter() if metrics is not None else None
+    obs_by_i = load_observations_for_frames(frame_db=db.frames, frames=frames2, active_idx=active_idx)
+    if metrics is not None and t_io_batch is not None:
+        metrics.io_sec += float(time.perf_counter() - t_io_batch)
+
+    out_candidates: list[PrecoveryCandidates] = []
+    out_frames: list[FrameCandidates] = []
+    for i, (frame, eph_mid) in enumerate(zip(frames2, ephem_for_frames)):
+        if bool(too_faint[i].as_py()):
+            if metrics is not None:
+                metrics.n_frames_faint_skipped += 1
+            fc = frame_cands_mag.take([i])
+            fc = FrameCandidates.from_pyarrow(
+                fc.set_column("rejected", pa.array([True]))
+                .set_column(
+                    "rejected_reason",
+                    pa.array([REJECT_REASON_LIMITING_MAGNITUDE], type=pa.large_string()),
+                )
+                .table
+            )
+            out_frames.append(fc)
+            continue
+
+        if metrics is not None:
+            metrics.n_frames_loaded += 1
+
+        obs = obs_by_i[i]
+        assert obs is not None
+        if len(obs) == 0:
+            out_frames.append(frame_cands_mag.take([i]))
+            continue
+        if metrics is not None:
+            metrics.n_observations_loaded += int(len(obs))
+
+        cov_ll_mid = pred.cov_ll_deg2[target_rows[i] : target_rows[i] + 1]
+        hit_idx, eph_rep, _cov_rep = gate_frame_observations(
+            orbit=orbit,
+            frame=frame,
+            obs=obs,
+            eph_mid=eph_mid,
+            cov_ll_mid=cov_ll_mid,
+            propagation_strategy=DEFAULT_PROPAGATION_STRATEGY,
+            n_sigma=float(n_sigma),
+            tolerance_deg=(None if tolerance is None else float(tolerance)),
+            max_processes=max_processes,
+            metrics=metrics,
+        )
+        if not hit_idx:
+            out_frames.append(frame_cands_mag.take([i]))
+            continue
+        if metrics is not None:
+            metrics.n_accepted += int(len(hit_idx))
+
+        cand = build_candidates_for_hits(
+            obs=obs,
+            eph_rep=eph_rep,
+            frame=frame,
+            orbit=orbit,
+            db=db,
+            hit_idx=hit_idx,
+            metrics=metrics,
+        )
+        if metrics is not None:
+            metrics.n_candidates += int(len(cand))
+        cand = _apply_mag_residual_rejection(
+            candidates=cand,
+            max_mag_residual_fainter_mag=None if max_faint is None else float(max_faint),
+            max_mag_residual_brighter_mag=None if max_bright is None else float(max_bright),
+        )
+        out_candidates.append(cand)
+
+    return out_candidates, out_frames
+
+
 def precover_orbit(
     *,
-    db,
+    db: SearchDB,
     orbit: Orbits,
+    tolerance: float | None = None,
     start_mjd: float | None = None,
     end_mjd: float | None = None,
     datasets: set[str] | None = None,
     window_size_days: int = 7,
-    propagation_strategy: PropagationStrategy = "assist_window_then_2body_variants:sigma_points",
-    footprint: CovPolygonReconstructedMoc | None = None,
     n_sigma: float = 3.0,
     target_chunk_size: int = 10_000,
     max_processes: int | None = 1,
+    metrics: SearchAgg | None = None,
 ) -> tuple[PrecoveryCandidates, FrameCandidates]:
     """
     Performance-first precovery search for a single orbit.
@@ -231,19 +464,18 @@ def precover_orbit(
     if len(orbit) != 1:
         raise ValueError("precover_orbit currently supports exactly one orbit (len==1).")
 
-    # Refresh limiting magnitudes cache only if it changed on disk.
-    try:
-        db._refresh_limiting_magnitudes_cache_if_needed()  # noqa: SLF001
-    except Exception:
-        pass
+    t_total = time.perf_counter() if metrics is not None else None
 
-    if start_mjd is None or end_mjd is None:
-        first, last = db.frames.idx.mjd_bounds(datasets=datasets)
-        start_mjd = first if start_mjd is None else float(start_mjd)
-        end_mjd = last if end_mjd is None else float(end_mjd)
+    refresh_runtime_state(db)
 
-    footprint = footprint or CovPolygonReconstructedMoc(n_sigma=float(n_sigma), polygon_vertices=32)
+    start_mjd, end_mjd = _resolve_bounds(db=db, start_mjd=start_mjd, end_mjd=end_mjd, datasets=datasets)
 
+    footprint = CovPolygonReconstructedMoc(
+        n_sigma=float(n_sigma),
+        polygon_vertices=int(DEFAULT_FOOTPRINT_POLYGON_VERTICES),
+    )
+
+    t_enum = time.perf_counter() if metrics is not None else None
     targets = enumerate_targets(
         db=db,
         start_mjd=float(start_mjd),
@@ -252,10 +484,16 @@ def precover_orbit(
         end_mjd=float(np.nextafter(float(end_mjd), np.inf)),
         datasets=datasets,
     )
+    if metrics is not None and t_enum is not None:
+        metrics.enum_sec += float(time.perf_counter() - t_enum)
     if len(targets) == 0:
+        if metrics is not None and t_total is not None:
+            metrics.total_sec += float(time.perf_counter() - t_total)
         return PrecoveryCandidates.empty(), FrameCandidates.empty()
 
     n_targets = int(len(targets))
+    if metrics is not None:
+        metrics.n_targets += int(n_targets)
 
     # Accumulate results as lists (concat once at end).
     all_candidates: list[PrecoveryCandidates] = []
@@ -263,200 +501,141 @@ def precover_orbit(
 
     orbit_id = orbit.orbit_id[0].as_py()
 
-    # Limiting magnitude cache (loaded once at DB open).
-    limit_keys = getattr(db, "_limit_codefid_keys", pa.array([], type=pa.large_string()))
-    limit_vals = getattr(db, "_limit_codefid_vals", pa.array([], type=pa.float64()))
-    faint_margin = float(getattr(db.config, "faint_frame_skip_margin_mag", 0.0) or 0.0)
+    limit_keys, limit_vals, faint_margin, max_faint, max_bright = _load_search_constants(db)
 
-    # Magnitude residual thresholds.
-    max_faint = getattr(db.config, "max_mag_residual_fainter_mag", None)
-    max_bright = getattr(db.config, "max_mag_residual_brighter_mag", None)
+    idx_db = index_db_path(db)
 
-    idx_db = _index_db_path(db)
-    for t0 in range(0, n_targets, int(target_chunk_size)):
-        sl = slice(t0, min(n_targets, t0 + int(target_chunk_size)))
-        targets_chunk = targets[sl]
-        codes_chunk = targets_chunk.obscode
-        times_chunk = targets_chunk.time
-
-        pred: TargetPrediction = predict_targets(
-            orbit=orbit,
-            obscode=codes_chunk,
-            times_utc=times_chunk,
-            start_mjd=float(start_mjd),
-            window_size_days=int(window_size_days),
-            strategy=propagation_strategy,
-            max_processes=max_processes,
-        )
-        if len(pred.ephem) == 0:
-            continue
-
-        pixels = targets_to_pixels(
-            targets=targets_chunk,
-            pred=pred,
-            footprint=footprint,
-            nside=int(db.frames.healpix_nside),
-        )
-        if len(pixels) == 0:
-            continue
-
-        frames = fetch_frames_for_pixels_sqlite(
-            index_db=idx_db,
-            pixels=pixels,
-            datasets=datasets,
-        )
-        if len(frames) == 0:
-            continue
-
-        # Map (obscode,mjd_mid) -> target index within this chunk.
-        key_to_idx: dict[tuple[str, float], int] = {
-            (
-                str(targets_chunk.obscode[i].as_py()),
-                float(targets_chunk.exposure_mjd_mid[i].as_py()),
-            ): int(i)
-            for i in range(int(len(targets_chunk)))
-        }
-
-        # Precompute per-frame ephem rows (at exposure midpoints) via target mapping.
-        frame_rows: list[int] = []
-        target_idx_for_frame: list[int] = []
-        for row in range(len(frames)):
-            k = (str(frames.obscode[row].as_py()), float(frames.exposure_mjd_mid[row].as_py()))
-            j = key_to_idx.get(k)
-            if j is None:
-                # Should not happen: join was on these fields.
-                continue
-            frame_rows.append(int(row))
-            target_idx_for_frame.append(int(j))
-        if not frame_rows:
-            continue
-
-        frames2 = frames.take(frame_rows)
-        ephem_for_frames = pred.ephem.take(target_idx_for_frame)
-
-        frame_cands = _frame_candidates_from_frames_and_ephem(
-            frames=frames2, ephem=ephem_for_frames, orbit_id=str(orbit_id)
-        )
-
-        # Compute predicted magnitudes for frames (if possible) and decide faint skips.
+    # Optional Ray chunk parallelism (max_processes denotes worker budget).
+    use_ray = False
+    if max_processes is not None and int(max_processes) > 1:
         try:
-            frame_cands_mag = db._attach_magnitudes(frame_cands, orbit)  # noqa: SLF001
+            from adam_core.ray_cluster import initialize_use_ray
+
+            use_ray = bool(initialize_use_ray(num_cpus=int(max_processes)))
         except Exception:
-            frame_cands_mag = frame_cands
+            use_ray = False
 
-        # Faint-frame skip using limiting magnitudes cache (vectorized).
-        too_faint = pa.repeat(False, len(frame_cands_mag))
-        if len(limit_keys) > 0 and len(frame_cands_mag) > 0 and not pc.all(
-            pc.is_null(frame_cands_mag.pred_mag)
-        ).as_py():
-            from adam_core.photometry.bandpasses import map_to_canonical_filter_bands
+    if use_ray:
+        import ray
 
-            canonical = map_to_canonical_filter_bands(
-                frame_cands_mag.obscode,
-                frame_cands_mag.filter,
-                allow_fallback_filters=True,
-            )
-            canon_arr = pa.array(canonical, type=pa.large_string())
-            sep = pa.scalar("|", type=pa.large_string())
-            codefid = pc.binary_join_element_wise(frame_cands_mag.obscode, canon_arr, sep)
-            limit = _arrow_lookup(codefid, limit_keys, limit_vals)
-            limit_with_margin = pc.add(limit, faint_margin)
-            too_faint = pc.fill_null(
-                pc.and_(
-                    pc.is_valid(limit),
-                    pc.greater(frame_cands_mag.pred_mag, limit_with_margin),
-                ),
-                False,
-            )
+        from precovery.precovery_db import __version__ as _running_version
 
-        # Process each frame: if too faint -> emit rejected FrameCandidate; else load obs and gate.
-        for i, (frame, eph_mid) in enumerate(zip(frames2, ephem_for_frames)):
-            if bool(too_faint[i].as_py()):
-                fc = frame_cands_mag.take([i])
-                fc = FrameCandidates.from_pyarrow(
-                    fc.set_column("rejected", pa.array([True]))
-                    .set_column(
-                        "rejected_reason",
-                        pa.array([REJECT_REASON_LIMITING_MAGNITUDE], type=pa.large_string()),
-                    )
-                    .table
+        allow_version_mismatch = bool(getattr(db.config, "build_version", None) != _running_version)
+        orbit_ref = ray.put(orbit)
+        targets_ref = ray.put(targets)
+
+        # If per-target metrics are enabled, each worker will populate its own list which we
+        # merge in the driver.
+        want_per_target = metrics is not None and metrics.per_target_rows is not None
+
+        worker = ray.remote(_process_targets_chunk_ray_worker)
+
+        futures: list[object] = []
+        for t0 in range(0, n_targets, int(target_chunk_size)):
+            t1 = min(n_targets, t0 + int(target_chunk_size))
+            futures.append(
+                worker.remote(
+                    db_dir=str(db.directory),
+                    allow_version_mismatch=allow_version_mismatch,
+                    orbit=orbit_ref,
+                    orbit_id=str(orbit_id),
+                    targets=targets_ref,
+                    t0=int(t0),
+                    t1=int(t1),
+                    tolerance=tolerance,
+                    start_mjd=float(start_mjd),
+                    end_mjd=float(end_mjd),
+                    datasets=datasets,
+                    window_size_days=int(window_size_days),
+                    n_sigma=float(n_sigma),
+                    propagation_max_processes=1,  # prevent CPU oversubscription
+                    want_per_target_metrics=want_per_target,
                 )
-                all_frame_candidates.append(fc)
-                continue
+            )
 
-            obs = db.frames.get_observations(frame)
-            if len(obs) == 0:
-                all_frame_candidates.append(frame_cands_mag.take([i]))
-                continue
+            # Bound in-flight futures (experiment-proven scheduling pattern).
+            if len(futures) >= int(max_processes) * 2:
+                finished, futures = ray.wait(futures, num_returns=1)
+                c_one, f_one, agg_one = ray.get(finished[0])
+                all_candidates.append(c_one)
+                all_frame_candidates.append(f_one)
+                if metrics is not None:
+                    metrics.n_targets += int(getattr(agg_one, "n_targets", 0))
+                    metrics.n_predicted_rows += int(getattr(agg_one, "n_predicted_rows", 0))
+                    metrics.n_predicted_pixels += int(getattr(agg_one, "n_predicted_pixels", 0))
+                    metrics.n_frames_joined += int(getattr(agg_one, "n_frames_joined", 0))
+                    metrics.n_frames_loaded += int(getattr(agg_one, "n_frames_loaded", 0))
+                    metrics.n_frames_faint_skipped += int(getattr(agg_one, "n_frames_faint_skipped", 0))
+                    metrics.n_observations_loaded += int(getattr(agg_one, "n_observations_loaded", 0))
+                    metrics.n_accepted += int(getattr(agg_one, "n_accepted", 0))
+                    metrics.n_candidates += int(getattr(agg_one, "n_candidates", 0))
+                    metrics.enum_sec += float(getattr(agg_one, "enum_sec", 0.0))
+                    metrics.propagate_sec += float(getattr(agg_one, "propagate_sec", 0.0))
+                    metrics.footprint_sec += float(getattr(agg_one, "footprint_sec", 0.0))
+                    metrics.join_frames_sec += float(getattr(agg_one, "join_frames_sec", 0.0))
+                    metrics.io_sec += float(getattr(agg_one, "io_sec", 0.0))
+                    metrics.filter_sec += float(getattr(agg_one, "filter_sec", 0.0))
+                    metrics.photometry_sec += float(getattr(agg_one, "photometry_sec", 0.0))
+                    if metrics.per_target_rows is not None and getattr(agg_one, "per_target_rows", None):
+                        metrics.per_target_rows.extend(list(getattr(agg_one, "per_target_rows")))
 
-            # Per-observation prediction; fast-path when all obs times are identical.
-            obs_time_utc = obs.time.rescale("utc")
-            unique_times = obs_time_utc.unique().sort_by(["days", "nanos"])
-            if len(unique_times) == 1:
-                eph = eph_mid
-                cov_ll = pred.cov_ll_deg2[
-                    target_idx_for_frame[i] : target_idx_for_frame[i] + 1
-                ]
-                # Repeat ephem row for each observation.
-                eph_rep = eph.take(np.zeros(len(obs), dtype=np.int64).tolist())
-                cov_rep = np.repeat(cov_ll, len(obs), axis=0)
-            else:
-                pred_obs = predict_observations_in_frame(
-                    orbit=orbit,
-                    obscode=str(frame.obscode[0].as_py()),
-                    times_utc=unique_times,
-                    strategy=propagation_strategy,
-                    max_processes=max_processes,
-                )
-                # Broadcast per-unique-time predictions back to per-observation rows.
-                obs_key = _timestamp_key(obs_time_utc.days, obs_time_utc.nanos)
-                uniq_key = _timestamp_key(unique_times.days, unique_times.nanos)
-                idx = pc.fill_null(pc.index_in(obs_key, value_set=uniq_key), -1)
-                assert pc.all(pc.greater_equal(idx, 0)).as_py(), "Missing time mapping for observations"
-                idx64 = pc.cast(idx, pa.int64())
-
-                eph_rep = pred_obs.ephem.take(idx64.to_numpy(zero_copy_only=False).tolist())
-                cov_rep = pred_obs.cov_ll_deg2[idx64.to_numpy(zero_copy_only=False)]
-
-            keep = innov_ellipse_keep_mask(
-                obs_lon_deg=obs.ra.to_numpy(zero_copy_only=False),
-                obs_lat_deg=obs.dec.to_numpy(zero_copy_only=False),
-                obs_lon_sigma_deg=obs.ra_sigma.to_numpy(zero_copy_only=False),
-                obs_lat_sigma_deg=obs.dec_sigma.to_numpy(zero_copy_only=False),
-                pred_lon_deg=eph_rep.coordinates.lon.to_numpy(zero_copy_only=False),
-                pred_lat_deg=eph_rep.coordinates.lat.to_numpy(zero_copy_only=False),
-                pred_cov_ll_deg2=cov_rep,
+        while futures:
+            finished, futures = ray.wait(futures, num_returns=1)
+            c_one, f_one, agg_one = ray.get(finished[0])
+            all_candidates.append(c_one)
+            all_frame_candidates.append(f_one)
+            if metrics is not None:
+                metrics.n_targets += int(getattr(agg_one, "n_targets", 0))
+                metrics.n_predicted_rows += int(getattr(agg_one, "n_predicted_rows", 0))
+                metrics.n_predicted_pixels += int(getattr(agg_one, "n_predicted_pixels", 0))
+                metrics.n_frames_joined += int(getattr(agg_one, "n_frames_joined", 0))
+                metrics.n_frames_loaded += int(getattr(agg_one, "n_frames_loaded", 0))
+                metrics.n_frames_faint_skipped += int(getattr(agg_one, "n_frames_faint_skipped", 0))
+                metrics.n_observations_loaded += int(getattr(agg_one, "n_observations_loaded", 0))
+                metrics.n_accepted += int(getattr(agg_one, "n_accepted", 0))
+                metrics.n_candidates += int(getattr(agg_one, "n_candidates", 0))
+                metrics.enum_sec += float(getattr(agg_one, "enum_sec", 0.0))
+                metrics.propagate_sec += float(getattr(agg_one, "propagate_sec", 0.0))
+                metrics.footprint_sec += float(getattr(agg_one, "footprint_sec", 0.0))
+                metrics.join_frames_sec += float(getattr(agg_one, "join_frames_sec", 0.0))
+                metrics.io_sec += float(getattr(agg_one, "io_sec", 0.0))
+                metrics.filter_sec += float(getattr(agg_one, "filter_sec", 0.0))
+                metrics.photometry_sec += float(getattr(agg_one, "photometry_sec", 0.0))
+                if metrics.per_target_rows is not None and getattr(agg_one, "per_target_rows", None):
+                    metrics.per_target_rows.extend(list(getattr(agg_one, "per_target_rows")))
+    else:
+        for t0 in range(0, n_targets, int(target_chunk_size)):
+            sl = slice(t0, min(n_targets, t0 + int(target_chunk_size)))
+            targets_chunk = targets[sl]
+            c_chunk, f_chunk = _process_targets_chunk(
+                db=db,
+                orbit=orbit,
+                orbit_id=str(orbit_id),
+                targets_chunk=targets_chunk,
+                tolerance=tolerance,
+                start_mjd=float(start_mjd),
+                end_mjd=float(end_mjd),
+                datasets=datasets,
+                window_size_days=int(window_size_days),
+                footprint=footprint,
                 n_sigma=float(n_sigma),
-                det_sigma_floor_arcsec=0.10,
+                max_processes=max_processes,
+                limit_keys=limit_keys,
+                limit_vals=limit_vals,
+                faint_margin=float(faint_margin),
+                max_faint=max_faint,
+                max_bright=max_bright,
+                idx_db=idx_db,
+                metrics=metrics,
             )
-            if not bool(np.any(keep)):
-                all_frame_candidates.append(frame_cands_mag.take([i]))
-                continue
-
-            hit_idx = np.nonzero(keep)[0].tolist()
-            obs_hit = obs.take(hit_idx)
-            eph_hit = eph_rep.take(hit_idx)
-
-            cand = candidates_from_ephem(obs_hit, eph_hit, frame)
-            try:
-                cand = db._attach_magnitudes(cand, orbit)  # noqa: SLF001
-            except Exception:
-                pass
-            cand = _apply_mag_residual_rejection(
-                candidates=cand,
-                max_mag_residual_fainter_mag=None if max_faint is None else float(max_faint),
-                max_mag_residual_brighter_mag=None if max_bright is None else float(max_bright),
-            )
-            all_candidates.append(cand)
+            all_candidates.extend(c_chunk)
+            all_frame_candidates.extend(f_chunk)
 
     candidates = qv.concatenate(all_candidates) if all_candidates else PrecoveryCandidates.empty()
     frames_out = qv.concatenate(all_frame_candidates) if all_frame_candidates else FrameCandidates.empty()
 
     # Match existing behavior: strip aberrated_coordinates before returning.
     if len(candidates) > 0:
-        from adam_core.coordinates.cartesian import CartesianCoordinates
-        from adam_core.coordinates.origin import Origin
-
         candidates = candidates.set_column(
             "aberrated_coordinates",
             CartesianCoordinates.from_kwargs(
@@ -472,9 +651,6 @@ def precover_orbit(
             ),
         )
     if len(frames_out) > 0:
-        from adam_core.coordinates.cartesian import CartesianCoordinates
-        from adam_core.coordinates.origin import Origin
-
         frames_out = frames_out.set_column(
             "aberrated_coordinates",
             CartesianCoordinates.from_kwargs(
@@ -490,12 +666,66 @@ def precover_orbit(
             ),
         )
 
+    if metrics is not None and t_total is not None:
+        metrics.total_sec += float(time.perf_counter() - t_total)
+
     return PrecoveryCandidates.from_pyarrow(candidates.table), FrameCandidates.from_pyarrow(frames_out.table)
+
+
+def precover_orbit_with_metrics(
+    *,
+    db: SearchDB,
+    orbit: Orbits,
+    tolerance: float | None = None,
+    start_mjd: float | None = None,
+    end_mjd: float | None = None,
+    datasets: set[str] | None = None,
+    window_size_days: int = 7,
+    n_sigma: float = 3.0,
+    target_chunk_size: int = 10_000,
+    max_processes: int | None = 1,
+) -> tuple[PrecoveryCandidates, FrameCandidates, SearchMetrics, SearchAgg]:
+    """
+    `precover_orbit`, but always returns aggregated metrics.
+
+    This is intentionally small and "profiling-friendly": callers can `cProfile` or
+    `pyinstrument` this wrapper and then inspect the returned `SearchAgg`/`SearchMetrics`.
+    """
+    agg = SearchAgg()
+    cands, frames = precover_orbit(
+        db=db,
+        orbit=orbit,
+        tolerance=tolerance,
+        start_mjd=start_mjd,
+        end_mjd=end_mjd,
+        datasets=datasets,
+        window_size_days=int(window_size_days),
+        n_sigma=float(n_sigma),
+        target_chunk_size=int(target_chunk_size),
+        max_processes=max_processes,
+        metrics=agg,
+    )
+    fp = CovPolygonReconstructedMoc(
+        n_sigma=float(n_sigma),
+        polygon_vertices=int(DEFAULT_FOOTPRINT_POLYGON_VERTICES),
+    )
+    run = metrics_row(
+        orbit_id=orbit.orbit_id[0].as_py(),
+        propagation_strategy=str(DEFAULT_PROPAGATION_STRATEGY),
+        footprint=type(fp).__name__,
+        healpix_nside=int(db.frames.healpix_nside),
+        n_sigma=float(n_sigma),
+        window_size_days=int(window_size_days),
+        target_chunk_size=int(target_chunk_size),
+        max_processes=None if max_processes is None else int(max_processes),
+        agg=agg,
+    )
+    return cands, frames, run, agg
 
 
 def precover_orbits(
     *,
-    db,
+    db: SearchDB,
     orbits: Orbits,
     **kwargs,
 ) -> tuple[PrecoveryCandidates, FrameCandidates]:

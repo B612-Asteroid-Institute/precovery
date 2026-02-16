@@ -1,9 +1,8 @@
 import logging
-from typing import Optional, Tuple, Type
+from typing import Optional, Tuple
 
 import quivr as qv
 from adam_core.orbits import Orbits
-from adam_core.propagator import Propagator
 
 from .precovery_db import FrameCandidates, PrecoveryCandidates, PrecoveryDatabase
 
@@ -21,13 +20,8 @@ def precover(
     window_size: int = 7,
     allow_version_mismatch: bool = False,
     datasets: Optional[set[str]] = None,
-    propagator_class: Optional[Type[Propagator]] = None,
     max_processes: Optional[int] = None,
-    match_method: str = "circle",
     n_sigma: float = 3.0,
-    covariance_polygon_vertices: int = 32,
-    covariance_mc_num_samples: int = 64,
-    covariance_mc_seed: int = 0,
 ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
     """
     Connect to database directory and run precovery for the input orbit.
@@ -50,13 +44,8 @@ def precover(
             end_mjd=end_mjd,
             window_size=window_size,
             datasets=datasets,
-            propagator_class=propagator_class,
             max_processes=max_processes,
-            match_method=match_method,
             n_sigma=n_sigma,
-            covariance_polygon_vertices=covariance_polygon_vertices,
-            covariance_mc_num_samples=covariance_mc_num_samples,
-            covariance_mc_seed=covariance_mc_seed,
         )
         precovery_candidates = qv.concatenate([precovery_candidates, candidates])
         frame_candidates = qv.concatenate([frame_candidates, frames])

@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +18,7 @@ from experiments.covariance_precovery.harness.stage4_detection_filter_bench impo
     run_stage4_detection_filter_bench,
 )
 from precovery.frame_db import HealpixFrame
+from precovery.precovery_db import PrecoveryDatabase
 
 
 def test_stage4_query_frames_chunks_in_clause() -> None:
@@ -79,12 +81,14 @@ def test_stage4_query_frames_chunks_in_clause() -> None:
         conn.close()
 
 
-def test_stage4_smoke_writes_parquets(tmp_path: Path, precovery_db_with_data) -> None:
+def test_stage4_smoke_writes_parquets(tmp_path: Path, precovery_db_with_data_dir: str) -> None:
     """
     End-to-end smoke: create minimal Stage 2 artifacts + truth crossmatch, then run Stage 4.
     """
     subset_dir = tmp_path
-    db = precovery_db_with_data
+    # Copy the small indexed DB + frame data into an isolated temp subset dir.
+    shutil.copytree(Path(precovery_db_with_data_dir), subset_dir, dirs_exist_ok=True)
+    db = PrecoveryDatabase.from_dir(str(subset_dir), mode="r", allow_version_mismatch=True)
 
     # Pick one real frame from the subset index.
     index_db = subset_dir / "index.db"
@@ -127,8 +131,11 @@ def test_stage4_smoke_writes_parquets(tmp_path: Path, precovery_db_with_data) ->
         data_offset=[int(data_offset)],
         data_length=[int(data_length)],
     )
-    obs = db.frames.get_observations(hf)
-    assert len(obs) > 0
+    try:
+        obs = db.frames.get_observations(hf)
+        assert len(obs) > 0
+    finally:
+        db.frames.close()
     obsid = obs.id[0].as_py()
     obsid_s = obsid.decode("utf8") if isinstance(obsid, (bytes, bytearray)) else str(obsid)
 
@@ -236,9 +243,9 @@ def test_stage4_smoke_writes_parquets(tmp_path: Path, precovery_db_with_data) ->
         }
     )
     for footprint in ["point", "cov_disc", "cov_mc", "cov_polygon_moc"]:
-        p = stage3_run_dir / "selected_keys" / "2body_with_covariance" / footprint
+        p = stage3_run_dir / "selected_keys" / "2body_with_covariance" / footprint / "parts"
         p.mkdir(parents=True, exist_ok=True)
-        pq.write_table(keys_tbl, p / "selected_keys_unique.parquet")
+        pq.write_table(keys_tbl, p / "part-000000.parquet")
 
     run_dir = run_stage4_detection_filter_bench(
         subset_dir=subset_dir,

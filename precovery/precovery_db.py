@@ -1313,7 +1313,8 @@ class PrecoveryDatabase:
                 return cls.create(directory)
 
         try:
-            config = Config.from_json(os.path.join(directory, "config.json"))
+            cfg_path = os.path.join(directory, "config.json")
+            config = Config.from_json(cfg_path)
         except FileNotFoundError:
             if not create:
                 raise Exception("No config file found and create=False")
@@ -1336,6 +1337,11 @@ class PrecoveryDatabase:
             frame_idx, data_path, config.data_file_max_size, config.nside, mode=mode
         )
         db = cls(frame_db, directory, config)
+        # Track config mtime so in-memory overrides aren't clobbered on first precover().
+        try:
+            db._config_mtime = float(os.path.getmtime(os.path.join(directory, "config.json")))
+        except Exception:
+            pass
         db._load_limiting_magnitudes_cache()
         return db
 
@@ -1363,6 +1369,11 @@ class PrecoveryDatabase:
         frame_db = FrameDB(frame_idx, data_path, data_file_max_size, nside)
 
         db = cls(frame_db, directory, config)
+        # Track config mtime so in-memory overrides aren't clobbered on first precover().
+        try:
+            db._config_mtime = float(os.path.getmtime(os.path.join(directory, "config.json")))
+        except Exception:
+            pass
         db._load_limiting_magnitudes_cache()
         return db
 
@@ -1374,16 +1385,11 @@ class PrecoveryDatabase:
         end_mjd: Optional[float] = None,
         window_size: int = 7,
         datasets: Optional[set[str]] = None,
-        propagator_class: Optional[Type[Propagator]] = None,
         max_processes: Optional[int] = None,
-        match_method: str = "circle",
         n_sigma: float = 3.0,
-        covariance_polygon_vertices: int = 32,
-        covariance_mc_num_samples: int = 64,
-        covariance_mc_seed: int = 0,
         *,
-        propagation_strategy: str = "assist_window_then_2body_variants:sigma_points",
         target_chunk_size: int = 10_000,
+        metrics: object | None = None,
     ) -> Tuple[PrecoveryCandidates, FrameCandidates]:
         """
         Find observations which match orbit in the database.
@@ -1404,8 +1410,11 @@ class PrecoveryDatabase:
             Precovery candidate observations and frame candidates.
         """
         # NOTE: This method is now a thin wrapper around the performance-first pipeline
-        # in `precovery.search`. We keep legacy parameters in the signature, but most of
-        # them are intentionally ignored (no backwards compatibility guarantees).
+        # in `precovery.search`.
+        #
+        # We keep some legacy parameters in the signature for compatibility with existing
+        # call sites, but we *do not* silently ignore non-default behavior: unsupported
+        # knobs raise so profiling/production runs are not accidentally misconfigured.
         if len(orbit) != 1:
             raise ValueError("PrecoveryDatabase.precover currently supports exactly one orbit.")
 
@@ -1426,14 +1435,15 @@ class PrecoveryDatabase:
         return precover_orbit(
             db=self,
             orbit=orbit,
+            tolerance=tolerance,
             start_mjd=start_mjd,
             end_mjd=end_mjd,
             datasets=datasets,
             window_size_days=int(window_size),
-            propagation_strategy=str(propagation_strategy),
             n_sigma=float(n_sigma),
             target_chunk_size=int(target_chunk_size),
             max_processes=(1 if max_processes is None else int(max_processes)),
+            metrics=metrics,
         )
 
     # mypy helper: `_attach_magnitudes()` is implemented once, but it preserves the concrete

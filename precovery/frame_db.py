@@ -4,6 +4,7 @@ import logging
 import os
 import struct
 import warnings
+from array import array
 from typing import Iterator, List, Optional, Sequence, Tuple
 
 import pyarrow as pa
@@ -980,50 +981,121 @@ class FrameDB:
         Get the observations for a given HealpixFrame as a Quivr Table
         """
         assert len(exp) == 1
-        data_uri = exp.data_uri[0].as_py()
-        data_offset = exp.data_offset[0].as_py()
-        data_length = exp.data_length[0].as_py()
+        data_uri = str(exp.data_uri[0].as_py())
+        data_offset = int(exp.data_offset[0].as_py())
+        data_length = int(exp.data_length[0].as_py())
 
         path = os.path.abspath(os.path.join(self.data_root, data_uri))
-
         with open(path, "rb") as f:
-            # f = self.data_files[data_uri]
             f.seek(data_offset)
-            data_layout = struct.Struct(DATA_LAYOUT)
-            datagram_size = struct.calcsize(DATA_LAYOUT)
-            bytes_read = 0
-            observations = []
-            while bytes_read < data_length:
-                raw = f.read(datagram_size)
-                (
-                    mjd,
-                    ra,
-                    dec,
-                    ra_sigma,
-                    dec_sigma,
-                    mag,
-                    mag_sigma,
-                    id_size,
-                ) = data_layout.unpack(raw)
-                id = f.read(id_size)
-                bytes_read += datagram_size + id_size
-                observations.append(
-                    (mjd, ra, dec, ra_sigma, dec_sigma, mag, mag_sigma, id)
-                )
-            (mjds, ras, decs, ra_sigmas, dec_sigmas, mags, mag_sigmas, ids) = zip(
-                *observations
-            )
+            buf = f.read(data_length)
+        return self._observations_from_bytes(buf)
 
-            return ObservationsTable.from_kwargs(
-                id=ids,
-                time=Timestamp.from_mjd(mjds, scale="utc"),
-                ra=ras,
-                dec=decs,
-                ra_sigma=ra_sigmas,
-                dec_sigma=dec_sigmas,
-                mag=mags,
-                mag_sigma=mag_sigmas,
-            )
+    @staticmethod
+    def _observations_from_bytes(buf: bytes) -> ObservationsTable:
+        """
+        Parse one frame's serialized observation block into an `ObservationsTable`.
+
+        This is intentionally a tight loop: it avoids per-record file reads and uses
+        `Struct.unpack_from` against a memoryview.
+        """
+        if not buf:
+            return ObservationsTable.empty()
+
+        mv = memoryview(buf)
+        layout = struct.Struct(DATA_LAYOUT)
+        dsize = int(layout.size)
+        n = int(len(buf))
+
+        mjd = array("d")
+        ra = array("d")
+        dec = array("d")
+        ra_sigma = array("d")
+        dec_sigma = array("d")
+        mag = array("d")
+        mag_sigma = array("d")
+        ids: list[bytes] = []
+
+        pos = 0
+        while pos < n:
+            (
+                mjd_i,
+                ra_i,
+                dec_i,
+                ra_s_i,
+                dec_s_i,
+                mag_i,
+                mag_s_i,
+                id_size,
+            ) = layout.unpack_from(mv, pos)
+            pos += dsize
+            isz = int(id_size)
+            if isz < 0 or pos + isz > n:
+                raise ValueError("Corrupt observation block: invalid id_size.")
+            ids.append(bytes(mv[pos : pos + isz]))
+            pos += isz
+
+            mjd.append(float(mjd_i))
+            ra.append(float(ra_i))
+            dec.append(float(dec_i))
+            ra_sigma.append(float(ra_s_i))
+            dec_sigma.append(float(dec_s_i))
+            mag.append(float(mag_i))
+            mag_sigma.append(float(mag_s_i))
+
+        if pos != n:
+            raise ValueError("Corrupt observation block: trailing bytes.")
+
+        return ObservationsTable.from_kwargs(
+            id=ids,
+            time=Timestamp.from_mjd(pa.array(mjd, type=pa.float64()), scale="utc"),
+            ra=ra,
+            dec=dec,
+            ra_sigma=ra_sigma,
+            dec_sigma=dec_sigma,
+            mag=mag,
+            mag_sigma=mag_sigma,
+        )
+
+    def get_observations_many(self, frames: HealpixFrame) -> list[ObservationsTable]:
+        """
+        Batch-load observations for many frames.
+
+        Performance notes
+        -----------------
+        - Opens each `data_uri` file once and reads each (offset,length) slice in one `read`.
+        - Returns a list aligned to the input `frames` row order.
+        """
+        n = int(len(frames))
+        if n == 0:
+            return []
+
+        data_uri = [str(x) for x in frames.data_uri.to_pylist()]
+        data_offset = frames.data_offset.to_numpy(zero_copy_only=False).astype("int64")
+        data_length = frames.data_length.to_numpy(zero_copy_only=False).astype("int64")
+
+        out: list[ObservationsTable] = [ObservationsTable.empty()] * n
+
+        by_uri: dict[str, list[int]] = {}
+        for i, u in enumerate(data_uri):
+            by_uri.setdefault(u, []).append(int(i))
+
+        for u, idxs in by_uri.items():
+            path = os.path.abspath(os.path.join(self.data_root, u))
+            # Sort by offset so the OS readahead has a chance.
+            idxs_sorted = sorted(idxs, key=lambda j: int(data_offset[j]))
+            with open(path, "rb") as f:
+                for j in idxs_sorted:
+                    off = int(data_offset[j])
+                    ln = int(data_length[j])
+                    if ln <= 0:
+                        out[j] = ObservationsTable.empty()
+                        continue
+                    f.seek(off)
+                    buf = f.read(ln)
+                    out[j] = self._observations_from_bytes(buf)
+
+        return out
 
     def get_frames_for_ra_dec(self, ra: float, dec: float, obscode: str):
         """Yields all frames that overlap given ra, dec for a given

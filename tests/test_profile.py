@@ -3,7 +3,6 @@ import pstats
 from pstats import SortKey
 
 import pytest
-from adam_assist import ASSISTPropagator
 
 from precovery.main import precover
 
@@ -25,7 +24,6 @@ def test_precovery_profile(sample_orbits, precovery_db_with_data, tmp_path):
         orbits=sample_orbits[0],
         database_directory=precovery_db_with_data.directory,
         tolerance=1/3600,
-        propagator_class=ASSISTPropagator,
         max_processes=1
     )
     

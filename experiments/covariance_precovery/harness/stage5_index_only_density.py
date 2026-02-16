@@ -19,6 +19,7 @@ from ..methods.covariance_metrics import (
     expected_observations_from_bytes,
     sigma_major_arcsec_from_cov_ll_deg2,
 )
+from .ephem_covariance import cov_ll_from_ephemeris
 from .stage3_healpixel_bench import FrameTimeTargets, _predicted_pixels_from_mean_row
 
 
@@ -591,14 +592,11 @@ def run_stage5_index_only_density(
                 np.float64
             )
 
-            cov6 = None
-            if ephem.coordinates.covariance is not None and (
-                not ephem.coordinates.covariance.is_all_nan()
-            ):
-                cov6 = ephem.coordinates.covariance.to_matrix().astype(np.float64)
-            else:
+            cov_ll_all = cov_ll_from_ephemeris(ephem)
+            cov_ok = np.isfinite(cov_ll_all).all(axis=(1, 2))
+            if not bool(np.any(cov_ok)):
                 raise ValueError(
-                    f"Strategy {strategy!r} ephemeris has no covariance; Stage 5 index-only requires covariance."
+                    f"Strategy {strategy!r} ephemeris has no usable covariance; Stage 5 index-only requires covariance."
                 )
 
             # Per-target info.
@@ -635,7 +633,7 @@ def run_stage5_index_only_density(
                 dt_days = float(mjd_mid - float(epoch_mjd))
                 abs_dt = float(abs(dt_days))
 
-                cov_ll = cov6[i, 1:3, 1:3].astype(np.float64, copy=False)
+                cov_ll = cov_ll_all[i].astype(np.float64, copy=False)
                 sigma_major_pred_arcsec = sigma_major_arcsec_from_cov_ll_deg2(
                     cov_ll_deg2=cov_ll, lat0_deg=float(lat[i])
                 )

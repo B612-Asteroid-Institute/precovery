@@ -230,6 +230,23 @@ def test_add_frames(frame_db):
     stored_obs1 = frame_db.get_observations(stored_frame_1)
     assert len(stored_obs1) == 2
 
+    # Batch loader returns identical results (order + values) for the same frames.
+    obs_many = frame_db.get_observations_many(stored_frames)
+    assert len(obs_many) == len(stored_frames)
+    for f, obs in zip(stored_frames, obs_many):
+        obs_one = frame_db.get_observations(f)
+        assert len(obs) == len(obs_one)
+        for col in ["ra", "dec", "ra_sigma", "dec_sigma", "mag", "mag_sigma"]:
+            np.testing.assert_array_equal(obs.table[col].to_numpy(), obs_one.table[col].to_numpy())
+        np.testing.assert_array_equal(
+            obs.time.mjd().to_numpy(),
+            obs_one.time.mjd().to_numpy(),
+        )
+        np.testing.assert_array_equal(
+            obs.id.to_numpy(zero_copy_only=False).astype(str),
+            obs_one.id.to_numpy(zero_copy_only=False).astype(str),
+        )
+
 
 def test_add_frames_optional(frame_db):
     """Add a frame with an observation that contains optional quantities (represented as NaN)
