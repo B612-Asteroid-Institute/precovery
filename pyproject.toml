@@ -35,11 +35,16 @@ dependencies = [
     "healpy",
     "requests",
     "rebound==4.5.0",
-    "adam-core @ file:///Users/aleck/Code/adam-core",
+    "adam-core @ file:///${PROJECT_ROOT}/../adam-core",
     "pip>=25.3",
     "mocpy>=0.19.1",
+    "duckdb>=1.4.4",
+    "clickhouse-connect>=0.11.0",
 ]
 [dependency-groups]
+dev = [
+    "-e file:///${PROJECT_ROOT}/../adam-core#egg=adam-core",
+]
 test = [
     "adam-assist>=0.3.6",
     "pytest",

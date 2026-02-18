@@ -8,6 +8,7 @@ import pyarrow.compute as pc
 import time
 from adam_core.orbits.ephemeris import Ephemeris
 from adam_core.photometry.bandpasses import map_to_canonical_filter_bands
+from adam_core.photometry.magnitude import convert_magnitude
 from adam_core.time import Timestamp
 from adam_core.orbits import Orbits
 
@@ -97,6 +98,31 @@ def frame_candidates_from_frames_and_ephem(*, frames, ephem, orbit_id: str) -> F
         type=pa.int64(),
     )
 
+    pred_mag = pa.nulls(len(frames), type=pa.float64())
+    if (
+        hasattr(ephem, "predicted_magnitude_v")
+        and not pc.all(pc.is_null(ephem.predicted_magnitude_v)).as_py()
+    ):
+        canonical = map_to_canonical_filter_bands(
+            frames.obscode,
+            frames.filter,
+            allow_fallback_filters=True,
+        )
+        mag_v = pc.cast(ephem.predicted_magnitude_v, pa.float64())
+        valid = pc.is_valid(mag_v)
+        mags_v_np = pc.fill_null(mag_v, pa.scalar(np.nan, type=pa.float64())).to_numpy(
+            zero_copy_only=False
+        ).astype(np.float64)
+        src = np.full(len(frames), "V", dtype=object)
+        tgt = np.asarray(canonical, dtype=object)
+        pred_mag_np = convert_magnitude(
+            mags_v_np,
+            source_filter_id=src,
+            target_filter_id=tgt,
+            composition="C",
+        )
+        pred_mag = pc.if_else(valid, pa.array(pred_mag_np, type=pa.float64()), None)
+
     return FrameCandidates.from_kwargs(
         exposure_time_start=Timestamp.from_mjd(frames.exposure_mjd_start, scale="utc"),
         exposure_time_mid=Timestamp.from_mjd(frames.exposure_mjd_mid, scale="utc"),
@@ -110,7 +136,7 @@ def frame_candidates_from_frames_and_ephem(*, frames, ephem, orbit_id: str) -> F
         pred_dec_deg=ephem.coordinates.lat,
         pred_vra_degpday=ephem.coordinates.vlon,
         pred_vdec_degpday=ephem.coordinates.vlat,
-        pred_mag=pa.nulls(len(frames), type=pa.float64()),
+        pred_mag=pred_mag,
         rejected=pa.repeat(False, len(frames)),
         rejected_reason=pa.array([None] * len(frames), type=pa.large_string()),
         aberrated_coordinates=ephem.aberrated_coordinates,
@@ -255,18 +281,53 @@ def build_candidates_for_hits(
     db: SearchDB,
     hit_idx: list[int],
     metrics: SearchAgg | None = None,
+    require_magnitudes: bool = False,
 ) -> PrecoveryCandidates:
     if not hit_idx:
         return PrecoveryCandidates.empty()
     obs_hit = obs.take(hit_idx)
     eph_hit = eph_rep.take(hit_idx)
-    cand = candidates_from_ephem(obs_hit, eph_hit, frame)
-    try:
-        t_photo = time.perf_counter() if metrics is not None else None
-        cand = db._attach_magnitudes(cand, orbit)  # noqa: SLF001
-        if metrics is not None and t_photo is not None:
-            metrics.photometry_sec += float(time.perf_counter() - t_photo)
-    except Exception:
-        pass
-    return cand
+
+    pred_mag = pa.nulls(len(obs_hit), type=pa.float64())
+    mag_residual = pa.nulls(len(obs_hit), type=pa.float64())
+    if hasattr(eph_hit, "predicted_magnitude_v") and not pc.all(
+        pc.is_null(eph_hit.predicted_magnitude_v)
+    ).as_py():
+        try:
+            t_photo = time.perf_counter() if metrics is not None else None
+            canonical = map_to_canonical_filter_bands(
+                pa.repeat(frame.obscode[0].as_py(), len(obs_hit)),
+                pa.repeat(frame.filter[0].as_py(), len(obs_hit)),
+                allow_fallback_filters=True,
+            )
+            mag_v = pc.cast(eph_hit.predicted_magnitude_v, pa.float64())
+            valid = pc.is_valid(mag_v)
+            mags_v_np = pc.fill_null(
+                mag_v, pa.scalar(np.nan, type=pa.float64())
+            ).to_numpy(zero_copy_only=False).astype(np.float64)
+            src = np.full(len(obs_hit), "V", dtype=object)
+            tgt = np.asarray(canonical, dtype=object)
+            pred_mag_np = convert_magnitude(
+                mags_v_np,
+                source_filter_id=src,
+                target_filter_id=tgt,
+                composition="C",
+            )
+            pred_mag = pc.if_else(
+                valid, pa.array(pred_mag_np, type=pa.float64()), None
+            )
+            mag_residual = pc.subtract(pc.cast(obs_hit.mag, pa.float64()), pred_mag)
+            if metrics is not None and t_photo is not None:
+                metrics.photometry_sec += float(time.perf_counter() - t_photo)
+        except Exception:
+            if bool(require_magnitudes):
+                raise
+
+    return candidates_from_ephem(
+        obs_hit,
+        eph_hit,
+        frame,
+        pred_mag=pred_mag,
+        mag_residual=mag_residual,
+    )
 

@@ -24,13 +24,3 @@ class SearchDB(Protocol):
 
     def _refresh_limiting_magnitudes_cache_if_needed(self) -> None: ...  # noqa: SLF001
 
-    @overload
-    def _attach_magnitudes(  # noqa: SLF001
-        self, table: PrecoveryCandidates, orbit: Orbits
-    ) -> PrecoveryCandidates: ...
-
-    @overload
-    def _attach_magnitudes(  # noqa: SLF001
-        self, table: FrameCandidates, orbit: Orbits
-    ) -> FrameCandidates: ...
-

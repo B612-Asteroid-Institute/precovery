@@ -315,8 +315,9 @@ def _repair_orbits_covariance_psd_for_sampling(
             "cov_psd_rel_tol": float(rel_tol),
         }
 
+    from precovery.search.covariance_psd import repair_covariance_matrix_psd
+
     cov = orbits.coordinates.covariance.to_matrix()
-    cov = 0.5 * (cov + np.swapaxes(cov, 1, 2))
 
     keep: list[int] = []
     cov_out: list[np.ndarray] = []
@@ -325,35 +326,18 @@ def _repair_orbits_covariance_psd_for_sampling(
     first_drop_min_eig: float | None = None
 
     for i in range(int(cov.shape[0])):
-        c = cov[i]
-        try:
-            w, v = np.linalg.eigh(c)
-        except Exception:  # noqa: BLE001
-            w = np.full(6, np.nan)
-            v = None
-
-        if not np.isfinite(w).all() or v is None:
+        c_raw = cov[i]
+        c_out, modified = repair_covariance_matrix_psd(
+            c_raw, abs_tol=float(abs_tol), rel_tol=float(rel_tol)
+        )
+        if c_out is None:
             if first_drop_orbit is None:
                 first_drop_orbit = str(orbits.orbit_id[i].as_py())
                 first_drop_min_eig = None
             continue
-
-        w_min = float(w.min())
-        w_max = float(w.max())
-        tol = float(max(float(abs_tol), float(rel_tol) * float(w_max)))
-
-        if w_min < -tol:
-            if first_drop_orbit is None:
-                first_drop_orbit = str(orbits.orbit_id[i].as_py())
-                first_drop_min_eig = float(w_min)
-            continue
-
-        if w_min < 0.0:
-            w = np.where(w < 0.0, 0.0, w)
+        if modified:
             n_repaired += 1
-
-        c_psd = (v * w) @ v.T
-        cov_out.append(c_psd.astype(np.float64, copy=False))
+        cov_out.append(c_out.astype(np.float64, copy=False))
         keep.append(int(i))
 
     n_dropped = int(len(orbits) - len(keep))

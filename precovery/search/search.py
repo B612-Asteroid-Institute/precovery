@@ -348,17 +348,21 @@ def _process_targets_chunk(
         frames=frames2, ephem=ephem_for_frames, orbit_id=str(orbit_id)
     )
 
-    t_photo_frames = time.perf_counter() if metrics is not None else None
-    try:
-        frame_cands_mag = db._attach_magnitudes(frame_cands, orbit)  # noqa: SLF001
-    except Exception:
-        frame_cands_mag = frame_cands
-    if metrics is not None and t_photo_frames is not None:
-        metrics.photometry_sec += float(time.perf_counter() - t_photo_frames)
+    need_mag_residual = (max_faint is not None) or (max_bright is not None)
+    need_limiting_mag = len(limit_keys) > 0
+    need_any_mag = bool(need_mag_residual) or bool(need_limiting_mag)
+    # Only require magnitudes when the orbit has an H parameter; otherwise magnitudes are
+    # expected to remain null and downstream magnitude gates should no-op.
+    H_v = None
+    phys = getattr(orbit, "physical_parameters", None)
+    if phys is not None and hasattr(phys, "H_v"):
+        H_v = phys.H_v[0].as_py()
+    require_any_mag = bool(need_any_mag) and (H_v is not None)
+    require_cand_mag = bool(need_mag_residual) and bool(require_any_mag)
 
     too_faint = compute_faint_skip_mask(
         db=db,
-        frame_cands=frame_cands_mag,
+        frame_cands=frame_cands,
         limit_keys=limit_keys,
         limit_vals=limit_vals,
         faint_margin=float(faint_margin),
@@ -377,7 +381,7 @@ def _process_targets_chunk(
         if bool(too_faint[i].as_py()):
             if metrics is not None:
                 metrics.n_frames_faint_skipped += 1
-            fc = frame_cands_mag.take([i])
+            fc = frame_cands.take([i])
             fc = FrameCandidates.from_pyarrow(
                 fc.set_column("rejected", pa.array([True]))
                 .set_column(
@@ -395,7 +399,7 @@ def _process_targets_chunk(
         obs = obs_by_i[i]
         assert obs is not None
         if len(obs) == 0:
-            out_frames.append(frame_cands_mag.take([i]))
+            out_frames.append(frame_cands.take([i]))
             continue
         if metrics is not None:
             metrics.n_observations_loaded += int(len(obs))
@@ -414,7 +418,7 @@ def _process_targets_chunk(
             metrics=metrics,
         )
         if not hit_idx:
-            out_frames.append(frame_cands_mag.take([i]))
+            out_frames.append(frame_cands.take([i]))
             continue
         if metrics is not None:
             metrics.n_accepted += int(len(hit_idx))
@@ -427,6 +431,7 @@ def _process_targets_chunk(
             db=db,
             hit_idx=hit_idx,
             metrics=metrics,
+            require_magnitudes=require_cand_mag,
         )
         if metrics is not None:
             metrics.n_candidates += int(len(cand))
