@@ -14,6 +14,8 @@ import quivr as qv
 from adam_core.orbits import Orbits
 from adam_core.orbits.ephemeris import Ephemeris
 
+AU_KM = 149_597_870.700
+
 from ..methods.covariance_metrics import (
     ellipse_area_deg2_from_cov_ll_deg2,
     expected_observations_from_bytes,
@@ -299,10 +301,21 @@ class _GroupAgg:
     sum_weighted_data_length_bytes: float = 0.0
     n_upper_bound_all_frames: int = 0
 
+    # Observer->object range (from Stage 2 ephemeris `coordinates.rho`).
+    n_rho: int = 0
+    sum_rho_au: float = 0.0
+    min_rho_au: float = float("inf")
+    max_rho_au: float = float("-inf")
+
     sum_sigma_major_arcsec: float = 0.0
     max_sigma_major_arcsec: float = 0.0
     sum_ellipse_area_deg2: float = 0.0
     max_ellipse_area_deg2: float = 0.0
+
+    # Physical-space covariance size (major axis 1σ of 3D position covariance), in km.
+    n_sigma_major_pos_km: int = 0
+    sum_sigma_major_pos_km: float = 0.0
+    max_sigma_major_pos_km: float = 0.0
 
     # Predicted-covariance-only metrics (no observational variance added).
     sum_sigma_major_pred_arcsec: float = 0.0
@@ -358,10 +371,17 @@ class Stage5IndexOnlyTimeSeries(qv.Table):
 
     n_upper_bound_all_frames = qv.Int64Column()
 
+    rho_au_mean = qv.Float64Column(nullable=True)
+    rho_au_min = qv.Float64Column(nullable=True)
+    rho_au_max = qv.Float64Column(nullable=True)
+
     sigma_major_arcsec_mean = qv.Float64Column(nullable=True)
     sigma_major_arcsec_max = qv.Float64Column(nullable=True)
     ellipse_area_deg2_mean = qv.Float64Column(nullable=True)
     ellipse_area_deg2_max = qv.Float64Column(nullable=True)
+
+    sigma_major_pos_km_mean = qv.Float64Column(nullable=True)
+    sigma_major_pos_km_max = qv.Float64Column(nullable=True)
 
     sigma_major_pred_arcsec_mean = qv.Float64Column(nullable=True)
     sigma_major_pred_arcsec_max = qv.Float64Column(nullable=True)
@@ -590,6 +610,9 @@ def run_stage5_index_only_density(
             lat = ephem.coordinates.lat.to_numpy(zero_copy_only=False).astype(
                 np.float64
             )
+            rho = ephem.coordinates.rho.to_numpy(zero_copy_only=False).astype(
+                np.float64
+            )
 
             cov6 = None
             if ephem.coordinates.covariance is not None and (
@@ -600,6 +623,66 @@ def run_stage5_index_only_density(
                 raise ValueError(
                     f"Strategy {strategy!r} ephemeris has no covariance; Stage 5 index-only requires covariance."
                 )
+
+            # Physical-space position covariance (km): transform spherical (rho, lon, lat)
+            # covariance into Cartesian (x,y,z) covariance via Jacobian, then take the
+            # 1σ major axis length of the 3D position covariance.
+            #
+            # Inputs:
+            #   - rho in AU
+            #   - lon/lat in degrees (and covariance in deg^2 / AU*deg)
+            #
+            # We convert angular units to radians inside the covariance before applying
+            # the Jacobian in radian form.
+            sigma_major_pos_km = np.full(int(len(ephem)), np.nan, dtype=np.float64)
+            try:
+                n_ep = int(len(ephem))
+                if n_ep > 0:
+                    lon_rad = np.deg2rad(lon)
+                    lat_rad = np.deg2rad(lat)
+                    r_au = rho.astype(np.float64, copy=False)
+
+                    # Position covariance in (rho, lon, lat) with lon/lat in *radians*.
+                    pos_cov = cov6[:, 0:3, 0:3].astype(np.float64, copy=True)
+                    d2r = float(np.pi / 180.0)
+                    # Scale rows/cols for lon/lat from degrees -> radians.
+                    pos_cov[:, 1, :] *= d2r
+                    pos_cov[:, 2, :] *= d2r
+                    pos_cov[:, :, 1] *= d2r
+                    pos_cov[:, :, 2] *= d2r
+
+                    clat = np.cos(lat_rad)
+                    slat = np.sin(lat_rad)
+                    clon = np.cos(lon_rad)
+                    slon = np.sin(lon_rad)
+
+                    J = np.zeros((n_ep, 3, 3), dtype=np.float64)
+                    # x = r cos(lat) cos(lon)
+                    J[:, 0, 0] = clat * clon
+                    J[:, 0, 1] = -r_au * clat * slon
+                    J[:, 0, 2] = -r_au * slat * clon
+                    # y = r cos(lat) sin(lon)
+                    J[:, 1, 0] = clat * slon
+                    J[:, 1, 1] = r_au * clat * clon
+                    J[:, 1, 2] = -r_au * slat * slon
+                    # z = r sin(lat)
+                    J[:, 2, 0] = slat
+                    J[:, 2, 1] = 0.0
+                    J[:, 2, 2] = r_au * clat
+
+                    tmp = np.einsum("nij,njk->nik", J, pos_cov)
+                    pos_cov_xyz = np.einsum("nij,nkj->nik", tmp, J)
+                    pos_cov_xyz = 0.5 * (
+                        pos_cov_xyz + np.swapaxes(pos_cov_xyz, 1, 2)
+                    )
+                    ok = np.isfinite(pos_cov_xyz).all(axis=(1, 2))
+                    if bool(np.any(ok)):
+                        eig = np.linalg.eigvalsh(pos_cov_xyz[ok])
+                        lam_max = eig[:, -1]
+                        lam_max = np.maximum(lam_max, 0.0)
+                        sigma_major_pos_km[ok] = np.sqrt(lam_max) * float(AU_KM)
+            except Exception:  # noqa: BLE001
+                sigma_major_pos_km = np.full(int(len(ephem)), np.nan, dtype=np.float64)
 
             # Per-target info.
             key_info: dict[tuple[str, int], dict[str, object]] = {}
@@ -634,6 +717,8 @@ def run_stage5_index_only_density(
                 mjd_mid = float(targ_mjd[tidx])
                 dt_days = float(mjd_mid - float(epoch_mjd))
                 abs_dt = float(abs(dt_days))
+                rho_au = float(rho[i])
+                sigma_pos_km = float(sigma_major_pos_km[i])
 
                 cov_ll = cov6[i, 1:3, 1:3].astype(np.float64, copy=False)
                 sigma_major_pred_arcsec = sigma_major_arcsec_from_cov_ll_deg2(
@@ -747,8 +832,10 @@ def run_stage5_index_only_density(
                     exposure_mjd_mid=mjd_mid,
                     dt_days=dt_days,
                     abs_dt_days=abs_dt,
+                    rho_au=rho_au,
                     sigma_major_arcsec=float(sigma_major_arcsec),
                     sigma_major_pred_arcsec=float(sigma_major_pred_arcsec),
+                    sigma_major_pos_km=float(sigma_pos_km),
                     ellipse_area_deg2=float(ellipse_area_deg2),
                     ellipse_area_pred_deg2=float(ellipse_area_pred_deg2),
                     n_pred_pixels=int(n_pix),
@@ -869,10 +956,23 @@ def run_stage5_index_only_density(
                     a.sum_weighted_data_length_bytes += float(sum_w_bytes)
                     if upper:
                         a.n_upper_bound_all_frames += 1
+                    rho_au = float(info.get("rho_au", float("nan")))
+                    if np.isfinite(rho_au):
+                        a.n_rho += 1
+                        a.sum_rho_au += float(rho_au)
+                        a.min_rho_au = min(float(a.min_rho_au), float(rho_au))
+                        a.max_rho_au = max(float(a.max_rho_au), float(rho_au))
                     if np.isfinite(sig_arcsec):
                         a.sum_sigma_major_arcsec += float(sig_arcsec)
                         a.max_sigma_major_arcsec = max(
                             float(a.max_sigma_major_arcsec), float(sig_arcsec)
+                        )
+                    sig_pos_km = float(info.get("sigma_major_pos_km", float("nan")))
+                    if np.isfinite(sig_pos_km) and sig_pos_km >= 0.0:
+                        a.n_sigma_major_pos_km += 1
+                        a.sum_sigma_major_pos_km += float(sig_pos_km)
+                        a.max_sigma_major_pos_km = max(
+                            float(a.max_sigma_major_pos_km), float(sig_pos_km)
                         )
                     if np.isfinite(area_deg2):
                         a.sum_ellipse_area_deg2 += float(area_deg2)
@@ -943,6 +1043,21 @@ def run_stage5_index_only_density(
         area_pred_mean = (
             (float(a.sum_ellipse_area_pred_deg2) / float(n_t)) if (n_t > 0) else None
         )
+        sig_pos_km_mean = (
+            (float(a.sum_sigma_major_pos_km) / float(a.n_sigma_major_pos_km))
+            if int(a.n_sigma_major_pos_km) > 0
+            else None
+        )
+
+        rho_mean: float | None = None
+        rho_min: float | None = None
+        rho_max: float | None = None
+        if int(a.n_rho) > 0:
+            rho_mean = float(a.sum_rho_au) / float(a.n_rho)
+            if np.isfinite(float(a.min_rho_au)):
+                rho_min = float(a.min_rho_au)
+            if np.isfinite(float(a.max_rho_au)):
+                rho_max = float(a.max_rho_au)
 
         exp_obs_per_exp: float | None = None
         if (
@@ -1015,6 +1130,11 @@ def run_stage5_index_only_density(
                     else float(frames_per_hit_exp)
                 ),
                 n_upper_bound_all_frames=int(a.n_upper_bound_all_frames),
+
+                rho_au_mean=(None if rho_mean is None else float(rho_mean)),
+                rho_au_min=(None if rho_min is None else float(rho_min)),
+                rho_au_max=(None if rho_max is None else float(rho_max)),
+
                 sigma_major_arcsec_mean=(None if sig_mean is None else float(sig_mean)),
                 sigma_major_arcsec_max=(
                     None if n_t <= 0 else float(a.max_sigma_major_arcsec)
@@ -1024,6 +1144,15 @@ def run_stage5_index_only_density(
                 ),
                 ellipse_area_deg2_max=(
                     None if n_t <= 0 else float(a.max_ellipse_area_deg2)
+                ),
+
+                sigma_major_pos_km_mean=(
+                    None if sig_pos_km_mean is None else float(sig_pos_km_mean)
+                ),
+                sigma_major_pos_km_max=(
+                    None
+                    if int(a.n_sigma_major_pos_km) <= 0
+                    else float(a.max_sigma_major_pos_km)
                 ),
 
                 sigma_major_pred_arcsec_mean=(

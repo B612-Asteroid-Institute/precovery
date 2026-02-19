@@ -180,26 +180,17 @@ def _designation_from_object_id(object_id: str) -> str:
     return s.split()[0].strip()
 
 
-def _truth_orbit_ids_in_subset(subset_dir: Path) -> set[str]:
+def _truth_designations_in_subset(subset_dir: Path) -> set[str]:
     """
-    Return orbit_ids (designation-normalized) that have matched truth detections in this subset window.
+    Return designations that have matched truth detections in this subset window.
     """
     truth_path = subset_dir / "artifacts" / "truth_precovery_crossmatch.parquet"
-    orbits_path = subset_dir / "artifacts" / "orbits_selected_sbdb.parquet"
-    if not truth_path.exists() or not orbits_path.exists():
+    if not truth_path.exists():
         return set()
 
     truth = pq.read_table(str(truth_path), columns=["matched", "designation"])
     truth = truth.filter(pc.equal(truth["matched"], True))
-    truth_des = set(str(x) for x in pc.unique(truth["designation"]).to_pylist())
-
-    orbits = pq.read_table(str(orbits_path), columns=["orbit_id", "object_id"])
-    orbit_id = [str(x) for x in orbits["orbit_id"].to_pylist()]
-    object_id = [str(x) for x in orbits["object_id"].to_pylist()]
-    des = [_designation_from_object_id(x) for x in object_id]
-    des_to_orbit = {d: oid for d, oid in zip(des, orbit_id)}
-
-    return {des_to_orbit[d] for d in truth_des if d in des_to_orbit}
+    return set(str(x) for x in pc.unique(truth["designation"]).to_pylist())
 
 
 def _run_2body_ephemeris(
@@ -1237,21 +1228,31 @@ def run_stage2_propagation_bench(
     # This lets callers run controlled samples (e.g., 20 truth-matched orbits) for benchmarking.
     orbits_path = orbits_parquet
     orbits = Orbits.from_parquet(str(orbits_path))
-    truth_orbit_ids: set[str] | None = None
+    truth_designations: set[str] | None = None
     if bool(only_truth_orbits):
-        truth_orbit_ids = _truth_orbit_ids_in_subset(subset_dir)
-        if truth_orbit_ids:
-            mask = pc.is_in(
-                orbits.orbit_id, value_set=pa.array(sorted(truth_orbit_ids), pa.large_string())
-            )
-            idx = np.nonzero(mask.to_numpy(zero_copy_only=False).astype(bool))[0]
-            orbits = orbits.take(idx.tolist())
+        truth_designations = _truth_designations_in_subset(subset_dir)
+        if truth_designations:
+            # Filter the *provided* orbits parquet to those with truth in this subset window,
+            # matching by designation extracted from SBDB object_id.
+            obj = [str(x) for x in orbits.object_id.to_pylist()]
+            des = pa.array([_designation_from_object_id(x) for x in obj], type=pa.large_string())
+            mask = pc.is_in(des, value_set=pa.array(sorted(truth_designations), pa.large_string()))
+            idx = np.nonzero(mask.to_numpy(zero_copy_only=False).astype(bool))[0].astype(np.int64, copy=False)
+            if idx.size == 0:
+                raise ValueError(
+                    "No orbits in the provided --orbits-parquet match the subset's truth crossmatch. "
+                    "Either disable --only-truth-orbits/--stage2-only-truth-orbits, or regenerate "
+                    "truth_precovery_crossmatch.parquet for this orbit set."
+                )
+            orbits = orbits.take(pa.array(idx, type=pa.int64()))
     if orbit_ids is not None:
         wanted = sorted({str(x).strip() for x in orbit_ids if str(x).strip()})
         if wanted:
             mask = pc.is_in(orbits.orbit_id, value_set=pa.array(wanted, pa.large_string()))
-            idx = np.nonzero(mask.to_numpy(zero_copy_only=False).astype(bool))[0]
-            orbits = orbits.take(idx.tolist())
+            idx = np.nonzero(mask.to_numpy(zero_copy_only=False).astype(bool))[0].astype(np.int64, copy=False)
+            if idx.size == 0:
+                raise ValueError("No orbits remain after applying --orbit-ids filter.")
+            orbits = orbits.take(pa.array(idx, type=pa.int64()))
     if max_orbits is not None:
         orbits = orbits[: int(max_orbits)]
     cov_ok = _cov_ok_mask(orbits)
@@ -1489,7 +1490,9 @@ def run_stage2_propagation_bench(
         "max_processes": None if max_processes is None else int(max_processes),
         "only_truth_orbits": bool(only_truth_orbits),
         "only_truth_targets": bool(only_truth_targets),
-        "n_orbits_truth_matched": None if truth_orbit_ids is None else int(len(truth_orbit_ids)),
+        "n_truth_designations_in_subset": None
+        if truth_designations is None
+        else int(len(truth_designations)),
         "mean_with_covariance": bool(mean_with_covariance),
         "write_ephemeris": bool(write_ephemeris),
         "write_variants_orbits": bool(write_variants_orbits),

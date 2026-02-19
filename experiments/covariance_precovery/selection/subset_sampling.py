@@ -9,6 +9,8 @@ from typing import Iterable
 
 import numpy as np
 import quivr as qv
+import pyarrow as pa
+import pyarrow.compute as pc
 
 from .bq_select import (
     BqConfig,
@@ -150,6 +152,66 @@ def _concat_features(parts: list[DesignationOrbitWindowFeatures]) -> Designation
     for p in parts:
         out = qv.concatenate([out, p])
     return out
+
+
+def _filter_features(
+    *,
+    features: DesignationOrbitWindowFeatures,
+    regime: str | None = None,
+    q_max_au: float | None = None,
+    exclude_designations: set[str] | None = None,
+) -> DesignationOrbitWindowFeatures:
+    if (regime is None) and (q_max_au is None) and (not exclude_designations):
+        return features
+
+    if len(features) == 0:
+        return features
+
+    des = [str(x) for x in features.designation.to_pylist()]
+
+    def _col_f64(name: str) -> np.ndarray:
+        arr = getattr(features, name).to_numpy(zero_copy_only=False)
+        return arr.astype(np.float64, copy=False)
+
+    a = _col_f64("a")
+    e = _col_f64("e")
+    qv_ = _col_f64("q")
+
+    keep = np.ones(len(features), dtype=bool)
+
+    if exclude_designations:
+        ex = set(str(x) for x in exclude_designations)
+        keep &= np.array([d not in ex for d in des], dtype=bool)
+
+    if regime is not None:
+        r = str(regime).strip()
+        reg = []
+        for i in range(len(features)):
+            ai = None if not np.isfinite(a[i]) else float(a[i])
+            ei = None if not np.isfinite(e[i]) else float(e[i])
+            qi = None if not np.isfinite(qv_[i]) else float(qv_[i])
+            reg.append(_regime_label(a=ai, e=ei, q=qi) == r)
+        keep &= np.array(reg, dtype=bool)
+
+    if q_max_au is not None and np.isfinite(float(q_max_au)):
+        qm = float(q_max_au)
+        q_eff = np.array(qv_, copy=True)
+        # if q missing, compute from a,e when possible
+        q_missing = ~np.isfinite(q_eff)
+        ok_ae = q_missing & np.isfinite(a) & np.isfinite(e)
+        q_eff[ok_ae] = a[ok_ae] * (1.0 - e[ok_ae])
+        keep &= np.isfinite(q_eff) & (q_eff <= qm)
+
+    if not bool(np.any(keep)):
+        return DesignationOrbitWindowFeatures.empty()
+
+    # Avoid pyarrow edge-cases when the result is empty (can produce null-typed indices).
+    idx = np.nonzero(keep)[0].astype(np.int64, copy=False)
+    if idx.size == 0:
+        return DesignationOrbitWindowFeatures.empty()
+    return DesignationOrbitWindowFeatures.from_pyarrow(
+        features.table.take(pa.array(idx, type=pa.int64()))  # type: ignore[arg-type]
+    )
 
 
 def fetch_and_persist_window_features_for_subset(
@@ -317,6 +379,10 @@ def persist_selection_for_subset(
     subset_dir: Path,
     cfg: BqConfig,
     sampling_cfg: SamplingConfig,
+    out_tag: str | None = None,
+    regime: str | None = None,
+    q_max_au: float | None = None,
+    exclude_designations: set[str] | None = None,
 ) -> dict[str, Path]:
     win = read_subset_window(subset_dir)
     win.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -326,28 +392,53 @@ def persist_selection_for_subset(
         features_path = fetch_and_persist_window_features_for_subset(subset_dir=subset_dir, cfg=cfg)
 
     features = DesignationOrbitWindowFeatures.from_parquet(str(features_path))
+    features = _filter_features(
+        features=features,
+        regime=regime,
+        q_max_au=q_max_au,
+        exclude_designations=exclude_designations,
+    )
     window_mid_mjd = 0.5 * (float(win.min_mjd) + float(win.max_mjd))
     selected = select_designations_from_features(
         features=features, window_mid_mjd=window_mid_mjd, cfg=sampling_cfg
     )
 
-    out_sel = win.artifacts_dir / "selected_designations.parquet"
+    tag = None if (out_tag is None or not str(out_tag).strip()) else str(out_tag).strip()
+    sel_name = "selected_designations.parquet" if tag is None else f"selected_designations_{tag}.parquet"
+    out_sel = win.artifacts_dir / sel_name
     selected.to_parquet(str(out_sel))
 
     # Persist selected features for convenience/debugging.
     sel_set = set(selected.designation.to_pylist())
-    keep = [d in sel_set for d in features.designation.to_pylist()]
-    mask = np.array(keep, dtype=bool)
-    # boolean mask for pyarrow table filtering
-    sel_features = DesignationOrbitWindowFeatures.from_pyarrow(
-        features.table.filter(mask)  # type: ignore[arg-type]
+    if not sel_set:
+        sel_features = DesignationOrbitWindowFeatures.empty()
+    else:
+        keep = [d in sel_set for d in features.designation.to_pylist()]
+        mask = np.array(keep, dtype=bool)
+        idx = np.nonzero(mask)[0].astype(np.int64, copy=False)
+        if idx.size == 0:
+            sel_features = DesignationOrbitWindowFeatures.empty()
+        else:
+            sel_features = DesignationOrbitWindowFeatures.from_pyarrow(
+                features.table.take(pa.array(idx, type=pa.int64()))  # type: ignore[arg-type]
+            )
+    feat_name = (
+        "selected_designation_features.parquet"
+        if tag is None
+        else f"selected_designation_features_{tag}.parquet"
     )
-    out_sel_features = win.artifacts_dir / "selected_designation_features.parquet"
+    out_sel_features = win.artifacts_dir / feat_name
     sel_features.to_parquet(str(out_sel_features))
 
     meta = {
         "subset_dir": str(win.subset_dir),
         "window_mid_mjd": window_mid_mjd,
+        "filter": {
+            "regime": None if regime is None else str(regime),
+            "q_max_au": None if q_max_au is None else float(q_max_au),
+            "exclude_n": 0 if not exclude_designations else int(len(exclude_designations)),
+            "tag": tag,
+        },
         "n_selected": int(len(selected)),
         "sampling": {
             "n_total": int(sampling_cfg.n_total),
@@ -358,14 +449,20 @@ def persist_selection_for_subset(
         },
         "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
-    out_meta = win.artifacts_dir / "selected_designations_meta.json"
+    meta_name = "selected_designations_meta.json" if tag is None else f"selected_designations_meta_{tag}.json"
+    out_meta = win.artifacts_dir / meta_name
     out_meta.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
 
     # Stratum counts are useful and cheap to store.
     counts: dict[str, int] = {}
     for s in selected.stratum.to_pylist():
         counts[str(s)] = counts.get(str(s), 0) + 1
-    (win.artifacts_dir / "selected_designations_strata_counts.json").write_text(
+    counts_name = (
+        "selected_designations_strata_counts.json"
+        if tag is None
+        else f"selected_designations_strata_counts_{tag}.json"
+    )
+    (win.artifacts_dir / counts_name).write_text(
         json.dumps(dict(sorted(counts.items())), indent=2, sort_keys=True) + "\n"
     )
 
@@ -384,12 +481,47 @@ def main() -> None:
     p.add_argument("--subset-dir", type=str, required=True)
     p.add_argument("--n-total", type=int, default=200)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--out-tag", type=str, default=None, help="Optional tag to avoid overwriting prior selections.")
+    p.add_argument(
+        "--regime",
+        type=str,
+        default=None,
+        help="Optional orbit regime filter based on q (e.g. NEO, MCA, MBA, TNO).",
+    )
+    p.add_argument(
+        "--q-max-au",
+        type=float,
+        default=None,
+        help="Optional perihelion cutoff (AU). Uses q if present, else computes q=a(1-e) when possible.",
+    )
+    p.add_argument(
+        "--exclude-designations-parquet",
+        type=str,
+        default=None,
+        help="Optional parquet with a 'designation' column (SelectedDesignations or DesignationList) to exclude.",
+    )
     args = p.parse_args()
+
+    exclude: set[str] | None = None
+    if args.exclude_designations_parquet:
+        try:
+            # Try SelectedDesignations schema first
+            ex = SelectedDesignations.from_parquet(str(args.exclude_designations_parquet))
+            exclude = {str(x) for x in ex.designation.to_pylist()}
+        except Exception:  # noqa: BLE001
+            from .subset_designations import DesignationList
+
+            ex2 = DesignationList.from_parquet(str(args.exclude_designations_parquet))
+            exclude = {str(x) for x in ex2.designation.to_pylist()}
 
     out = persist_selection_for_subset(
         subset_dir=Path(args.subset_dir),
         cfg=BqConfig(),
         sampling_cfg=SamplingConfig(n_total=int(args.n_total), seed=int(args.seed)),
+        out_tag=args.out_tag,
+        regime=args.regime,
+        q_max_au=args.q_max_au,
+        exclude_designations=exclude,
     )
     for k, v in out.items():
         print(f"{k}={v}")

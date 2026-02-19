@@ -21,6 +21,7 @@ from adam_core.time import Timestamp
 from precovery.frame_db import HealpixFrame
 from precovery.observation import ObservationsTable
 from precovery.precovery_db import PrecoveryDatabase
+from ..data.gcs_copy import CopyTool, default_copy_tool
 from ..methods.footprints import (
     EllipseFootprint,
     FixedPolygonFootprint,
@@ -37,6 +38,8 @@ from .stage3_healpixel_bench import (
     _map_times_to_target_idx_by_obscode,
     _read_stage2_targets,
 )
+
+GCS_ROOT = "gs://adam-dataset-dev/production/dagster/complete_precovery_db"
 
 
 def _ensure_dir(p: Path) -> None:
@@ -137,6 +140,7 @@ class Stage4PerTarget(qv.Table):
     n_frames_loaded = qv.Int64Column()
     n_observations_loaded = qv.Int64Column()
     n_accepted = qv.Int64Column()
+    n_truth_recovered = qv.Int64Column()
 
     io_sec = qv.Float64Column()
     prep_sec = qv.Float64Column()
@@ -212,7 +216,13 @@ def _truth_matches_empty() -> pa.Table:
     )
 
 
-def _read_truth_matches_table(*, subset_dir: Path, targets: pa.Table) -> pa.Table:
+def _read_truth_matches_table(
+    *,
+    subset_dir: Path,
+    targets: pa.Table,
+    truth_crossmatch_parquet: Path | None = None,
+    orbits_parquet_for_map: Path | None = None,
+) -> pa.Table:
     """
     Return matched truth detections aligned to Stage 2 targets as:
       (orbit_id, target_idx, truth_obsid, truth_time_mjd_utc, truth_ra_deg, truth_dec_deg)
@@ -222,8 +232,16 @@ def _read_truth_matches_table(*, subset_dir: Path, targets: pa.Table) -> pa.Tabl
     same crossmatch sense: (time, sky position) within the truth tolerances.
     """
     artifacts_dir = subset_dir / "artifacts"
-    truth_path = artifacts_dir / "truth_precovery_crossmatch.parquet"
-    orbits_path = artifacts_dir / "orbits_selected_sbdb.parquet"
+    truth_path = (
+        Path(truth_crossmatch_parquet)
+        if truth_crossmatch_parquet is not None
+        else (artifacts_dir / "truth_precovery_crossmatch.parquet")
+    )
+    orbits_path = (
+        Path(orbits_parquet_for_map)
+        if orbits_parquet_for_map is not None
+        else (artifacts_dir / "orbits_selected_sbdb.parquet")
+    )
     if not truth_path.exists():
         raise FileNotFoundError(f"Missing truth crossmatch parquet: {truth_path}")
     if not orbits_path.exists():
@@ -288,7 +306,13 @@ def _read_truth_matches_table(*, subset_dir: Path, targets: pa.Table) -> pa.Tabl
     return out.table.filter(m)
 
 
-def _read_truth_frame_keys_table(*, subset_dir: Path, targets: pa.Table) -> pa.Table:
+def _read_truth_frame_keys_table(
+    *,
+    subset_dir: Path,
+    targets: pa.Table,
+    truth_crossmatch_parquet: Path | None = None,
+    orbits_parquet_for_map: Path | None = None,
+) -> pa.Table:
     """
     Return truth-matched frame keys aligned to Stage 2 targets as:
       (orbit_id, target_idx, healpixel)
@@ -297,8 +321,16 @@ def _read_truth_frame_keys_table(*, subset_dir: Path, targets: pa.Table) -> pa.T
     that are known (from truth crossmatch) to contain a true detection for that orbit/target.
     """
     artifacts_dir = subset_dir / "artifacts"
-    truth_path = artifacts_dir / "truth_precovery_crossmatch.parquet"
-    orbits_path = artifacts_dir / "orbits_selected_sbdb.parquet"
+    truth_path = (
+        Path(truth_crossmatch_parquet)
+        if truth_crossmatch_parquet is not None
+        else (artifacts_dir / "truth_precovery_crossmatch.parquet")
+    )
+    orbits_path = (
+        Path(orbits_parquet_for_map)
+        if orbits_parquet_for_map is not None
+        else (artifacts_dir / "orbits_selected_sbdb.parquet")
+    )
     if not truth_path.exists():
         raise FileNotFoundError(f"Missing truth crossmatch parquet: {truth_path}")
     if not orbits_path.exists():
@@ -479,6 +511,9 @@ def _load_observations_for_frames(
     *,
     obs_cache: OrderedDict[_ObsCacheKey, ObservationsTable] | None = None,
     obs_cache_max_frames: int = 0,
+    lazy_download_blobs: bool = False,
+    gcs_root: str = GCS_ROOT,
+    copy_tool: CopyTool | None = None,
 ) -> ObservationsTable:
     if not frames:
         return ObservationsTable.empty()
@@ -505,7 +540,19 @@ def _load_observations_for_frames(
             data_offset=[int(fr["data_offset"])],
             data_length=[int(fr["data_length"])],
         )
-        obs = db.frames.get_observations(hf)
+        try:
+            obs = db.frames.get_observations(hf)
+        except FileNotFoundError:
+            if not bool(lazy_download_blobs):
+                raise
+            # Download the missing blob from GCS and retry.
+            data_uri = str(fr["data_uri"])
+            local_path = Path(db.frames.data_root) / data_uri
+            src = f"{str(gcs_root).rstrip('/')}/data/{data_uri}"
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            tool = copy_tool or default_copy_tool()
+            tool.cp(src, local_path.parent)
+            obs = db.frames.get_observations(hf)
         out_list.append(obs)
 
         if obs_cache is not None and int(obs_cache_max_frames) > 0:
@@ -1034,6 +1081,11 @@ def run_stage4_detection_filter_bench(
     max_targets: int | None = None,
     obs_cache_max_frames: int = 0,
     write_per_target_metrics: bool = False,
+    lazy_download_blobs: bool = False,
+    gcs_root: str = GCS_ROOT,
+    truth_crossmatch_parquet: Path | None = None,
+    truth_crossmatch_meta_json: Path | None = None,
+    orbits_parquet_for_truth_map: Path | None = None,
 ) -> Path:
     """
     Stage 4 (atomic): benchmark detection-level filtering variants after loading observations.
@@ -1102,13 +1154,27 @@ def run_stage4_detection_filter_bench(
         selected_footprints = _footprints_for_set(footprint_set)
 
     targets_tbl = _read_stage2_targets(stage2_run_dir)
-    truth_all = _read_truth_matches_table(subset_dir=subset_dir, targets=targets_tbl)
-    truth_frame_keys_tbl = _read_truth_frame_keys_table(subset_dir=subset_dir, targets=targets_tbl)
+    truth_all = _read_truth_matches_table(
+        subset_dir=subset_dir,
+        targets=targets_tbl,
+        truth_crossmatch_parquet=truth_crossmatch_parquet,
+        orbits_parquet_for_map=orbits_parquet_for_truth_map,
+    )
+    truth_frame_keys_tbl = _read_truth_frame_keys_table(
+        subset_dir=subset_dir,
+        targets=targets_tbl,
+        truth_crossmatch_parquet=truth_crossmatch_parquet,
+        orbits_parquet_for_map=orbits_parquet_for_truth_map,
+    )
 
     # Truth tolerances (match sense): keep consistent with the truth crossmatch writer.
     time_tol_sec = 60.0
     dist_tol_arcsec = 5.0
-    meta_path = subset_dir / "artifacts" / "truth_precovery_crossmatch_meta.json"
+    meta_path = (
+        Path(truth_crossmatch_meta_json)
+        if truth_crossmatch_meta_json is not None
+        else (subset_dir / "artifacts" / "truth_precovery_crossmatch_meta.json")
+    )
     if meta_path.exists():
         try:
             meta = json.loads(meta_path.read_text())
@@ -1361,7 +1427,12 @@ def run_stage4_detection_filter_bench(
                             healpixels=pred_pix,
                         )
                         obs = _load_observations_for_frames(
-                            db, frames, obs_cache=obs_cache, obs_cache_max_frames=int(obs_cache_max_frames)
+                            db,
+                            frames,
+                            obs_cache=obs_cache,
+                            obs_cache_max_frames=int(obs_cache_max_frames),
+                            lazy_download_blobs=bool(lazy_download_blobs),
+                            gcs_root=str(gcs_root),
                         )
                         io_sec = time.perf_counter() - t_io0
                         det_sigma_floor_arcsec = _det_sigma_floor_arcsec_for_frames(frames=frames)
@@ -1391,6 +1462,7 @@ def run_stage4_detection_filter_bench(
                                             n_frames_loaded=int(len(frames)),
                                             n_observations_loaded=0,
                                             n_accepted=0,
+                                            n_truth_recovered=0,
                                             io_sec=float(io_sec),
                                             prep_sec=0.0,
                                             filter_sec=0.0,
@@ -1435,6 +1507,19 @@ def run_stage4_detection_filter_bench(
                             agg.filter_sec += float(filt_sec)
                             # no separate chi2 step (geometry-only)
 
+                            truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
+                            rec: set[str] = set()
+                            if n_after > 0:
+                                rec = _recover_truth_obsids_for_orbit_target_masked(
+                                    truth_entries=truth_entries,
+                                    prep=prep,
+                                    accepted_mask=keep,
+                                    time_tol_sec=float(time_tol_sec),
+                                    dist_tol_arcsec=float(dist_tol_arcsec),
+                                )
+                                for truth_obsid in rec:
+                                    agg.recovered_truth_pairs.add((oid, str(truth_obsid)))
+
                             if bool(write_per_target_metrics):
                                 per_target_rows.append(
                                     dict(
@@ -1452,23 +1537,12 @@ def run_stage4_detection_filter_bench(
                                         n_frames_loaded=int(len(frames)),
                                         n_observations_loaded=int(len(obs)),
                                         n_accepted=int(n_after),
+                                        n_truth_recovered=int(len(rec)),
                                         io_sec=float(io_sec),
                                         prep_sec=float(prep_sec),
                                         filter_sec=float(filt_sec),
                                     )
                                 )
-
-                            if n_after > 0:
-                                truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
-                                rec = _recover_truth_obsids_for_orbit_target_masked(
-                                    truth_entries=truth_entries,
-                                    prep=prep,
-                                    accepted_mask=keep,
-                                    time_tol_sec=float(time_tol_sec),
-                                    dist_tol_arcsec=float(dist_tol_arcsec),
-                                )
-                                for truth_obsid in rec:
-                                    agg.recovered_truth_pairs.add((oid, str(truth_obsid)))
 
                 for filt_name, agg in aggs.items():
                     runtime_total = float(agg.io_sec + agg.prep_sec + agg.filter_sec)
@@ -1718,7 +1792,12 @@ def run_stage4_detection_filter_bench(
                                 healpixels=pred_pix,
                             )
                             obs = _load_observations_for_frames(
-                                db, frames, obs_cache=obs_cache, obs_cache_max_frames=int(obs_cache_max_frames)
+                                db,
+                                frames,
+                                obs_cache=obs_cache,
+                                obs_cache_max_frames=int(obs_cache_max_frames),
+                                lazy_download_blobs=bool(lazy_download_blobs),
+                                gcs_root=str(gcs_root),
                             )
                             io_sec = time.perf_counter() - t_io0
                             det_sigma_floor_arcsec = _det_sigma_floor_arcsec_for_frames(frames=frames)
@@ -1748,6 +1827,7 @@ def run_stage4_detection_filter_bench(
                                                 n_frames_loaded=int(len(frames)),
                                                 n_observations_loaded=0,
                                                 n_accepted=0,
+                                                n_truth_recovered=0,
                                                 io_sec=float(io_sec),
                                                 prep_sec=0.0,
                                                 filter_sec=0.0,
@@ -1791,6 +1871,19 @@ def run_stage4_detection_filter_bench(
                                     agg.n_after_prefilter += int(n_after)
                                 agg.filter_sec += float(filt_sec)
 
+                                truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
+                                rec: set[str] = set()
+                                if n_after > 0:
+                                    rec = _recover_truth_obsids_for_orbit_target_masked(
+                                        truth_entries=truth_entries,
+                                        prep=prep,
+                                        accepted_mask=keep,
+                                        time_tol_sec=float(time_tol_sec),
+                                        dist_tol_arcsec=float(dist_tol_arcsec),
+                                    )
+                                    for truth_obsid in rec:
+                                        agg.recovered_truth_pairs.add((oid, str(truth_obsid)))
+
                                 if bool(write_per_target_metrics):
                                     per_target_rows.append(
                                         dict(
@@ -1808,23 +1901,12 @@ def run_stage4_detection_filter_bench(
                                             n_frames_loaded=int(len(frames)),
                                             n_observations_loaded=int(len(obs)),
                                             n_accepted=int(n_after),
+                                            n_truth_recovered=int(len(rec)),
                                             io_sec=float(io_sec),
                                             prep_sec=float(prep_sec),
                                             filter_sec=float(filt_sec),
                                         )
                                     )
-
-                                if n_after > 0:
-                                    truth_entries = truth_by_orbit_target.get((oid, int(tidx)), [])
-                                    rec = _recover_truth_obsids_for_orbit_target_masked(
-                                        truth_entries=truth_entries,
-                                        prep=prep,
-                                        accepted_mask=keep,
-                                        time_tol_sec=float(time_tol_sec),
-                                        dist_tol_arcsec=float(dist_tol_arcsec),
-                                    )
-                                    for truth_obsid in rec:
-                                        agg.recovered_truth_pairs.add((oid, str(truth_obsid)))
 
                         continue
 
@@ -1884,7 +1966,12 @@ def run_stage4_detection_filter_bench(
                             healpixels=pred_pix,
                         )
                         obs = _load_observations_for_frames(
-                            db, frames, obs_cache=obs_cache, obs_cache_max_frames=int(obs_cache_max_frames)
+                            db,
+                            frames,
+                            obs_cache=obs_cache,
+                            obs_cache_max_frames=int(obs_cache_max_frames),
+                            lazy_download_blobs=bool(lazy_download_blobs),
+                            gcs_root=str(gcs_root),
                         )
                         io_sec = time.perf_counter() - t_io0
                         det_sigma_floor_arcsec = _det_sigma_floor_arcsec_for_frames(frames=frames)
@@ -2197,6 +2284,20 @@ def main() -> None:
             "per-target distributions (percentiles) for loaded frames/detections/accepted detections."
         ),
     )
+    p.add_argument(
+        "--lazy-download-blobs",
+        action="store_true",
+        help=(
+            "If a referenced frames_*.data blob is missing locally under <subset_dir>/data, "
+            "download it from GCS on-demand and retry. Requires gcloud or gsutil."
+        ),
+    )
+    p.add_argument(
+        "--gcs-root",
+        type=str,
+        default=GCS_ROOT,
+        help="GCS root for the production precovery DB (used when --lazy-download-blobs is set).",
+    )
     args = p.parse_args()
 
     run_dir = run_stage4_detection_filter_bench(
@@ -2222,6 +2323,8 @@ def main() -> None:
         max_targets=args.max_targets,
         obs_cache_max_frames=int(args.obs_cache_max_frames),
         write_per_target_metrics=bool(args.write_per_target_metrics),
+        lazy_download_blobs=bool(args.lazy_download_blobs),
+        gcs_root=str(args.gcs_root),
     )
     print(f"run_dir={run_dir}")
     print(f"metrics_parquet={run_dir / 'metrics.parquet'}")

@@ -48,6 +48,9 @@ def fetch_selected_orbits_via_sbdb(
     subset_dir: Path,
     selected_designations_parquet: Path | None = None,
     batch_size: int = 25,
+    out_orbits_parquet: Path | None = None,
+    out_failures_parquet: Path | None = None,
+    out_meta_json: Path | None = None,
 ) -> SbdbOrbitFetchResult:
     win = read_subset_window(subset_dir)
     win.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -86,10 +89,10 @@ def fetch_selected_orbits_via_sbdb(
     if len(out_orbits) > 0:
         out_orbits = out_orbits.drop_duplicates(subset=["orbit_id"])
 
-    out_orbits_path = win.artifacts_dir / "orbits_selected_sbdb.parquet"
+    out_orbits_path = out_orbits_parquet or (win.artifacts_dir / "orbits_selected_sbdb.parquet")
     out_orbits.to_parquet(str(out_orbits_path))
 
-    failures_path = win.artifacts_dir / "orbits_selected_sbdb_failures.parquet"
+    failures_path = out_failures_parquet or (win.artifacts_dir / "orbits_selected_sbdb_failures.parquet")
     failures.to_parquet(str(failures_path))
 
     meta = {
@@ -101,7 +104,7 @@ def fetch_selected_orbits_via_sbdb(
         "batch_size": int(batch_size),
         "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
-    meta_path = win.artifacts_dir / "orbits_selected_sbdb_meta.json"
+    meta_path = out_meta_json or (win.artifacts_dir / "orbits_selected_sbdb_meta.json")
     meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
 
     return SbdbOrbitFetchResult(
@@ -116,12 +119,39 @@ def main() -> None:
 
     p = argparse.ArgumentParser(description="Fetch adam_core Orbits for selected designations via SBDB.")
     p.add_argument("--subset-dir", type=str, required=True)
+    p.add_argument(
+        "--selected-designations-parquet",
+        type=str,
+        default=None,
+        help="Optional SelectedDesignations parquet (default: subset artifacts/selected_designations.parquet).",
+    )
     p.add_argument("--batch-size", type=int, default=25)
+    p.add_argument(
+        "--out-tag",
+        type=str,
+        default=None,
+        help="Optional tag to avoid overwriting prior orbits artifacts (writes orbits_selected_sbdb_{tag}.parquet, etc.).",
+    )
     args = p.parse_args()
+
+    tag = None if (args.out_tag is None or not str(args.out_tag).strip()) else str(args.out_tag).strip()
+    out_orbits = None
+    out_failures = None
+    out_meta = None
+    if tag is not None:
+        out_orbits = Path(args.subset_dir) / "artifacts" / f"orbits_selected_sbdb_{tag}.parquet"
+        out_failures = Path(args.subset_dir) / "artifacts" / f"orbits_selected_sbdb_failures_{tag}.parquet"
+        out_meta = Path(args.subset_dir) / "artifacts" / f"orbits_selected_sbdb_meta_{tag}.json"
 
     out = fetch_selected_orbits_via_sbdb(
         subset_dir=Path(args.subset_dir),
+        selected_designations_parquet=(
+            None if args.selected_designations_parquet is None else Path(args.selected_designations_parquet)
+        ),
         batch_size=int(args.batch_size),
+        out_orbits_parquet=out_orbits,
+        out_failures_parquet=out_failures,
+        out_meta_json=out_meta,
     )
     print(f"orbits_parquet={out.orbits_parquet}")
     print(f"failures_parquet={out.failures_parquet}")

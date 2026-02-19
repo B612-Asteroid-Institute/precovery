@@ -99,6 +99,7 @@ def crossmatch_truth_to_precovery_subset(
     truth_parquet: Path | None = None,
     time_tol_sec: float = 60.0,
     dist_tol_arcsec: float = 5.0,
+    out_tag: str | None = None,
 ) -> CrossmatchResult:
     win = read_subset_window(subset_dir)
     win.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -213,7 +214,9 @@ def crossmatch_truth_to_precovery_subset(
         )
 
     out_tbl = TruthPrecoveryCrossmatch.from_pyarrow(pa.Table.from_pylist(out_rows))
-    out_parquet = win.artifacts_dir / "truth_precovery_crossmatch.parquet"
+    tag = None if (out_tag is None or not str(out_tag).strip()) else str(out_tag).strip()
+    out_name = "truth_precovery_crossmatch.parquet" if tag is None else f"truth_precovery_crossmatch_{tag}.parquet"
+    out_parquet = win.artifacts_dir / out_name
     out_tbl.to_parquet(str(out_parquet))
 
     n_matched = int(sum(1 for r in out_rows if r["matched"]))
@@ -228,7 +231,10 @@ def crossmatch_truth_to_precovery_subset(
         "healpix_nside": int(nside),
         "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
-    out_meta = win.artifacts_dir / "truth_precovery_crossmatch_meta.json"
+    meta_name = (
+        "truth_precovery_crossmatch_meta.json" if tag is None else f"truth_precovery_crossmatch_meta_{tag}.json"
+    )
+    out_meta = win.artifacts_dir / meta_name
     out_meta.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
 
     return CrossmatchResult(out_parquet=out_parquet, out_meta_json=out_meta)
@@ -239,14 +245,28 @@ def main() -> None:
 
     p = argparse.ArgumentParser(description="Crossmatch truth observations to detections in a local precovery subset.")
     p.add_argument("--subset-dir", type=str, required=True)
+    p.add_argument(
+        "--truth-parquet",
+        type=str,
+        default=None,
+        help="Optional truth_observations_selected parquet (default: subset artifacts/truth_observations_selected.parquet).",
+    )
     p.add_argument("--time-tol-sec", type=float, default=60.0)
     p.add_argument("--dist-tol-arcsec", type=float, default=5.0)
+    p.add_argument(
+        "--out-tag",
+        type=str,
+        default=None,
+        help="Optional tag to avoid overwriting truth_precovery_crossmatch.parquet.",
+    )
     args = p.parse_args()
 
     out = crossmatch_truth_to_precovery_subset(
         subset_dir=Path(args.subset_dir),
+        truth_parquet=(None if args.truth_parquet is None else Path(args.truth_parquet)),
         time_tol_sec=float(args.time_tol_sec),
         dist_tol_arcsec=float(args.dist_tol_arcsec),
+        out_tag=args.out_tag,
     )
     print(f"crossmatch_parquet={out.out_parquet}")
     print(f"meta_json={out.out_meta_json}")

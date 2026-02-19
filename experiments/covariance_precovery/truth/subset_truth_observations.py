@@ -141,6 +141,7 @@ def fetch_and_persist_truth_observations_for_subset_selection(
     subset_dir: Path,
     cfg: BqConfig,
     selected_designations_parquet: Path | None = None,
+    out_tag: str | None = None,
 ) -> TruthObsPersistResult:
     win = read_subset_window(subset_dir)
     win.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -161,7 +162,9 @@ def fetch_and_persist_truth_observations_for_subset_selection(
         end_utc=win.end_utc_exclusive,
     )
 
-    out_truth = win.artifacts_dir / "truth_observations_selected.parquet"
+    tag = None if (out_tag is None or not str(out_tag).strip()) else str(out_tag).strip()
+    truth_name = "truth_observations_selected.parquet" if tag is None else f"truth_observations_selected_{tag}.parquet"
+    out_truth = win.artifacts_dir / truth_name
     truth.to_parquet(str(out_truth))
 
     meta = {
@@ -174,7 +177,12 @@ def fetch_and_persist_truth_observations_for_subset_selection(
         "end_utc_exclusive": win.end_utc_exclusive.isoformat().replace("+00:00", "Z"),
         "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
-    out_meta = win.artifacts_dir / "truth_observations_selected_meta.json"
+    meta_name = (
+        "truth_observations_selected_meta.json"
+        if tag is None
+        else f"truth_observations_selected_meta_{tag}.json"
+    )
+    out_meta = win.artifacts_dir / meta_name
     out_meta.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
 
     return TruthObsPersistResult(truth_parquet=out_truth, meta_json=out_meta)
@@ -185,11 +193,27 @@ def main() -> None:
 
     p = argparse.ArgumentParser(description="Persist truth observations for selected designations in a subset window.")
     p.add_argument("--subset-dir", type=str, required=True)
+    p.add_argument(
+        "--selected-designations-parquet",
+        type=str,
+        default=None,
+        help="Optional SelectedDesignations parquet (default: subset artifacts/selected_designations.parquet).",
+    )
+    p.add_argument(
+        "--out-tag",
+        type=str,
+        default=None,
+        help="Optional tag to avoid overwriting prior truth_observations_selected.parquet.",
+    )
     args = p.parse_args()
 
     out = fetch_and_persist_truth_observations_for_subset_selection(
         subset_dir=Path(args.subset_dir),
         cfg=BqConfig(),
+        selected_designations_parquet=(
+            None if args.selected_designations_parquet is None else Path(args.selected_designations_parquet)
+        ),
+        out_tag=args.out_tag,
     )
     print(f"truth_parquet={out.truth_parquet}")
     print(f"meta_json={out.meta_json}")
