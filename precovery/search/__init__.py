@@ -15,5 +15,26 @@ Production defaults (implementation contract)
 """
 
 from .metrics import SearchAgg, SearchMetrics, metrics_row  # noqa: F401
-from .search import precover_orbit, precover_orbit_with_metrics, precover_orbits  # noqa: F401
+
+# Backend-oriented (DuckDB/ClickHouse/BigQuery) pipeline components.
+from .pipeline_types import (  # noqa: F401
+    AcceptedCounts,
+    BenchTargets,
+    CandidateDetections,
+    MonthWindow,
+    PredictedTargets,
+    PredictedTriples,
+    SubsetPaths,
+    Stage4OrbitMetrics,
+)
+from .backend_pipeline import (  # noqa: F401
+    build_stage23,
+    run_stage1_to_stage4_python,
+    run_stage1_to_stage4_rows_python,
+    stage4_fetch_and_gate_python,
+    stage4_fetch_and_gate_rows_python,
+)
+from .backends.protocols import BackendCapabilities, GateParams, SearchBackend  # noqa: F401
+from .results import AcceptedDetections  # noqa: F401
+from .run import BackendSearchRun, precover_orbits_backend  # noqa: F401
 

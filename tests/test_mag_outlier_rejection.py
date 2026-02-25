@@ -1,72 +1,113 @@
-import pyarrow.compute as pc
-from precovery.config import Config
-from precovery.precovery_db import PrecoveryDatabase
-from precovery.sourcecatalog import bundle_into_frames
+from __future__ import annotations
 
-from .test_predicted_magnitudes import _with_hg
+from pathlib import Path
+
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+from adam_core.orbits.orbits import Orbits, PhysicalParameters
+
+import pytest
+
+from precovery.config import Config
+from precovery.healpix_geom import radec_to_healpixel
+from precovery.main import precover
+from precovery.sourcecatalog import SourceObservation
+
 from .testutils import make_sourceobs_of_orbit
 
 
-def test_detection_mag_outlier_rejected(tmp_path, sample_orbits):
-    # Build a tiny on-disk DB (so check_window re-opens it from_dir) with a single frame+obs.
-    db = PrecoveryDatabase.create(str(tmp_path), nside=32)
+pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
-    # Enable magnitude residual rejection via config.json (read by from_dir).
-    cfg_path = tmp_path / "config.json"
-    cfg = Config.from_json(str(cfg_path))
-    # Asymmetric cut: allow much fainter but not much brighter.
-    cfg.max_mag_residual_fainter_mag = 100.0
-    cfg.max_mag_residual_brighter_mag = 0.1
-    cfg.to_json(str(cfg_path))
 
+def _with_hg(orbit: Orbits, *, H_v: float, G: float) -> Orbits:
+    pp = PhysicalParameters.from_kwargs(H_v=[float(H_v)], G=[float(G)])
+    return orbit.set_column("physical_parameters", pp)
+
+
+def _write_subset(
+    *, subset_dir: Path, observations: list[SourceObservation], cfg: Config
+) -> None:
+    obscode = np.asarray([str(o.obscode) for o in observations], dtype=object)
+    mjd_mid = np.asarray([float(o.exposure_mjd_mid) for o in observations], dtype=np.float64)
+    key_us = np.rint(mjd_mid * 86400.0 * 1e6).astype(np.int64)
+    filt = np.asarray([str(o.filter) for o in observations], dtype=object)
+    obs_id = np.asarray([o.id.decode("utf8") for o in observations], dtype=object)
+    t_obs = np.asarray([float(o.mjd) for o in observations], dtype=np.float64)
+    ra = np.asarray([float(o.ra) for o in observations], dtype=np.float64)
+    dec = np.asarray([float(o.dec) for o in observations], dtype=np.float64)
+    hpix = radec_to_healpixel(ra, dec, int(cfg.nside)).astype(np.int64)
+
+    tbl = pa.table(
+        {
+            "obscode": pa.array(obscode, type=pa.large_string()),
+            "exposure_mjd_mid_utc": pa.array(mjd_mid, type=pa.float64()),
+            "exposure_mjd_mid_key_us": pa.array(key_us, type=pa.int64()),
+            "filter": pa.array(filt, type=pa.large_string()),
+            "healpixel": pa.array(hpix, type=pa.int64()),
+            "observation_id": pa.array(obs_id, type=pa.large_string()),
+            "obstime_mjd_utc": pa.array(t_obs, type=pa.float64()),
+            "ra_deg": pa.array(ra, type=pa.float64()),
+            "dec_deg": pa.array(dec, type=pa.float64()),
+            "ra_sigma_deg": pa.array([float(o.ra_sigma) for o in observations], type=pa.float64()),
+            "dec_sigma_deg": pa.array([float(o.dec_sigma) for o in observations], type=pa.float64()),
+            "mag": pa.array([float(o.mag) for o in observations], type=pa.float64()),
+            "mag_sigma": pa.array([float(o.mag_sigma) for o in observations], type=pa.float64()),
+        }
+    )
+    pq.write_table(tbl, str(subset_dir / "detections.parquet"))
+    cfg.to_json(str(subset_dir / "config.json"))
+
+
+def test_detection_mag_outlier_rejected_brighter(tmp_path: Path, sample_orbits: Orbits) -> None:
     orbit = _with_hg(sample_orbits[0], H_v=15.0, G=0.15)
     mjd = 50000.0
     o = make_sourceobs_of_orbit(orbit, "I41", mjd)
-    # Make the observation magnitude wildly inconsistent with the predicted magnitude.
-    o.mag = 0.0
+    o.mag = 0.0  # extremely bright => negative residual
 
-    db.frames.add_dataset("ds")
-    db.frames.add_frames("ds", bundle_into_frames([o]))
-
-    matches, misses = db.precover(
-        orbit,
-        start_mjd=mjd - 1,
-        end_mjd=mjd + 1,
+    cfg = Config(
+        nside=32,
+        backend="duckdb_parquet",
+        detections_parquet="detections.parquet",
+        max_mag_residual_fainter_mag=100.0,
+        max_mag_residual_brighter_mag=0.1,
     )
-    assert len(misses) == 0
-    assert len(matches) == 1
-    assert pc.is_finite(matches.pred_mag)[0].as_py()
-    assert pc.is_finite(matches.mag_residual)[0].as_py()
-    assert bool(matches.rejected[0].as_py()) is True
-    assert matches.rejected_reason[0].as_py() == "mag_residual"
+    _write_subset(subset_dir=tmp_path, observations=[o], cfg=cfg)
+
+    accepted, counts = precover(
+        orbits=orbit,
+        database_directory=str(tmp_path),
+        start_mjd=mjd - 1.0,
+        end_mjd=mjd + 1.0,
+        max_processes=1,
+    )
+    assert len(counts) >= 1
+    assert len(accepted) == 0
 
 
-def test_detection_mag_outlier_rejected_fainter(tmp_path, sample_orbits):
-    db = PrecoveryDatabase.create(str(tmp_path), nside=32)
-
-    cfg_path = tmp_path / "config.json"
-    cfg = Config.from_json(str(cfg_path))
-    # Asymmetric cut: allow slightly brighter but not much fainter.
-    cfg.max_mag_residual_fainter_mag = 0.1
-    cfg.max_mag_residual_brighter_mag = 100.0
-    cfg.to_json(str(cfg_path))
-
+def test_detection_mag_outlier_rejected_fainter(tmp_path: Path, sample_orbits: Orbits) -> None:
     orbit = _with_hg(sample_orbits[0], H_v=15.0, G=0.15)
     mjd = 50000.0
     o = make_sourceobs_of_orbit(orbit, "I41", mjd)
-    # Force a very large positive residual (much fainter than predicted).
-    o.mag = 100.0
+    o.mag = 100.0  # extremely faint => positive residual
 
-    db.frames.add_dataset("ds")
-    db.frames.add_frames("ds", bundle_into_frames([o]))
-
-    matches, misses = db.precover(
-        orbit,
-        start_mjd=mjd - 1,
-        end_mjd=mjd + 1,
+    cfg = Config(
+        nside=32,
+        backend="duckdb_parquet",
+        detections_parquet="detections.parquet",
+        max_mag_residual_fainter_mag=0.1,
+        max_mag_residual_brighter_mag=100.0,
     )
-    assert len(misses) == 0
-    assert len(matches) == 1
-    assert bool(matches.rejected[0].as_py()) is True
-    assert matches.rejected_reason[0].as_py() == "mag_residual"
+    _write_subset(subset_dir=tmp_path, observations=[o], cfg=cfg)
+
+    accepted, counts = precover(
+        orbits=orbit,
+        database_directory=str(tmp_path),
+        start_mjd=mjd - 1.0,
+        end_mjd=mjd + 1.0,
+        max_processes=1,
+    )
+    assert len(counts) >= 1
+    assert len(accepted) == 0
 

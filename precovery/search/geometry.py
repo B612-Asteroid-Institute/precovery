@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from functools import lru_cache
+
 import healpy as hp
 import numpy as np
 
@@ -42,6 +44,15 @@ def healpix_order_from_nside(nside: int) -> int:
     return int(np.log2(n))
 
 
+@lru_cache(maxsize=64)
+def _unit_circle_vertices(num_vertices: int) -> np.ndarray:
+    v = max(int(num_vertices), 8)
+    angles = np.linspace(0.0, 2.0 * np.pi, v, endpoint=False, dtype=np.float64)
+    unit = np.stack([np.cos(angles), np.sin(angles)], axis=1).astype(np.float64, copy=False)  # (V,2)
+    unit.setflags(write=False)
+    return unit
+
+
 def ellipse_boundary_vertices_lonlat_deg_from_cov(
     *,
     lon0_deg: float,
@@ -58,8 +69,7 @@ def ellipse_boundary_vertices_lonlat_deg_from_cov(
     near poles.
     """
     V = max(int(num_vertices), 8)
-    angles = np.linspace(0.0, 2.0 * np.pi, V, endpoint=False)
-    unit = np.stack([np.cos(angles), np.sin(angles)], axis=1)  # (V,2)
+    unit = _unit_circle_vertices(V)
 
     cov_ll = np.asarray(cov_ll_deg2, dtype=np.float64)
     if cov_ll.shape != (2, 2):

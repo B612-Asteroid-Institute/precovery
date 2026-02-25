@@ -15,7 +15,7 @@ def innov_ellipse_keep_mask(
     pred_lat_deg: np.ndarray,
     pred_cov_ll_deg2: np.ndarray,  # (N,2,2)
     n_sigma: float = 3.0,
-    det_sigma_floor_arcsec: float = 0.10,
+    invalid_sigma_fill_floor_arcsec: float | np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Innovation-ellipse keep mask (Mahalanobis gate) in a local tangent plane.
@@ -40,8 +40,9 @@ def innov_ellipse_keep_mask(
         Predicted sky positions in degrees.
     pred_cov_ll_deg2
         Predicted covariance in (lon,lat) degrees^2, shape (N,2,2).
-    det_sigma_floor_arcsec
-        Optional floor applied to observational sigmas to avoid pathological zeros.
+    invalid_sigma_fill_floor_arcsec
+        Optional fill floor applied only to missing/invalid observational sigmas.
+        If None, no fill is applied.
 
     Returns
     -------
@@ -77,13 +78,27 @@ def innov_ellipse_keep_mask(
     d_p = cov_ll[:, 1, 1]
     b_p = cos_lat * cov_ll[:, 0, 1]
 
-    # Observational diagonal covariance in tangent plane.
-    floor_deg = float(det_sigma_floor_arcsec) / 3600.0
-    sig_lon = np.where(np.isfinite(sig_lon) & (sig_lon > 0.0), sig_lon, 0.0)
-    sig_lat = np.where(np.isfinite(sig_lat) & (sig_lat > 0.0), sig_lat, 0.0)
-    if floor_deg > 0.0:
-        sig_lon = np.maximum(sig_lon, floor_deg)
-        sig_lat = np.maximum(sig_lat, floor_deg)
+    # Optional invalid-sigma fill floor.
+    if invalid_sigma_fill_floor_arcsec is not None:
+        floor = invalid_sigma_fill_floor_arcsec
+        if np.ndim(floor) == 0:
+            floor_deg = float(floor) / 3600.0
+        else:
+            floor_arr = np.asarray(floor, dtype=np.float64)
+            if floor_arr.shape != lon_o.shape:
+                raise ValueError("invalid_sigma_fill_floor_arcsec array must match lon/lat shape.")
+            floor_deg = floor_arr / 3600.0
+        lon_ok = np.isfinite(sig_lon) & (sig_lon > 0.0)
+        lat_ok = np.isfinite(sig_lat) & (sig_lat > 0.0)
+        if np.ndim(floor_deg) == 0:
+            f = float(floor_deg)
+            fill = f if f > 0.0 else 0.0
+            sig_lon = np.where(lon_ok, sig_lon, fill)
+            sig_lat = np.where(lat_ok, sig_lat, fill)
+        else:
+            fill = np.where(np.isfinite(floor_deg) & (floor_deg > 0.0), floor_deg, 0.0)
+            sig_lon = np.where(lon_ok, sig_lon, fill)
+            sig_lat = np.where(lat_ok, sig_lat, fill)
     var_x = (sig_lon * cos_lat) ** 2
     var_y = sig_lat**2
 
@@ -98,4 +113,3 @@ def innov_ellipse_keep_mask(
     chi2 = np.where(np.isfinite(chi2), chi2, np.inf)
 
     return chi2 <= float(n_sigma) ** 2
-

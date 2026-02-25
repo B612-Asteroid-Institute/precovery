@@ -15,8 +15,11 @@ class Config:
         nside: int = 32,
         data_file_max_size: int = int(1e9),
         build_version: str = __version__,
-        limiting_magnitudes_parquet_file: str | None = "limiting_magnitudes.parquet",
-        faint_frame_skip_margin_mag: float = 0.0,
+        # Backend selection for precovery/search.
+        backend: str = "duckdb_parquet",
+        # DuckDB parquet dataset path (required when backend == "duckdb_parquet").
+        detections_parquet: str | None = None,
+        faint_frame_skip_margin_mag: float = 0.30,
         # Asymmetric magnitude residual thresholds (in magnitudes).
         # mag_residual = observed_mag - predicted_mag
         # - If mag_residual > max_mag_residual_fainter_mag => too faint => reject
@@ -39,10 +42,8 @@ class Config:
         self.build_version = build_version
         self.nside = nside
         self.data_file_max_size = data_file_max_size
-        # Generated-once cache file stored in the DB directory (Parquet).
-        # If present, it will be loaded once at DB open and used for fast faint-frame
-        # skipping without any subsequent SQL queries.
-        self.limiting_magnitudes_parquet_file = limiting_magnitudes_parquet_file
+        self.backend = backend
+        self.detections_parquet = detections_parquet
         # If predicted_mag > (limit + margin), treat it as too faint to be detectable.
         self.faint_frame_skip_margin_mag = faint_frame_skip_margin_mag
         self.max_mag_residual_fainter_mag = max_mag_residual_fainter_mag

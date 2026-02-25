@@ -1,10 +1,11 @@
 import logging
 from typing import Optional, Tuple
 
-import quivr as qv
 from adam_core.orbits import Orbits
 
-from .precovery_db import FrameCandidates, PrecoveryCandidates, PrecoveryDatabase
+from .search.pipeline_types import AcceptedCounts
+from .search.results import AcceptedDetections
+from .search.run import precover_orbits_backend
 
 logger = logging.getLogger("precovery")
 logging.basicConfig()
@@ -22,32 +23,31 @@ def precover(
     datasets: Optional[set[str]] = None,
     max_processes: Optional[int] = None,
     n_sigma: float = 3.0,
-) -> Tuple[PrecoveryCandidates, FrameCandidates]:
+) -> Tuple[AcceptedDetections, AcceptedCounts]:
     """
-    Connect to database directory and run precovery for the input orbit.
+    Connect to a subset directory and run precovery for the input orbit(s).
+
+    This entrypoint now uses the backend-adapter pipeline (DuckDB/ClickHouse/BigQuery).
+    The legacy SQLite blob-store search path is deprecated.
     """
-    precovery_db = PrecoveryDatabase.from_dir(
-        database_directory,
-        create=False,
-        mode="r",
-        allow_version_mismatch=allow_version_mismatch,
+    _ = tolerance
+    _ = allow_version_mismatch
+    _ = datasets
+
+    if start_mjd is None or end_mjd is None:
+        raise ValueError("start_mjd and end_mjd are required for backend search")
+
+    run = precover_orbits_backend(
+        orbits=orbits,
+        subset_dir=database_directory,
+        start_mjd=float(start_mjd),
+        end_mjd=float(end_mjd),
+        obscodes=(),
+        window_size_days=int(window_size),
+        stage2_strategy="assist_window_then_2body_variants:sigma_points",
+        max_processes=max_processes,
+        n_sigma=float(n_sigma),
+        polygon_vertices=32,
+        detailed_timings=False,
     )
-
-    precovery_candidates = PrecoveryCandidates.empty()
-    frame_candidates = FrameCandidates.empty()
-
-    for orbit in orbits:
-        candidates, frames = precovery_db.precover(
-            orbit,
-            tolerance=tolerance,
-            start_mjd=start_mjd,
-            end_mjd=end_mjd,
-            window_size=window_size,
-            datasets=datasets,
-            max_processes=max_processes,
-            n_sigma=n_sigma,
-        )
-        precovery_candidates = qv.concatenate([precovery_candidates, candidates])
-        frame_candidates = qv.concatenate([frame_candidates, frames])
-
-    return precovery_candidates, frame_candidates
+    return run.accepted, run.accepted_counts

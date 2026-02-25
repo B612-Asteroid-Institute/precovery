@@ -2,10 +2,17 @@ import pytest
 from adam_assist import ASSISTPropagator
 from adam_core.dynamics.propagation import propagate_2body
 from adam_core.time import Timestamp
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
+from pathlib import Path
 
 from precovery.observation import ObservationsTable
+from precovery.main import precover
 
 from .testutils import make_sourceframe_with_observations
+
+
+pytestmark = [pytest.mark.benchmark, pytest.mark.slow]
 
 
 @pytest.mark.benchmark(group="framedb_binary_internals")
@@ -82,18 +89,20 @@ def test_benchmark_propagate_orbit_2body(benchmark, sample_orbits, propagate_dis
 
 @pytest.mark.benchmark(group="precovery")
 @pytest.mark.parametrize("max_processes", [1])
-def test_benchmark_precovery_search(benchmark, precovery_db_with_data, sample_orbits, max_processes):
+def test_benchmark_precovery_search(benchmark, detections_subset_dir, sample_orbits, max_processes):
 
     orbit = sample_orbits[0]
     # Keep the benchmark bounded. The refactored pipeline is designed for large-scale runs,
     # but the test suite should not spend minutes scanning multi-day ranges.
-    mjd_min, _mjd_max = precovery_db_with_data.frames.idx.mjd_bounds()
-    start_mjd = float(mjd_min)
-    end_mjd = float(mjd_min) + 1.0
+    det = pq.read_table(str(Path(detections_subset_dir) / "detections.parquet"), columns=["exposure_mjd_mid_utc"])
+    m = pc.min_max(det["exposure_mjd_mid_utc"])
+    start_mjd = float(m["min"].as_py())
+    end_mjd = start_mjd + 1.0
 
     def benchmark_case():
-        precovery_db_with_data.precover(
-            orbit,
+        precover(
+            orbits=orbit,
+            database_directory=str(detections_subset_dir),
             max_processes=max_processes,
             start_mjd=start_mjd,
             end_mjd=end_mjd,

@@ -3,12 +3,18 @@ import string
 from typing import Optional, Tuple
 
 import healpy
+from functools import lru_cache
 from adam_assist import ASSISTPropagator
 from adam_core.observers import Observers
 from adam_core.orbits import Orbits
 from adam_core.time import Timestamp
 
 from precovery.sourcecatalog import SourceFrame, SourceObservation
+
+
+@lru_cache(maxsize=1)
+def _assist_propagator() -> ASSISTPropagator:
+    return ASSISTPropagator()
 
 
 def make_sourceobs(
@@ -64,8 +70,10 @@ def make_sourceobs_of_orbit(
     orbit: Orbits,
     obscode: str,
     mjd: float = 50000.0,
+    *,
+    filter: str = "V",
 ):
-    propagator = ASSISTPropagator()
+    propagator = _assist_propagator()
 
     times = Timestamp.from_mjd([mjd], scale="utc")
     # create observers
@@ -77,6 +85,7 @@ def make_sourceobs_of_orbit(
         obscode=obscode,
         ra=ephem.coordinates.lon[0].as_py(),
         dec=ephem.coordinates.lat[0].as_py(),
+        filter=str(filter),
     )
     return obs
 
