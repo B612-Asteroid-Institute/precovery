@@ -387,7 +387,8 @@ def predict_targets_batched_assist_window_then_2body_variants_sigma_points(
     K_SIGMA = 13
 
     # Auto time chunk sizing based on RAM budget, accounting for variant expansion.
-    if time_chunk_size == 0:
+    auto_time_chunk = time_chunk_size == 0
+    if auto_time_chunk:
         rows_per_time_target = int(orbit_chunk_size * K_SIGMA)
         time_chunk_size, _meta = resolve_time_chunk_size_from_ram_budget(
             n_time_targets=int(len(times_utc)),
@@ -396,6 +397,8 @@ def predict_targets_batched_assist_window_then_2body_variants_sigma_points(
             effective_bytes_per_row=200.0,
             min_chunk=1,
         )
+        # Keep windowed Stage-2 result objects small enough for Ray object-store stability.
+        time_chunk_size = int(min(int(time_chunk_size), 2_000))
     if time_chunk_size < 0:
         time_chunk_size = int(len(times_utc))
 
@@ -439,9 +442,12 @@ def predict_targets_batched_assist_window_then_2body_variants_sigma_points(
     num_cpus = _resolve_ray_num_cpus(max_processes)
     use_ray = initialize_use_ray(num_cpus=num_cpus)
     pending: list[ray.ObjectRef] = []
-    max_pending = int((os.cpu_count() or 8) * 2)
-    if num_cpus is not None and num_cpus > 0:
-        max_pending = int(max(4, int(num_cpus) * 2))
+    pending_rows: dict[ray.ObjectRef, int] = {}
+    n_workers = int(num_cpus) if (num_cpus is not None and int(num_cpus) > 0) else int(os.cpu_count() or 4)
+    max_pending = int(max(2, n_workers))
+    # Bound in-flight result rows (mean ephemeris rows) to avoid plasma backpressure.
+    max_inflight_rows = int(max(40_000, n_workers * 40_000))
+    inflight_rows = 0
 
     for o0 in range(0, int(len(orbits)), int(orbit_chunk_size)):
         o1 = int(min(int(len(orbits)), int(o0) + int(orbit_chunk_size)))
@@ -523,6 +529,21 @@ def predict_targets_batched_assist_window_then_2body_variants_sigma_points(
                 obs_chunk = observers_all.take(idx_chunk.tolist())
 
                 if use_ray:
+                    chunk_rows = int(len(orb_center)) * int(len(times_chunk))
+                    # Backpressure: keep both task count and object volume bounded.
+                    while pending and (
+                        len(pending) >= max_pending
+                        or (inflight_rows + int(chunk_rows)) > max_inflight_rows
+                    ):
+                        ready, pending = ray.wait(pending, num_returns=1)
+                        ref = ready[0]
+                        mean, tloc = ray.get(ref)
+                        inflight_rows = int(max(0, inflight_rows - int(pending_rows.pop(ref, 0))))
+                        out_parts.append(mean)
+                        if timings is not None:
+                            for k, v in tloc.items():
+                                timings[k] = timings.get(k, 0.0) + float(v)
+
                     fut = _stage2_windowed_sigma_points_center_time_chunk_remote.remote(
                         orb_center,
                         variants_ref,
@@ -532,13 +553,8 @@ def predict_targets_batched_assist_window_then_2body_variants_sigma_points(
                         bool(default_mag_slope_G is not None),
                     )
                     pending.append(fut)
-                    if len(pending) >= max_pending:
-                        ready, pending = ray.wait(pending, num_returns=1)
-                        mean, tloc = ray.get(ready[0])
-                        out_parts.append(mean)
-                        if timings is not None:
-                            for k, v in tloc.items():
-                                timings[k] = timings.get(k, 0.0) + float(v)
+                    pending_rows[fut] = int(chunk_rows)
+                    inflight_rows += int(chunk_rows)
                 else:
                     mean, tloc = _stage2_windowed_sigma_points_center_time_chunk(
                         orb_center=orb_center,
@@ -554,7 +570,11 @@ def predict_targets_batched_assist_window_then_2body_variants_sigma_points(
                             timings[k] = timings.get(k, 0.0) + float(v)
 
     if use_ray and pending:
-        for mean, tloc in ray.get(pending):
+        while pending:
+            ready, pending = ray.wait(pending, num_returns=1)
+            ref = ready[0]
+            mean, tloc = ray.get(ref)
+            inflight_rows = int(max(0, inflight_rows - int(pending_rows.pop(ref, 0))))
             out_parts.append(mean)
             if timings is not None:
                 for k, v in tloc.items():
@@ -1759,4 +1779,3 @@ def predict_observations_in_frame(
     )
     eph_nom = attach_cov_ll_to_ephemeris(ephem=eph_nom, cov_ll_deg2=cov_ll)
     return TargetPrediction(ephem=eph_nom, cov_ll_deg2=cov_ll)
-

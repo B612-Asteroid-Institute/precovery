@@ -17,12 +17,7 @@ from .backends.factory import backend_from_config
 from .backends.protocols import GateParams, SearchBackend
 from .footprints import CovPolygonReconstructedMoc
 from .gate_counts import GateTotals
-from .gate_defaults import (
-    DEFAULT_APPLY_SYSTEMATIC_IF_REPORTED_RMS_LT_ARCSEC_BY_OBSCODE,
-    DEFAULT_INVALID_SIGMA_FILL_FLOOR_ARCSEC_BY_OBSCODE,
-    DEFAULT_INVALID_SIGMA_FILL_FLOOR_ARCSEC_GLOBAL,
-    DEFAULT_SIGMA_SYSTEMATIC_ARCSEC_BY_OBSCODE,
-)
+from .gate_params_factory import build_gate_params
 from .results import AcceptedDetections
 from .runtime_config import load_mag_gate_config
 
@@ -103,14 +98,8 @@ def precover_orbits_backend(
         obscodes=set(obscodes) if obscodes else None,
         config=cfg,
     )
-    gate = GateParams(
+    gate = build_gate_params(
         innovation_gate_n_sigma=float(n_sigma),
-        invalid_sigma_fill_floor_arcsec_global=float(DEFAULT_INVALID_SIGMA_FILL_FLOOR_ARCSEC_GLOBAL),
-        invalid_sigma_fill_floor_arcsec_by_obscode=dict(DEFAULT_INVALID_SIGMA_FILL_FLOOR_ARCSEC_BY_OBSCODE),
-        sigma_systematic_arcsec_by_obscode=dict(DEFAULT_SIGMA_SYSTEMATIC_ARCSEC_BY_OBSCODE),
-        apply_systematic_if_reported_rms_lt_arcsec_by_obscode=dict(
-            DEFAULT_APPLY_SYSTEMATIC_IF_REPORTED_RMS_LT_ARCSEC_BY_OBSCODE
-        ),
         max_mag_residual_fainter_mag=max_faint,
         max_mag_residual_brighter_mag=max_bright,
     )

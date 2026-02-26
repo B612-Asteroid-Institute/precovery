@@ -29,13 +29,13 @@ classifiers = [
 dependencies = [
     "numpy",
     "numba",
-    "sqlalchemy",
     "regex",
     "pandas",
     "healpy",
     "requests",
     "rebound==4.5.0",
     "adam-core @ file:///${PROJECT_ROOT}/../adam-core",
+    "adam-assist @ file:///${PROJECT_ROOT}/../adam-assist",
     "pip>=25.3",
     "mocpy>=0.19.1",
     "duckdb>=1.4.4",
@@ -44,6 +44,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "-e file:///${PROJECT_ROOT}/../adam-core#egg=adam-core",
+    "-e file:///${PROJECT_ROOT}/../adam-assist#egg=adam-assist",
 ]
 test = [
     "adam-assist>=0.3.6",
@@ -68,11 +69,6 @@ notebooks = [
 
 [project.urls]
 "Homepage" = "https://github.com/b612-asteroid-institute/precovery"
-
-[project.scripts]
-precovery-index = "precovery.ingest:index"
-precovery-limitmags = "precovery.limiting_magnitudes:main"
-precovery-migrate = "precovery.migrate:main"
 
 [tool.pdm.version]
 source = "scm"
@@ -110,7 +106,7 @@ line-length = 88
 profile = "black"
 [tool.mypy]
 exclude = "virtualenv*"
-plugins = ["numpy.typing.mypy_plugin", "sqlalchemy.ext.mypy.plugin"]
+plugins = ["numpy.typing.mypy_plugin"]
 ignore_missing_imports = true
 
 
@@ -124,6 +120,13 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 filterwarnings = ["ignore::DeprecationWarning:astropy"]
+addopts = "-m 'not integration and not benchmark and not profile'"
+markers = [
+  "integration: integration tests (IO/backends/ASSIST); skipped by default",
+  "benchmark: performance benchmarks (pytest-benchmark); skipped by default",
+  "profile: profiling runs; skipped by default",
+  "slow: slow-running tests (informational marker)",
+]
 
 [tool.ruff]
 line-length = 110

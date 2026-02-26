@@ -256,6 +256,8 @@ def build_predictions_and_triples(
             )
         else:
             # Windowed ASSIST + 2-body variants, but batched across orbits and time chunks.
+            windowed_orbit_chunk_size = int(min(4, max(1, int(len(orbits)))))
+            windowed_time_chunk_size = int(min(2_000, max(250, int(time_chunk_size // 10))))
             ephem_all, cov_ll_all = predict_targets_batched_assist_window_then_2body_variants_sigma_points(
                 orbits=orbits,
                 obscode=pc.cast(obsc, pa.large_string()).to_numpy(zero_copy_only=False).astype(object),
@@ -264,8 +266,8 @@ def build_predictions_and_triples(
                 window_size_days=int(window_size_days),
                 observers_all=observers_all,
                 max_processes=max_processes,
-                orbit_chunk_size=int(min(8, max(1, int(len(orbits))))),
-                time_chunk_size=0,
+                orbit_chunk_size=int(windowed_orbit_chunk_size),
+                time_chunk_size=int(windowed_time_chunk_size),
                 aberration_mode="none",
                 default_mag_slope_G=(0.15 if need_pred_mag else None),
                 timings=(stage2_timings if bool(detailed_timings) else None),
@@ -1110,4 +1112,3 @@ def build_predictions_and_triples(
         int(n_pairs_skipped_faint),
         micro_timings,
     )
-

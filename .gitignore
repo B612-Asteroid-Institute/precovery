@@ -128,6 +128,6 @@ precovery/_version.py
 .cursor/
 
 # precovery experiment harness outputs
-experiments/covariance_precovery/results/
-experiments/covariance_precovery/local_db/
-experiments/covariance_precovery/tmp/
+bench/results/
+bench/local_db/
+bench/tmp/

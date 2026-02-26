@@ -436,12 +436,8 @@ def stage4_fetch_and_gate_rows_python(
         )
     )
 
-    # Accepted ids table (used for accepted-detections join).
-    accepted_ids = t_counts.filter(pc.field("_keep")).select(
-        ["orbit_id", "target_idx", "observation_id"]
-    )
-
-    if accepted_ids.num_rows == 0:
+    n_keep_final = int(np.count_nonzero(keep_final))
+    if n_keep_final == 0:
         return BackendGateRowsResult(
             accepted_detections=AcceptedDetections.empty(),
             accepted_counts=accepted_counts,
@@ -450,12 +446,9 @@ def stage4_fetch_and_gate_rows_python(
             elapsed_s=float(time.perf_counter() - t0),
         )
 
-    # Join accepted ids back to full candidate rows.
-    acc_full = accepted_ids.join(
-        candidates.table,
-        keys=["orbit_id", "target_idx", "observation_id"],
-        join_type="inner",
-    )
+    # Avoid large hash-join explosions when key multiplicities are high:
+    # accepted detections are exactly the keep_final-filtered candidate rows.
+    acc_full = candidates.table.filter(pa.array(keep_final, type=pa.bool_()))
     acc_full = acc_full.select(
         [
             "orbit_id",
@@ -707,4 +700,3 @@ def run_stage1_to_stage4_rows_python(
         timings=timings,
     )
     return Stage14RunRowsPython(targets=targets, build=build, gate=gate_res)
-
