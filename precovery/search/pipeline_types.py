@@ -90,10 +90,33 @@ class Stage3OrbitMetrics(qv.Table):
 
     orbit_id = qv.LargeStringColumn()
     n_frames_geometry_matched = qv.Int64Column()
+    n_frames_stage3_rejected_any = qv.Int64Column()
     n_frames_lim_mag_rejected = qv.Int64Column()
+    n_frames_uncertainty_rejected = qv.Int64Column()
     n_frames_truth_geometry_matched = qv.Int64Column()
+    n_frames_truth_stage3_rejected_any = qv.Int64Column()
     n_frames_lim_mag_truth_rejected = qv.Int64Column()
+    n_frames_truth_uncertainty_rejected = qv.Int64Column()
     n_detections_truth_frame_candidates = qv.Int64Column()
+    n_targets_preprop_viability_rejected = qv.Int64Column()
+    n_targets_preprop_time_limited = qv.Int64Column()
+    n_targets_failfast_dynamics_error = qv.Int64Column()
+    n_targets_eval_total = qv.Int64Column()
+    n_targets_eval_after_policy = qv.Int64Column()
+    completed_full_time_period_check = qv.BooleanColumn()
+    preprop_decision = qv.LargeStringColumn(nullable=True)
+    preprop_reason = qv.LargeStringColumn(nullable=True)
+    preprop_trigger_metric = qv.LargeStringColumn(nullable=True)
+    preprop_trigger_value = qv.Float64Column(nullable=True)
+    preprop_trigger_threshold = qv.Float64Column(nullable=True)
+    preprop_time_limit_days_applied = qv.Float64Column(nullable=True)
+    preprop_first_excluded_target_mjd_utc = qv.Float64Column(nullable=True)
+    failfast_stage = qv.LargeStringColumn(nullable=True)
+    failfast_reason = qv.LargeStringColumn(nullable=True)
+    failfast_time_mjd_tdb = qv.Float64Column(nullable=True)
+    failfast_t0_mjd_tdb = qv.Float64Column(nullable=True)
+    failfast_t1_mjd_tdb = qv.Float64Column(nullable=True)
+    failfast_dt_days = qv.Float64Column(nullable=True)
 
 
 class Stage4OrbitMetrics(qv.Table):
@@ -108,6 +131,8 @@ class Stage4OrbitMetrics(qv.Table):
     n_detections_candidates = qv.Int64Column()
     # Innovation-ellipse survivors (before magnitude outlier rejection).
     n_detections_gate_matched = qv.Int64Column()
+    # Rejected by innovation-ellipse gate.
+    n_detections_innov_ellipse_rejected = qv.Int64Column()
     # Magnitude outlier rejections (evaluated only on innovation-ellipse survivors).
     n_detections_magnitude_rejected = qv.Int64Column()
 

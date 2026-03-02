@@ -26,6 +26,19 @@ class Config:
         # - If mag_residual < -max_mag_residual_brighter_mag => too bright => reject
         max_mag_residual_fainter_mag: float | None = None,
         max_mag_residual_brighter_mag: float | None = None,
+        # Optional Stage-3 uncertainty budget (arcsec, major axis 1-sigma in tangent plane).
+        # When set, orbit-target predictions above this threshold are skipped before Stage 4.
+        max_on_sky_sigma_major_arcsec: float | None = None,
+        # Optional Stage-2 pre-propagation viability policy.
+        preprop_viability_policy: str = "off",
+        preprop_short_arc_days_threshold: float = 14.0,
+        preprop_time_limit_days_short_arc: float = 30.0,
+        preprop_time_limit_days_default: float = 90.0,
+        preprop_max_sigma_r_over_r: float | None = None,
+        preprop_max_covariance_condition: float | None = None,
+        # Legacy knob retained for backwards compatibility; no longer used for policy decisions.
+        preprop_viability_min_score: float = 0.25,
+        preprop_fail_open_on_scoring_error: bool = False,
     ):
         """
         Precovery Database Configuration
@@ -48,6 +61,15 @@ class Config:
         self.faint_frame_skip_margin_mag = faint_frame_skip_margin_mag
         self.max_mag_residual_fainter_mag = max_mag_residual_fainter_mag
         self.max_mag_residual_brighter_mag = max_mag_residual_brighter_mag
+        self.max_on_sky_sigma_major_arcsec = max_on_sky_sigma_major_arcsec
+        self.preprop_viability_policy = preprop_viability_policy
+        self.preprop_short_arc_days_threshold = preprop_short_arc_days_threshold
+        self.preprop_time_limit_days_short_arc = preprop_time_limit_days_short_arc
+        self.preprop_time_limit_days_default = preprop_time_limit_days_default
+        self.preprop_max_sigma_r_over_r = preprop_max_sigma_r_over_r
+        self.preprop_max_covariance_condition = preprop_max_covariance_condition
+        self.preprop_viability_min_score = preprop_viability_min_score
+        self.preprop_fail_open_on_scoring_error = preprop_fail_open_on_scoring_error
 
         return
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 
@@ -60,6 +61,9 @@ class DuckDbParquetBackend(SearchBackend):
         supports_sql_gate_rows=False,
         supports_filter_triples_to_existing_frames=True,
         supports_frame_pixels_by_target=True,
+        supports_fetch_candidates_from_triples_parquet=True,
+        supports_count_accepted_from_triples_parquet=True,
+        supports_detection_key_match_totals_from_triples_parquet=True,
     )
     duckdb_path: Path | None = None
 
@@ -207,17 +211,123 @@ class DuckDbParquetBackend(SearchBackend):
         cands = self.fetch_candidates(subset=subset, triples=triples, limit=None)
         return accepted_counts_python(candidates=cands, preds=preds, gate=gate)
 
+    def fetch_candidates_from_triples_parquet(
+        self,
+        *,
+        subset: SubsetPaths,  # unused
+        triples_parquet: str,
+        limit: int | None = None,
+    ) -> CandidateDetections:
+        con = self._conn()
+        try:
+            p_det = _sql_quote(str(self.parquet_path))
+            p_tri = _sql_quote(str(triples_parquet))
+            con.execute(f"CREATE OR REPLACE VIEW det AS SELECT * FROM read_parquet({p_det})")
+            lim = "" if limit is None else f"LIMIT {int(limit)}"
+            q = f"""
+            SELECT
+              t.orbit_id,
+              t.target_idx,
+              d.obscode,
+              d.exposure_mjd_mid_key_us,
+              d.healpixel,
+              d.filter,
+              d.observation_id,
+              d.obstime_mjd_utc,
+              d.ra_deg,
+              d.dec_deg,
+              d.ra_sigma_deg,
+              d.dec_sigma_deg,
+              d.mag,
+              d.mag_sigma
+            FROM read_parquet({p_tri}) t
+            INNER JOIN det d
+              ON d.obscode = t.obscode
+             AND d.exposure_mjd_mid_key_us = t.exposure_mjd_mid_key_us
+             AND d.healpixel = t.healpixel
+            {lim}
+            """
+            out = con.execute(q).fetch_arrow_table()
+        finally:
+            con.close()
+        if out.num_rows == 0:
+            return CandidateDetections.empty()
+        return CandidateDetections.from_pyarrow(out)
+
+    def count_accepted_from_triples_parquet(
+        self,
+        *,
+        subset: SubsetPaths,
+        triples_parquet: str,
+        preds: PredictedTargets,
+        gate: GateParams,
+    ) -> AcceptedCounts:
+        cands = self.fetch_candidates_from_triples_parquet(
+            subset=subset,
+            triples_parquet=str(triples_parquet),
+            limit=None,
+        )
+        return accepted_counts_python(candidates=cands, preds=preds, gate=gate)
+
+    def detection_key_match_totals_from_triples_parquet(
+        self,
+        *,
+        subset: SubsetPaths,  # unused
+        triples_parquet: str,
+    ) -> tuple[int | None, int | None, int | None]:
+        con = self._conn()
+        try:
+            p_det = _sql_quote(str(self.parquet_path))
+            p_tri = _sql_quote(str(triples_parquet))
+            row = con.execute(
+                f"""
+                WITH tri AS (
+                  SELECT DISTINCT obscode, exposure_mjd_mid_key_us, healpixel
+                  FROM read_parquet({p_tri})
+                ),
+                exp_keys AS (
+                  SELECT DISTINCT obscode, exposure_mjd_mid_key_us FROM tri
+                ),
+                det_exp AS (
+                  SELECT DISTINCT d.observation_id
+                  FROM read_parquet({p_det}) d
+                  INNER JOIN exp_keys e
+                    ON d.obscode = e.obscode
+                   AND d.exposure_mjd_mid_key_us = e.exposure_mjd_mid_key_us
+                ),
+                det_frame AS (
+                  SELECT DISTINCT d.observation_id
+                  FROM read_parquet({p_det}) d
+                  INNER JOIN tri t
+                    ON d.obscode = t.obscode
+                   AND d.exposure_mjd_mid_key_us = t.exposure_mjd_mid_key_us
+                   AND d.healpixel = t.healpixel
+                )
+                SELECT
+                  (SELECT COUNT(*) FROM det_exp) AS n_exposure,
+                  (SELECT COUNT(*) FROM det_frame) AS n_frame
+                """
+            ).fetchone()
+        finally:
+            con.close()
+        if row is None:
+            return None, None, None
+        n_exp = None if row[0] is None else int(row[0])
+        n_frame = None if row[1] is None else int(row[1])
+        n_nonmatch = None
+        if n_exp is not None and n_frame is not None:
+            n_nonmatch = int(max(0, n_exp - n_frame))
+        return n_exp, n_frame, n_nonmatch
+
     # Optional dataset-level helpers (used by the benchmark harness; harmless in production).
     def frame_pixels_by_target(
         self,
         *,
         subset: SubsetPaths,  # unused
         targets: BenchTargets,
-    ) -> dict[tuple[str, int], "np.ndarray"]:
+    ) -> dict[tuple[str, int], np.ndarray]:
         if len(targets) == 0:
             return {}
-
-        import numpy as np
 
         con = self._conn()
         try:
@@ -376,4 +486,3 @@ class DuckDbParquetBackend(SearchBackend):
                 "observation_id": pc.cast(out["observation_id"], pa.large_string()),
             }
         )
-

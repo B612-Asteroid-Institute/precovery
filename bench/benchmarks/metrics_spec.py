@@ -75,6 +75,31 @@ METRICS: tuple[MetricDefinition, ...] = (
         level="run",
     ),
     MetricDefinition(
+        key="n_frames_stage3_rejected_any",
+        description="Frames rejected by any Stage-3 skip reason (sum across orbits).",
+        level="run",
+    ),
+    MetricDefinition(
+        key="n_frames_uncertainty_rejected",
+        description="Frames rejected by on-sky uncertainty budget (sum across orbits).",
+        level="run",
+    ),
+    MetricDefinition(
+        key="n_targets_preprop_viability_rejected",
+        description="Orbit-targets skipped before Stage 2 due to pre-propagation viability policy.",
+        level="run",
+    ),
+    MetricDefinition(
+        key="n_targets_preprop_time_limited",
+        description="Orbit-targets processed with a reduced Stage-2 time window by viability policy.",
+        level="run",
+    ),
+    MetricDefinition(
+        key="n_targets_failfast_dynamics_error",
+        description="Orbit-targets that triggered strict fail-fast numerical dynamics errors.",
+        level="run",
+    ),
+    MetricDefinition(
         key="n_frames_truth_final",
         description="Truth frames surviving Stage 3 (sum across orbits).",
         level="run",
@@ -83,6 +108,11 @@ METRICS: tuple[MetricDefinition, ...] = (
     MetricDefinition(
         key="n_detections_candidates",
         description="Total candidate detections retrieved by backend join (pre Stage 4 gating).",
+        level="backend",
+    ),
+    MetricDefinition(
+        key="n_detections_innov_ellipse_rejected",
+        description="Candidate detections rejected by innovation-ellipse gate.",
         level="backend",
     ),
     MetricDefinition(

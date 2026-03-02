@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
 from .pipeline_types import (
     AcceptedCounts,
@@ -31,6 +33,10 @@ class Stage23Artifacts:
     build_footprint_elapsed_s: float = 0.0
     build_triples_elapsed_s: float = 0.0
     n_frames_skipped_limiting_mag: int = 0
+    n_frames_skipped_uncertainty: int = 0
+    n_targets_preprop_viability_rejected: int = 0
+    n_targets_preprop_time_limited: int = 0
+    n_targets_failfast_dynamics_error: int = 0
 
 
 @dataclass(frozen=True)
@@ -186,6 +192,10 @@ def write_stage23_artifacts(
     build_footprint_elapsed_s: float = 0.0,
     build_triples_elapsed_s: float = 0.0,
     n_frames_skipped_limiting_mag: int = 0,
+    n_frames_skipped_uncertainty: int = 0,
+    n_targets_preprop_viability_rejected: int = 0,
+    n_targets_preprop_time_limited: int = 0,
+    n_targets_failfast_dynamics_error: int = 0,
     extra_meta: dict[str, object] | None = None,
 ) -> None:
     p = stage23_artifacts_paths(run_dir=run_dir)
@@ -210,6 +220,12 @@ def write_stage23_artifacts(
         "build_footprint_elapsed_s": float(build_footprint_elapsed_s),
         "build_triples_elapsed_s": float(build_triples_elapsed_s),
         "n_frames_skipped_limiting_mag": int(n_frames_skipped_limiting_mag),
+        "n_frames_skipped_uncertainty": int(n_frames_skipped_uncertainty),
+        "n_targets_preprop_viability_rejected": int(
+            n_targets_preprop_viability_rejected
+        ),
+        "n_targets_preprop_time_limited": int(n_targets_preprop_time_limited),
+        "n_targets_failfast_dynamics_error": int(n_targets_failfast_dynamics_error),
     }
     if extra_meta:
         meta.update({str(k): v for k, v in dict(extra_meta).items()})
@@ -225,7 +241,39 @@ def read_stage23_artifacts(*, run_dir: Path) -> Stage23Artifacts:
     targets = BenchTargets.from_parquet(str(p["targets"]))
     preds = PredictedTargets.from_parquet(str(p["preds"]))
     triples = PredictedTriples.from_parquet(str(p["triples"]))
-    m = Stage3OrbitMetrics.from_parquet(str(p["stage3_orbit_metrics"]))
+    m_tbl = pq.read_table(str(p["stage3_orbit_metrics"]))
+    defaults: list[tuple[str, pa.DataType, object]] = [
+        ("n_targets_preprop_viability_rejected", pa.int64(), 0),
+        ("n_targets_preprop_time_limited", pa.int64(), 0),
+        ("n_targets_failfast_dynamics_error", pa.int64(), 0),
+        ("n_targets_eval_total", pa.int64(), 0),
+        ("n_targets_eval_after_policy", pa.int64(), 0),
+        ("completed_full_time_period_check", pa.bool_(), False),
+        ("preprop_decision", pa.large_string(), None),
+        ("preprop_reason", pa.large_string(), None),
+        ("preprop_trigger_metric", pa.large_string(), None),
+        ("preprop_trigger_value", pa.float64(), None),
+        ("preprop_trigger_threshold", pa.float64(), None),
+        ("preprop_time_limit_days_applied", pa.float64(), None),
+        ("preprop_first_excluded_target_mjd_utc", pa.float64(), None),
+        ("failfast_stage", pa.large_string(), None),
+        ("failfast_reason", pa.large_string(), None),
+        ("failfast_time_mjd_tdb", pa.float64(), None),
+        ("failfast_t0_mjd_tdb", pa.float64(), None),
+        ("failfast_t1_mjd_tdb", pa.float64(), None),
+        ("failfast_dt_days", pa.float64(), None),
+    ]
+    for col, dtype, default in defaults:
+        if col not in m_tbl.column_names:
+            m_tbl = m_tbl.append_column(col, pa.array([default] * m_tbl.num_rows, type=dtype))
+            continue
+        fill = default if default is not None else pa.scalar(None, type=dtype)
+        m_tbl = m_tbl.set_column(
+            m_tbl.schema.get_field_index(col),
+            col,
+            pc.cast(pc.fill_null(m_tbl[col], fill), dtype),
+        )
+    m = Stage3OrbitMetrics.from_pyarrow(m_tbl)
 
     micro_timings: dict[str, float] = {}
     build_observers_elapsed_s = 0.0
@@ -234,6 +282,10 @@ def read_stage23_artifacts(*, run_dir: Path) -> Stage23Artifacts:
     build_footprint_elapsed_s = 0.0
     build_triples_elapsed_s = 0.0
     n_frames_skipped_limiting_mag = 0
+    n_frames_skipped_uncertainty = 0
+    n_targets_preprop_viability_rejected = 0
+    n_targets_preprop_time_limited = 0
+    n_targets_failfast_dynamics_error = 0
     if p["meta"].exists():
         try:
             meta = json.loads(p["meta"].read_text())
@@ -246,6 +298,16 @@ def read_stage23_artifacts(*, run_dir: Path) -> Stage23Artifacts:
             build_footprint_elapsed_s = float(meta.get("build_footprint_elapsed_s", 0.0) or 0.0)
             build_triples_elapsed_s = float(meta.get("build_triples_elapsed_s", 0.0) or 0.0)
             n_frames_skipped_limiting_mag = int(meta.get("n_frames_skipped_limiting_mag", 0) or 0)
+            n_frames_skipped_uncertainty = int(meta.get("n_frames_skipped_uncertainty", 0) or 0)
+            n_targets_preprop_viability_rejected = int(
+                meta.get("n_targets_preprop_viability_rejected", 0) or 0
+            )
+            n_targets_preprop_time_limited = int(
+                meta.get("n_targets_preprop_time_limited", 0) or 0
+            )
+            n_targets_failfast_dynamics_error = int(
+                meta.get("n_targets_failfast_dynamics_error", 0) or 0
+            )
         except Exception:
             micro_timings = {}
 
@@ -261,6 +323,12 @@ def read_stage23_artifacts(*, run_dir: Path) -> Stage23Artifacts:
         build_footprint_elapsed_s=float(build_footprint_elapsed_s),
         build_triples_elapsed_s=float(build_triples_elapsed_s),
         n_frames_skipped_limiting_mag=int(n_frames_skipped_limiting_mag),
+        n_frames_skipped_uncertainty=int(n_frames_skipped_uncertainty),
+        n_targets_preprop_viability_rejected=int(
+            n_targets_preprop_viability_rejected
+        ),
+        n_targets_preprop_time_limited=int(n_targets_preprop_time_limited),
+        n_targets_failfast_dynamics_error=int(n_targets_failfast_dynamics_error),
     )
 
 
@@ -269,4 +337,3 @@ def _pyarrow_table_nbytes(t: pa.Table) -> int:
         return int(t.nbytes)
     except Exception:
         return 0
-

@@ -20,7 +20,11 @@ from precovery.search.pipeline_types import (
     BenchTargets,
 )
 from precovery.search.backends.protocols import SearchBackend as BenchBackend
-from precovery.search.runtime_config import load_mag_gate_config
+from precovery.search.runtime_config import (
+    load_mag_gate_config,
+    load_preprop_viability_policy_config,
+    load_stage3_uncertainty_budget_config,
+)
 from precovery.search.time_key import mjd_to_time_key_us
 from precovery.search.assist_perturbers import perturber_warnings_for_orbit_ids
 
@@ -226,6 +230,13 @@ def run_benchmark(
     max_processes: int | None = None,
     compute_gate_totals: bool = False,
     detailed_timings: bool = False,
+    execution_mode: str = "memory",
+    chunk_rows_stage23: int = 0,
+    chunk_rows_stage4: int = 0,
+    max_inflight_chunks: int = 2,
+    runtime_tmp_dir: str | None = None,
+    min_free_disk_gb: float = 10.0,
+    max_on_sky_sigma_major_arcsec: float | None = None,
 ) -> tuple[BackendRunResults, PerOrbitRunResults | None]:
     """
     Run the canonical workload across backends and collect comparable metrics.
@@ -242,6 +253,13 @@ def run_benchmark(
         subset_dir=Path(workload.subset_dir),
         obscodes=set(workload.window.obscodes) if workload.window.obscodes else None,
         config=cfg,
+    )
+    cfg_max_on_sky = load_stage3_uncertainty_budget_config(config=cfg)
+    preprop_cfg = load_preprop_viability_policy_config(config=cfg)
+    max_on_sky_budget = (
+        float(max_on_sky_sigma_major_arcsec)
+        if max_on_sky_sigma_major_arcsec is not None
+        else cfg_max_on_sky
     )
 
     # Orbit sample + covariance QC (reject non-finite / non-PSD covariances up front so we don't
@@ -503,6 +521,34 @@ def run_benchmark(
             write_stage23_artifacts=True,
             write_stage4_artifacts_flag=True,
             detailed_timings=bool(detailed_timings),
+            execution_mode=str(execution_mode),
+            chunk_rows_stage23=int(chunk_rows_stage23),
+            chunk_rows_stage4=int(chunk_rows_stage4),
+            max_inflight_chunks=int(max_inflight_chunks),
+            runtime_tmp_dir=(None if runtime_tmp_dir is None or str(runtime_tmp_dir).strip() == "" else Path(str(runtime_tmp_dir))),
+            min_free_disk_gb=float(min_free_disk_gb),
+            max_on_sky_sigma_major_arcsec=(
+                None if max_on_sky_budget is None else float(max_on_sky_budget)
+            ),
+            preprop_viability_policy=str(preprop_cfg.policy),
+            preprop_short_arc_days_threshold=float(preprop_cfg.short_arc_days_threshold),
+            preprop_time_limit_days_short_arc=float(
+                preprop_cfg.time_limit_days_short_arc
+            ),
+            preprop_time_limit_days_default=float(preprop_cfg.time_limit_days_default),
+            preprop_max_sigma_r_over_r=(
+                None
+                if preprop_cfg.max_sigma_r_over_r is None
+                else float(preprop_cfg.max_sigma_r_over_r)
+            ),
+            preprop_max_covariance_condition=(
+                None
+                if preprop_cfg.max_covariance_condition is None
+                else float(preprop_cfg.max_covariance_condition)
+            ),
+            preprop_fail_open_on_scoring_error=bool(
+                preprop_cfg.fail_open_on_scoring_error
+            ),
         )
 
         if base is None:
@@ -518,10 +564,19 @@ def run_benchmark(
                 base = base.join(fm_tbl, keys=["orbit_id"], join_type="left outer")
             for c in [
                 "n_frames_geometry_matched",
+                "n_frames_stage3_rejected_any",
                 "n_frames_lim_mag_rejected",
+                "n_frames_uncertainty_rejected",
                 "n_frames_truth_geometry_matched",
+                "n_frames_truth_stage3_rejected_any",
                 "n_frames_lim_mag_truth_rejected",
+                "n_frames_truth_uncertainty_rejected",
                 "n_detections_truth_frame_candidates",
+                "n_targets_preprop_viability_rejected",
+                "n_targets_preprop_time_limited",
+                "n_targets_failfast_dynamics_error",
+                "n_targets_eval_total",
+                "n_targets_eval_after_policy",
             ]:
                 if c not in base.column_names:
                     base = base.append_column(c, pa.array([0] * base.num_rows, type=pa.int64()))
@@ -531,6 +586,36 @@ def run_benchmark(
                         c,
                         pc.cast(pc.fill_null(base[c], 0), pa.int64()),
                     )
+            for c in ["completed_full_time_period_check"]:
+                if c not in base.column_names:
+                    base = base.append_column(c, pa.array([True] * base.num_rows, type=pa.bool_()))
+                else:
+                    base = base.set_column(
+                        base.schema.get_field_index(c),
+                        c,
+                        pc.cast(pc.fill_null(base[c], True), pa.bool_()),
+                    )
+            for c in [
+                "preprop_decision",
+                "preprop_reason",
+                "preprop_trigger_metric",
+                "failfast_stage",
+                "failfast_reason",
+            ]:
+                if c not in base.column_names:
+                    base = base.append_column(c, pa.nulls(base.num_rows, type=pa.large_string()))
+            for c in [
+                "preprop_trigger_value",
+                "preprop_trigger_threshold",
+                "preprop_time_limit_days_applied",
+                "preprop_first_excluded_target_mjd_utc",
+                "failfast_time_mjd_tdb",
+                "failfast_t0_mjd_tdb",
+                "failfast_t1_mjd_tdb",
+                "failfast_dt_days",
+            ]:
+                if c not in base.column_names:
+                    base = base.append_column(c, pa.nulls(base.num_rows, type=pa.float64()))
 
             if truth_frames_by_orbit is not None and truth_frames_by_orbit.num_rows > 0:
                 base = base.join(truth_frames_by_orbit, keys=["orbit_id"], join_type="left outer")
@@ -551,11 +636,11 @@ def run_benchmark(
             base = base.append_column("n_frames_candidates", frames_candidates_arr)
 
             n_geom = pc.cast(base["n_frames_geometry_matched"], pa.int64())
-            n_lm_rej = pc.cast(base["n_frames_lim_mag_rejected"], pa.int64())
+            n_stage3_rej = pc.cast(base["n_frames_stage3_rejected_any"], pa.int64())
             n_truth_geom = pc.cast(base["n_frames_truth_geometry_matched"], pa.int64())
-            n_truth_lm_rej = pc.cast(base["n_frames_lim_mag_truth_rejected"], pa.int64())
-            n_final = pc.subtract(n_geom, n_lm_rej)
-            n_truth_final = pc.subtract(n_truth_geom, n_truth_lm_rej)
+            n_truth_stage3_rej = pc.cast(base["n_frames_truth_stage3_rejected_any"], pa.int64())
+            n_final = pc.subtract(n_geom, n_stage3_rej)
+            n_truth_final = pc.subtract(n_truth_geom, n_truth_stage3_rej)
             base = base.append_column("n_frames_final", pc.cast(n_final, pa.int64()))
             base = base.append_column("n_frames_truth_final", pc.cast(n_truth_final, pa.int64()))
 
@@ -574,6 +659,7 @@ def run_benchmark(
         for c in [
             "n_detections_candidates",
             "n_detections_gate_matched",
+            "n_detections_innov_ellipse_rejected",
             "n_detections_magnitude_rejected",
             "n_detections_truth_gate_matched",
             "n_detections_truth_magnitude_rejected",
@@ -611,13 +697,37 @@ def run_benchmark(
             "n_frames_geometry_rejected",
             "n_frames_truth_available",
             "n_frames_truth_geometry_matched",
+            "n_frames_stage3_rejected_any",
+            "n_frames_truth_stage3_rejected_any",
             "n_frames_lim_mag_rejected",
             "n_frames_lim_mag_truth_rejected",
+            "n_frames_uncertainty_rejected",
+            "n_frames_truth_uncertainty_rejected",
             "n_frames_final",
             "n_frames_truth_final",
+            "n_targets_preprop_viability_rejected",
+            "n_targets_preprop_time_limited",
+            "n_targets_failfast_dynamics_error",
+            "n_targets_eval_total",
+            "n_targets_eval_after_policy",
+            "completed_full_time_period_check",
+            "preprop_decision",
+            "preprop_reason",
+            "preprop_trigger_metric",
+            "preprop_trigger_value",
+            "preprop_trigger_threshold",
+            "preprop_time_limit_days_applied",
+            "preprop_first_excluded_target_mjd_utc",
+            "failfast_stage",
+            "failfast_reason",
+            "failfast_time_mjd_tdb",
+            "failfast_t0_mjd_tdb",
+            "failfast_t1_mjd_tdb",
+            "failfast_dt_days",
             # Stage-4 detections.
             "n_detections_candidates",
             "n_detections_gate_matched",
+            "n_detections_innov_ellipse_rejected",
             "n_detections_magnitude_rejected",
             "n_detections_truth_total",
             "n_detections_truth_frame_candidates",
@@ -790,6 +900,9 @@ def run_benchmark(
                 faint_frame_skip_margin_mag=float(faint_margin),
                 max_mag_residual_fainter_mag=None if max_faint is None else float(max_faint),
                 max_mag_residual_brighter_mag=None if max_bright is None else float(max_bright),
+                max_on_sky_sigma_major_arcsec=(
+                    None if max_on_sky_budget is None else float(max_on_sky_budget)
+                ),
                 max_orbits=None if max_orbits is None else int(max_orbits),
                 max_targets=None if max_targets is None else int(max_targets),
                 max_processes=None if max_processes is None else int(max_processes),
@@ -808,13 +921,27 @@ def run_benchmark(
                 n_frames_geometry_rejected=_sum_i64("n_frames_geometry_rejected"),
                 n_frames_truth_available=_sum_i64("n_frames_truth_available"),
                 n_frames_truth_geometry_matched=_sum_i64("n_frames_truth_geometry_matched"),
+                n_frames_stage3_rejected_any=_sum_i64("n_frames_stage3_rejected_any"),
+                n_frames_truth_stage3_rejected_any=_sum_i64("n_frames_truth_stage3_rejected_any"),
                 n_frames_lim_mag_rejected=_sum_i64("n_frames_lim_mag_rejected"),
                 n_frames_lim_mag_truth_rejected=_sum_i64("n_frames_lim_mag_truth_rejected"),
+                n_frames_uncertainty_rejected=_sum_i64("n_frames_uncertainty_rejected"),
+                n_frames_truth_uncertainty_rejected=_sum_i64("n_frames_truth_uncertainty_rejected"),
                 n_frames_final=_sum_i64("n_frames_final"),
                 n_frames_truth_final=_sum_i64("n_frames_truth_final"),
                 n_unique_frames_selected=int(bench.n_unique_frames_selected),
                 select_frames_elapsed_s=float(bench.build_footprint_elapsed_s + bench.build_triples_elapsed_s),
                 n_frames_skipped_limiting_mag=int(bench.n_frames_skipped_limiting_mag),
+                n_frames_skipped_uncertainty=int(bench.n_frames_skipped_uncertainty),
+                n_targets_preprop_viability_rejected=_sum_i64(
+                    "n_targets_preprop_viability_rejected"
+                ),
+                n_targets_preprop_time_limited=_sum_i64(
+                    "n_targets_preprop_time_limited"
+                ),
+                n_targets_failfast_dynamics_error=_sum_i64(
+                    "n_targets_failfast_dynamics_error"
+                ),
                 build_elapsed_s=float(bench.build_elapsed_s),
                 observer_creation_elapsed_s=float(bench.build_observers_elapsed_s),
                 propagation_elapsed_s=float(bench.build_predict_elapsed_s),
@@ -842,7 +969,25 @@ def run_benchmark(
                 n_matched_frames=bench.n_matched_frames,
                 n_detections_candidates=_sum_i64("n_detections_candidates"),
                 n_detections_gate_matched=_sum_i64("n_detections_gate_matched"),
+                n_detections_innov_ellipse_rejected=_sum_i64(
+                    "n_detections_innov_ellipse_rejected"
+                ),
                 n_detections_magnitude_rejected=_sum_i64("n_detections_magnitude_rejected"),
+                n_detections_selected_exposure_keys=(
+                    None
+                    if bench.n_detections_selected_exposure_keys is None
+                    else int(bench.n_detections_selected_exposure_keys)
+                ),
+                n_detections_selected_frame_keys=(
+                    None
+                    if bench.n_detections_selected_frame_keys is None
+                    else int(bench.n_detections_selected_frame_keys)
+                ),
+                n_detections_healpixel_nonmatch=(
+                    None
+                    if bench.n_detections_healpixel_nonmatch is None
+                    else int(bench.n_detections_healpixel_nonmatch)
+                ),
                 n_detections_truth_total=_sum_i64("n_detections_truth_total"),
                 n_detections_truth_frame_candidates=_sum_i64("n_detections_truth_frame_candidates"),
                 n_detections_truth_gate_matched=_sum_i64("n_detections_truth_gate_matched"),

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import io
+from pathlib import Path
+import types
 import numpy as np
 import pyarrow as pa
+import pyarrow.parquet as pq
 
 from bench.data.neomod_synthetic_covariance import (
     _fetch_real_neo_candidate_table_from_sbdb,
@@ -9,7 +13,14 @@ from bench.data.neomod_synthetic_covariance import (
     build_synthetic_covariance_model,
     generate_covariance_matrices_for_batch,
 )
-from bench.data.prepare_neomod_benchmark_bundle import _normalize_detection_batch
+from bench.data.prepare_neomod_benchmark_bundle import (
+    InputUris,
+    _materialize_input_uris_local,
+    _orbit_photometry_bucket_index,
+    _write_orbit_photometry_bucket_inputs,
+    _normalize_detection_batch,
+)
+from bench.benchmarks.workload import month_bounds_mjd_utc
 
 
 def _sample_sbdb_table() -> pa.Table:
@@ -157,8 +168,9 @@ def test_normalize_detection_batch_matches_backend_contract_columns() -> None:
             "time": time,
             "ra": pa.array([10.0, 20.0], type=pa.float64()),
             "dec": pa.array([-10.0, 5.0], type=pa.float64()),
-            "ra_sigma": pa.array([1e-4, 2e-4], type=pa.float64()),
-            "dec_sigma": pa.array([1e-4, 2e-4], type=pa.float64()),
+            # Input sigmas are in arcsec; normalization should emit degrees.
+            "ra_sigma": pa.array([0.36, 0.72], type=pa.float64()),
+            "dec_sigma": pa.array([0.36, 0.72], type=pa.float64()),
             "mag": pa.array([22.1, 23.2], type=pa.float64()),
             "mag_sigma": pa.array([0.1, 0.2], type=pa.float64()),
             "filter": pa.array(["r", "r"], type=pa.large_string()),
@@ -191,3 +203,183 @@ def test_normalize_detection_batch_matches_backend_contract_columns() -> None:
         "mag_sigma",
     }
     assert required.issubset(set(out.column_names))
+    np.testing.assert_allclose(
+        np.asarray(out["ra_sigma_deg"].to_numpy(zero_copy_only=False), dtype=np.float64),
+        np.asarray([1e-4, 2e-4], dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(out["dec_sigma_deg"].to_numpy(zero_copy_only=False), dtype=np.float64),
+        np.asarray([1e-4, 2e-4], dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+def test_normalize_detection_batch_sigma_floor_and_cap_mas() -> None:
+    time = pa.StructArray.from_arrays(
+        [pa.array([61000, 61000], type=pa.int64()), pa.array([1, 2], type=pa.int64())],
+        names=["days", "nanos"],
+    )
+    t = pa.table(
+        {
+            "id": pa.array(["o1", "o2"], type=pa.large_string()),
+            "time": time,
+            "ra": pa.array([10.0, 20.0], type=pa.float64()),
+            "dec": pa.array([-10.0, 5.0], type=pa.float64()),
+            # arcsec => [5 mas, 50 mas] after conversion
+            "ra_sigma": pa.array([0.005, 0.05], type=pa.float64()),
+            "dec_sigma": pa.array([0.005, 0.05], type=pa.float64()),
+            "mag": pa.array([22.1, 23.2], type=pa.float64()),
+            "mag_sigma": pa.array([0.1, 0.2], type=pa.float64()),
+            "filter": pa.array(["r", "r"], type=pa.large_string()),
+            "observatory_code": pa.array(["X05", "X05"], type=pa.large_string()),
+        }
+    )
+
+    out = _normalize_detection_batch(
+        batch=t,
+        start_mjd=60999.0,
+        end_mjd=61001.0,
+        obscode="X05",
+        healpix_nside=32,
+        detection_sigma_floor_mas=10.0,
+        detection_sigma_cap_mas=30.0,
+    )
+    expect_deg = np.asarray([10.0 / 3_600_000.0, 30.0 / 3_600_000.0], dtype=np.float64)
+    np.testing.assert_allclose(
+        np.asarray(out["ra_sigma_deg"].to_numpy(zero_copy_only=False), dtype=np.float64),
+        expect_deg,
+        rtol=0.0,
+        atol=1e-14,
+    )
+    np.testing.assert_allclose(
+        np.asarray(out["dec_sigma_deg"].to_numpy(zero_copy_only=False), dtype=np.float64),
+        expect_deg,
+        rtol=0.0,
+        atol=1e-14,
+    )
+
+
+def test_materialize_input_uris_local_prefers_existing_local_files(tmp_path) -> None:
+    q = tmp_path / "quad.parquet"
+    n = tmp_path / "noise.parquet"
+    o = tmp_path / "orbits.parquet"
+    q.write_bytes(b"q")
+    n.write_bytes(b"n")
+    o.write_bytes(b"o")
+
+    out = _materialize_input_uris_local(
+        inputs=InputUris(quad_truth=str(q), noise_100=str(n), neomod_orbits=str(o)),
+        cache_dir=tmp_path / "cache",
+    )
+    assert out.quad_truth == str(q.resolve())
+    assert out.noise_100 == str(n.resolve())
+    assert out.neomod_orbits == str(o.resolve())
+    assert not (tmp_path / "cache").exists()
+
+
+def test_materialize_input_uris_local_downloads_and_reuses_cache(tmp_path, monkeypatch) -> None:
+    payloads: dict[str, bytes] = {
+        "bucket/quad.parquet": b"quad",
+        "bucket/noise.parquet": b"noise",
+        "bucket/orbits.parquet": b"orbits",
+    }
+
+    class _FakeFs:
+        def open_input_file(self, path: str):
+            return io.BytesIO(payloads[path])
+
+    calls: list[str] = []
+
+    def _fake_from_uri(uri: str):
+        calls.append(str(uri))
+        return _FakeFs(), str(uri).split("://", 1)[1]
+
+    import bench.data.prepare_neomod_benchmark_bundle as mod
+
+    fake_pafs = types.SimpleNamespace(
+        FileSystem=types.SimpleNamespace(from_uri=staticmethod(_fake_from_uri))
+    )
+    monkeypatch.setattr(mod, "pafs", fake_pafs)
+
+    inputs = InputUris(
+        quad_truth="gs://bucket/quad.parquet",
+        noise_100="gs://bucket/noise.parquet",
+        neomod_orbits="gs://bucket/orbits.parquet",
+    )
+    cache_dir = tmp_path / "cache"
+
+    out1 = _materialize_input_uris_local(inputs=inputs, cache_dir=cache_dir)
+    assert len(calls) == 3
+    assert (Path(out1.quad_truth)).read_bytes() == b"quad"
+    assert (Path(out1.noise_100)).read_bytes() == b"noise"
+    assert (Path(out1.neomod_orbits)).read_bytes() == b"orbits"
+
+    out2 = _materialize_input_uris_local(inputs=inputs, cache_dir=cache_dir)
+    assert len(calls) == 3
+    assert out2 == out1
+
+
+def test_orbit_photometry_bucket_index_is_stable_and_bounded() -> None:
+    n = 64
+    i1 = _orbit_photometry_bucket_index(orbit_id="abc123", n_buckets=n)
+    i2 = _orbit_photometry_bucket_index(orbit_id="abc123", n_buckets=n)
+    i3 = _orbit_photometry_bucket_index(orbit_id="xyz999", n_buckets=n)
+    assert 0 <= i1 < n
+    assert 0 <= i3 < n
+    assert i1 == i2
+
+
+def test_write_orbit_photometry_bucket_inputs_maps_object_to_orbit(tmp_path) -> None:
+    start_mjd, _ = month_bounds_mjd_utc("2026-01")
+    day = int(np.floor(start_mjd)) + 1
+    time = pa.StructArray.from_arrays(
+        [
+            pa.array([day, day, day, day], type=pa.int64()),
+            pa.array([0, 1, 2, 3], type=pa.int64()),
+        ],
+        names=["days", "nanos"],
+    )
+    truth = pa.table(
+        {
+            "id": pa.array(["d1", "d2", "d3", "d4"], type=pa.large_string()),
+            "object_id": pa.array(["A", "B", "C", "A"], type=pa.large_string()),
+            "observatory_code": pa.array(["X05", "X05", "X05", "X05"], type=pa.large_string()),
+            "time": time,
+            "ra": pa.array([10.0, 20.0, 30.0, 40.0], type=pa.float64()),
+            "dec": pa.array([1.0, 2.0, 3.0, 4.0], type=pa.float64()),
+            "mag": pa.array([21.0, 22.0, 23.0, None], type=pa.float64()),
+            "mag_sigma": pa.array([0.1, 0.1, 0.1, 0.1], type=pa.float64()),
+            "filter": pa.array(["r", "r", "r", "r"], type=pa.large_string()),
+        }
+    )
+    truth_path = tmp_path / "truth.parquet"
+    pq.write_table(truth, truth_path)
+
+    mapping = pa.table(
+        {
+            "object_id": pa.array(["A", "B"], type=pa.large_string()),
+            "orbit_id": pa.array(["oA", "oB"], type=pa.large_string()),
+        }
+    )
+
+    bucket_paths = _write_orbit_photometry_bucket_inputs(
+        truth_source=str(truth_path),
+        object_orbit_mapping=mapping,
+        month="2026-01",
+        obscode="X05",
+        bucket_dir=tmp_path / "buckets",
+        n_buckets=8,
+        batch_size=2,
+    )
+    assert len(bucket_paths) >= 1
+
+    rows = []
+    for p in bucket_paths:
+        t = pq.read_table(p)
+        rows.extend(t.to_pylist())
+    assert len(rows) == 2
+    orbit_ids = sorted([str(r["orbit_id"]) for r in rows])
+    assert orbit_ids == ["oA", "oB"]

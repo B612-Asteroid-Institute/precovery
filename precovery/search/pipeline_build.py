@@ -15,6 +15,7 @@ import pyarrow.compute as pc
 from adam_core.observers import Observers
 from adam_core.photometry.bandpasses import map_to_canonical_filter_bands
 from adam_core.photometry.magnitude import convert_magnitude
+from adam_core.dynamics.exceptions import DynamicsNumericalError
 from adam_core.time import Timestamp
 from adam_core.orbits import Orbits
 
@@ -27,10 +28,37 @@ from .pipeline_types import (
 )
 from .target_link import map_times_to_target_idx_by_obscode
 from .propagation import (
+    evaluate_preprop_viability_policy,
     predict_targets,
     predict_targets_batched_assist_variants_sigma_points,
     predict_targets_batched_assist_window_then_2body_variants_sigma_points,
 )
+
+
+def _on_sky_sigma_major_arcsec_from_cov_ll(
+    *,
+    lat_deg: np.ndarray,
+    cov_ll_00_deg2: np.ndarray,
+    cov_ll_01_deg2: np.ndarray,
+    cov_ll_11_deg2: np.ndarray,
+) -> np.ndarray:
+    """
+    Compute tangent-plane 1-sigma major axis (arcsec) from lon/lat covariance.
+
+    We account for longitudinal metric shrinkage via cos(lat) before eigendecomposition.
+    """
+    lat = np.asarray(lat_deg, dtype=np.float64)
+    c00 = np.asarray(cov_ll_00_deg2, dtype=np.float64)
+    c01 = np.asarray(cov_ll_01_deg2, dtype=np.float64)
+    c11 = np.asarray(cov_ll_11_deg2, dtype=np.float64)
+
+    cos_lat = np.cos(np.deg2rad(lat))
+    a = (cos_lat * cos_lat) * c00
+    b = cos_lat * c01
+    d = c11
+    disc = np.sqrt(np.maximum((a - d) * (a - d) + 4.0 * b * b, 0.0))
+    lam_max = np.maximum(0.5 * ((a + d) + disc), 0.0)
+    return np.sqrt(lam_max) * 3600.0
 
 
 def build_predictions_and_triples(
@@ -48,6 +76,15 @@ def build_predictions_and_triples(
     faint_margin_mag: float,
     max_mag_residual_fainter_mag: float | None,
     max_mag_residual_brighter_mag: float | None,
+    max_on_sky_sigma_major_arcsec: float | None = None,
+    preprop_viability_policy: str = "off",
+    preprop_short_arc_days_threshold: float = 14.0,
+    preprop_time_limit_days_short_arc: float = 30.0,
+    preprop_time_limit_days_default: float = 90.0,
+    preprop_max_sigma_r_over_r: float | None = None,
+    preprop_max_covariance_condition: float | None = None,
+    preprop_viability_min_score: float = 0.25,
+    preprop_fail_open_on_scoring_error: bool = False,
     dataset_pixels_by_target: dict[tuple[str, int], np.ndarray] | None = None,
     truth_frames: pa.Table | None = None,
     detailed_timings: bool,
@@ -79,6 +116,8 @@ def build_predictions_and_triples(
         Timing breakdown (seconds).
     n_frames_skipped_limiting_mag
         Count of (orbit_id, target_idx) pairs skipped due to limiting magnitude.
+    n_frames_skipped_uncertainty
+        Count of (orbit_id, target_idx) pairs skipped due to on-sky uncertainty budget.
     micro_timings
         Dict of micro-timing keys for footprint and stage2 steps.
     """
@@ -92,6 +131,7 @@ def build_predictions_and_triples(
             0.0,
             0.0,
             0.0,
+            0,
             0,
             {},
         )
@@ -130,7 +170,6 @@ def build_predictions_and_triples(
 
     # Pre-build bandpass conversion IDs once (reused across orbits).
     src_filter_id = np.full(int(len(times)), "V", dtype=object)
-    tgt_filter_id = np.asarray(canonical, dtype=object)
 
     # Precompute observers aligned to targets once; reused across orbits in stage2.
     t_obs0 = time.perf_counter()
@@ -219,16 +258,40 @@ def build_predictions_and_triples(
 
     met_orbit_id: list[str] = []
     met_frames_geom: list[int] = []
+    met_frames_stage3_any_rej: list[int] = []
     met_frames_limmag_rej: list[int] = []
+    met_frames_uncertainty_rej: list[int] = []
     met_frames_truth_geom: list[int] = []
+    met_frames_truth_stage3_any_rej: list[int] = []
     met_frames_truth_limmag_rej: list[int] = []
+    met_frames_truth_uncertainty_rej: list[int] = []
     met_truth_det_frame_candidates: list[int] = []
+    met_preprop_rejected: list[int] = []
+    met_preprop_time_limited: list[int] = []
+    met_failfast_dynamics_error: list[int] = []
+    met_targets_eval_total: list[int] = []
+    met_targets_eval_after_policy: list[int] = []
+    met_completed_full_time_period_check: list[bool] = []
+    met_preprop_decision: list[str | None] = []
+    met_preprop_reason: list[str | None] = []
+    met_preprop_trigger_metric: list[str | None] = []
+    met_preprop_trigger_value: list[float | None] = []
+    met_preprop_trigger_threshold: list[float | None] = []
+    met_preprop_time_limit_days_applied: list[float | None] = []
+    met_preprop_first_excluded_target_mjd_utc: list[float | None] = []
+    met_failfast_stage: list[str | None] = []
+    met_failfast_reason: list[str | None] = []
+    met_failfast_time_mjd_tdb: list[float | None] = []
+    met_failfast_t0_mjd_tdb: list[float | None] = []
+    met_failfast_t1_mjd_tdb: list[float | None] = []
+    met_failfast_dt_days: list[float | None] = []
 
     propagation_elapsed_s = 0.0
     build_pred_mag_elapsed_s = 0.0
     build_footprint_elapsed_s = 0.0
     build_triples_elapsed_s = 0.0
     n_pairs_skipped_faint = 0
+    n_pairs_skipped_uncertainty = 0
 
     footprint_timings: dict[str, float] = {}
     stage2_timings: dict[str, float] = {}
@@ -241,7 +304,7 @@ def build_predictions_and_triples(
     if str(stage2_strategy) in (
         "assist_variants:sigma_points",
         "assist_window_then_2body_variants:sigma_points",
-    ) and len(orbits) > 0:
+    ) and len(orbits) > 0 and str(preprop_viability_policy).strip().lower() == "off":
         t_pred0 = time.perf_counter()
         if str(stage2_strategy) == "assist_variants:sigma_points":
             ephem_all, cov_ll_all = predict_targets_batched_assist_variants_sigma_points(
@@ -342,6 +405,28 @@ def build_predictions_and_triples(
             except Exception:
                 pass
 
+        # Optional on-sky uncertainty budget (major-axis 1-sigma, arcsec).
+        too_uncertain = np.zeros(int(len(ephem_all)), dtype=bool)
+        max_sigma_major_arcsec = (
+            None
+            if max_on_sky_sigma_major_arcsec is None
+            else float(max_on_sky_sigma_major_arcsec)
+        )
+        if max_sigma_major_arcsec is not None and np.isfinite(max_sigma_major_arcsec) and max_sigma_major_arcsec > 0.0:
+            sigma_major_arcsec = _on_sky_sigma_major_arcsec_from_cov_ll(
+                lat_deg=pc.cast(ephem_all.coordinates.lat, pa.float64())
+                .to_numpy(zero_copy_only=False)
+                .astype(np.float64),
+                cov_ll_00_deg2=pc.cast(cov00, pa.float64()).to_numpy(zero_copy_only=False).astype(np.float64),
+                cov_ll_01_deg2=pc.cast(cov01, pa.float64()).to_numpy(zero_copy_only=False).astype(np.float64),
+                cov_ll_11_deg2=pc.cast(cov11, pa.float64()).to_numpy(zero_copy_only=False).astype(np.float64),
+            )
+            too_uncertain = sigma_major_arcsec > float(max_sigma_major_arcsec)
+            n_pairs_skipped_uncertainty += int(np.count_nonzero(too_uncertain))
+        skip_lim_mag = np.asarray(too_faint.to_numpy(zero_copy_only=False), dtype=bool)
+        skip_uncertainty = np.asarray(too_uncertain, dtype=bool)
+        skip_stage3 = skip_lim_mag | skip_uncertainty
+
         # Build PredictedTargets table (vectorized) and then generate triples via footprint.
         preds_tbl = pa.table(
             {
@@ -361,8 +446,11 @@ def build_predictions_and_triples(
         )
 
         # Sort so we can process by-orbit with simple contiguous slices.
-        preds_tbl = preds_tbl.append_column("_too_faint", too_faint).sort_by(
-            [("orbit_id", "ascending"), ("target_idx", "ascending")]
+        preds_tbl = (
+            preds_tbl.append_column("_skip_lim_mag", pa.array(skip_lim_mag, type=pa.bool_()))
+            .append_column("_skip_uncertainty", pa.array(skip_uncertainty, type=pa.bool_()))
+            .append_column("_skip_stage3", pa.array(skip_stage3, type=pa.bool_()))
+            .sort_by([("orbit_id", "ascending"), ("target_idx", "ascending")])
         )
 
         # Materialize columns needed for footprint computation (vectorized extraction).
@@ -379,7 +467,9 @@ def build_predictions_and_triples(
         c00 = pc.cast(preds_tbl["cov_ll_00"], pa.float64()).to_numpy(zero_copy_only=False).astype(np.float64)
         c01 = pc.cast(preds_tbl["cov_ll_01"], pa.float64()).to_numpy(zero_copy_only=False).astype(np.float64)
         c11 = pc.cast(preds_tbl["cov_ll_11"], pa.float64()).to_numpy(zero_copy_only=False).astype(np.float64)
-        faint = pc.cast(preds_tbl["_too_faint"], pa.bool_()).to_numpy(zero_copy_only=False)
+        skip_lim_mag = pc.cast(preds_tbl["_skip_lim_mag"], pa.bool_()).to_numpy(zero_copy_only=False)
+        skip_uncertainty = pc.cast(preds_tbl["_skip_uncertainty"], pa.bool_()).to_numpy(zero_copy_only=False)
+        skip_stage3 = pc.cast(preds_tbl["_skip_stage3"], pa.bool_()).to_numpy(zero_copy_only=False)
         # Encode obscode as small integer codes (drastically reduces Ray object-store pressure).
         obscode_values_py = sorted({str(x) for x in pc.cast(obsc, pa.large_string()).to_pylist() if x is not None})
         obscode_values = pa.array(obscode_values_py, type=pa.large_string())
@@ -443,7 +533,9 @@ def build_predictions_and_triples(
                         "c00": c00,
                         "c01": c01,
                         "c11": c11,
-                        "faint": np.asarray(faint, dtype=bool),
+                        "skip_lim_mag": np.asarray(skip_lim_mag, dtype=bool),
+                        "skip_uncertainty": np.asarray(skip_uncertainty, dtype=bool),
+                        "skip_stage3": np.asarray(skip_stage3, dtype=bool),
                         "obscode_code": obscode_code,
                         "mjd": mjd_list,
                         "key_us": key_us_list,
@@ -475,7 +567,9 @@ def build_predictions_and_triples(
                     c00_ = data["c00"]
                     c01_ = data["c01"]
                     c11_ = data["c11"]
-                    faint_ = data["faint"]
+                    skip_lim_mag_ = data["skip_lim_mag"]
+                    skip_uncertainty_ = data["skip_uncertainty"]
+                    skip_stage3_ = data["skip_stage3"]
                     obsc_ = data["obscode_code"]
                     mjd_ = data["mjd"]
                     key_ = data["key_us"]
@@ -491,9 +585,13 @@ def build_predictions_and_triples(
                     # Per-prediction metric rows; aggregate by orbit_code at end (no dict accumulators).
                     used_orbit_code: list[int] = []
                     used_n_pix: list[int] = []
-                    used_is_faint: list[bool] = []
+                    used_is_skip_any: list[bool] = []
+                    used_is_skip_lim_mag: list[bool] = []
+                    used_is_skip_uncertainty: list[bool] = []
                     used_truth_hit_frames: list[int] = []
-                    used_truth_hit_frames_faint: list[int] = []
+                    used_truth_hit_frames_skip_any: list[int] = []
+                    used_truth_hit_frames_lim_mag: list[int] = []
+                    used_truth_hit_frames_uncertainty: list[int] = []
                     used_truth_det_sum: list[int] = []
 
                     t_local: dict[str, float] = {}
@@ -532,7 +630,9 @@ def build_predictions_and_triples(
                                     continue
 
                         n_pix = int(pix_arr.size)
-                        is_faint = bool(faint_[j])
+                        is_skip_lim_mag = bool(skip_lim_mag_[j])
+                        is_skip_uncertainty = bool(skip_uncertainty_[j])
+                        is_skip = bool(skip_stage3_[j])
 
                         truth_hit_frames = 0
                         truth_det_sum = 0
@@ -544,17 +644,23 @@ def build_predictions_and_triples(
                                     pix_truth, ntruth = ent
                                     m = _np.isin(_np.asarray(pix_truth, dtype=_np.int64), pix_arr, assume_unique=False)
                                     truth_hit_frames = int(_np.count_nonzero(m))
-                                    if truth_hit_frames > 0 and (not is_faint):
+                                    if truth_hit_frames > 0 and (not is_skip):
                                         truth_det_sum = int(_np.sum(_np.asarray(ntruth, dtype=_np.int64)[m]))
 
                         used_orbit_code.append(int(ocj))
                         used_n_pix.append(int(n_pix))
-                        used_is_faint.append(bool(is_faint))
+                        used_is_skip_any.append(bool(is_skip))
+                        used_is_skip_lim_mag.append(bool(is_skip_lim_mag))
+                        used_is_skip_uncertainty.append(bool(is_skip_uncertainty))
                         used_truth_hit_frames.append(int(truth_hit_frames))
-                        used_truth_hit_frames_faint.append(int(truth_hit_frames if is_faint else 0))
+                        used_truth_hit_frames_skip_any.append(int(truth_hit_frames if is_skip else 0))
+                        used_truth_hit_frames_lim_mag.append(int(truth_hit_frames if is_skip_lim_mag else 0))
+                        used_truth_hit_frames_uncertainty.append(
+                            int(truth_hit_frames if is_skip_uncertainty else 0)
+                        )
                         used_truth_det_sum.append(int(truth_det_sum))
 
-                        if is_faint:
+                        if is_skip:
                             continue
 
                         # Emit triples for Stage 4 join (vectorized concat later).
@@ -597,9 +703,13 @@ def build_predictions_and_triples(
                             {
                                 "orbit_code": _pa.array([], type=_pa.int32()),
                                 "n_frames_geometry_matched": _pa.array([], type=_pa.int64()),
+                                "n_frames_stage3_rejected_any": _pa.array([], type=_pa.int64()),
                                 "n_frames_lim_mag_rejected": _pa.array([], type=_pa.int64()),
+                                "n_frames_uncertainty_rejected": _pa.array([], type=_pa.int64()),
                                 "n_frames_truth_geometry_matched": _pa.array([], type=_pa.int64()),
+                                "n_frames_truth_stage3_rejected_any": _pa.array([], type=_pa.int64()),
                                 "n_frames_lim_mag_truth_rejected": _pa.array([], type=_pa.int64()),
+                                "n_frames_truth_uncertainty_rejected": _pa.array([], type=_pa.int64()),
                                 "n_detections_truth_frame_candidates": _pa.array([], type=_pa.int64()),
                             }
                         )
@@ -607,34 +717,62 @@ def build_predictions_and_triples(
 
                     oc_u = _np.asarray(used_orbit_code, dtype=_np.int32)
                     n_pix_u = _np.asarray(used_n_pix, dtype=_np.int64)
-                    faint_u = _np.asarray(used_is_faint, dtype=bool)
+                    skip_u = _np.asarray(used_is_skip_any, dtype=bool)
+                    lim_u = _np.asarray(used_is_skip_lim_mag, dtype=bool)
+                    unc_u = _np.asarray(used_is_skip_uncertainty, dtype=bool)
                     tf_u = _np.asarray(used_truth_hit_frames, dtype=_np.int64)
-                    tf_f_u = _np.asarray(used_truth_hit_frames_faint, dtype=_np.int64)
+                    tf_skip_u = _np.asarray(used_truth_hit_frames_skip_any, dtype=_np.int64)
+                    tf_lim_u = _np.asarray(used_truth_hit_frames_lim_mag, dtype=_np.int64)
+                    tf_unc_u = _np.asarray(used_truth_hit_frames_uncertainty, dtype=_np.int64)
                     td_u = _np.asarray(used_truth_det_sum, dtype=_np.int64)
 
                     n_orbits_local = int(_np.max(oc_u)) + 1 if oc_u.size else 0
                     geo = _np.zeros(n_orbits_local, dtype=_np.int64)
+                    any_rej = _np.zeros(n_orbits_local, dtype=_np.int64)
                     lim = _np.zeros(n_orbits_local, dtype=_np.int64)
+                    unc = _np.zeros(n_orbits_local, dtype=_np.int64)
                     tgeo = _np.zeros(n_orbits_local, dtype=_np.int64)
+                    tany = _np.zeros(n_orbits_local, dtype=_np.int64)
                     tlim = _np.zeros(n_orbits_local, dtype=_np.int64)
+                    tunc = _np.zeros(n_orbits_local, dtype=_np.int64)
                     tdet = _np.zeros(n_orbits_local, dtype=_np.int64)
 
                     _np.add.at(geo, oc_u, n_pix_u)
-                    if faint_u.any():
-                        _np.add.at(lim, oc_u[faint_u], n_pix_u[faint_u])
+                    if skip_u.any():
+                        _np.add.at(any_rej, oc_u[skip_u], n_pix_u[skip_u])
+                    if lim_u.any():
+                        _np.add.at(lim, oc_u[lim_u], n_pix_u[lim_u])
+                    if unc_u.any():
+                        _np.add.at(unc, oc_u[unc_u], n_pix_u[unc_u])
                     _np.add.at(tgeo, oc_u, tf_u)
-                    _np.add.at(tlim, oc_u, tf_f_u)
+                    _np.add.at(tany, oc_u, tf_skip_u)
+                    _np.add.at(tlim, oc_u, tf_lim_u)
+                    _np.add.at(tunc, oc_u, tf_unc_u)
                     _np.add.at(tdet, oc_u, td_u)
 
-                    have = (geo != 0) | (lim != 0) | (tgeo != 0) | (tlim != 0) | (tdet != 0)
+                    have = (
+                        (geo != 0)
+                        | (any_rej != 0)
+                        | (lim != 0)
+                        | (unc != 0)
+                        | (tgeo != 0)
+                        | (tany != 0)
+                        | (tlim != 0)
+                        | (tunc != 0)
+                        | (tdet != 0)
+                    )
                     ocs = _np.nonzero(have)[0].astype(_np.int32, copy=False)
                     metrics = _pa.table(
                         {
                             "orbit_code": _pa.array(ocs, type=_pa.int32()),
                             "n_frames_geometry_matched": _pa.array(geo[have], type=_pa.int64()),
+                            "n_frames_stage3_rejected_any": _pa.array(any_rej[have], type=_pa.int64()),
                             "n_frames_lim_mag_rejected": _pa.array(lim[have], type=_pa.int64()),
+                            "n_frames_uncertainty_rejected": _pa.array(unc[have], type=_pa.int64()),
                             "n_frames_truth_geometry_matched": _pa.array(tgeo[have], type=_pa.int64()),
+                            "n_frames_truth_stage3_rejected_any": _pa.array(tany[have], type=_pa.int64()),
                             "n_frames_lim_mag_truth_rejected": _pa.array(tlim[have], type=_pa.int64()),
+                            "n_frames_truth_uncertainty_rejected": _pa.array(tunc[have], type=_pa.int64()),
                             "n_detections_truth_frame_candidates": _pa.array(tdet[have], type=_pa.int64()),
                         }
                     )
@@ -652,15 +790,17 @@ def build_predictions_and_triples(
                 triples_parts: list[pa.Table] = []
                 metrics_parts: list[pa.Table] = []
                 timing_parts: list[dict[str, float]] = []
+                drain_batch = int(max(2, (int(max_processes) if max_processes is not None else 4) * 2))
                 while pending:
-                    finished, pending = ray.wait(pending, num_returns=1)
-                    t_part, m_part, tim_part = ray.get(finished[0])
-                    if t_part is not None and t_part.num_rows > 0:
-                        triples_parts.append(t_part)
-                    if m_part is not None and m_part.num_rows > 0:
-                        metrics_parts.append(m_part)
-                    if tim_part:
-                        timing_parts.append(dict(tim_part))
+                    n_wait = int(min(len(pending), drain_batch))
+                    finished, pending = ray.wait(pending, num_returns=n_wait)
+                    for t_part, m_part, tim_part in ray.get(finished):
+                        if t_part is not None and t_part.num_rows > 0:
+                            triples_parts.append(t_part)
+                        if m_part is not None and m_part.num_rows > 0:
+                            metrics_parts.append(m_part)
+                        if tim_part:
+                            timing_parts.append(dict(tim_part))
 
                 triples_tmp = pa.concat_tables(triples_parts, promote_options="default") if triples_parts else pa.table({})
 
@@ -698,9 +838,13 @@ def build_predictions_and_triples(
                     g = metrics_tmp.group_by(["orbit_code"]).aggregate(
                         [
                             ("n_frames_geometry_matched", "sum"),
+                            ("n_frames_stage3_rejected_any", "sum"),
                             ("n_frames_lim_mag_rejected", "sum"),
+                            ("n_frames_uncertainty_rejected", "sum"),
                             ("n_frames_truth_geometry_matched", "sum"),
+                            ("n_frames_truth_stage3_rejected_any", "sum"),
                             ("n_frames_lim_mag_truth_rejected", "sum"),
+                            ("n_frames_truth_uncertainty_rejected", "sum"),
                             ("n_detections_truth_frame_candidates", "sum"),
                         ]
                     )
@@ -708,9 +852,13 @@ def build_predictions_and_triples(
                         [
                             "orbit_code",
                             "n_frames_geometry_matched",
+                            "n_frames_stage3_rejected_any",
                             "n_frames_lim_mag_rejected",
+                            "n_frames_uncertainty_rejected",
                             "n_frames_truth_geometry_matched",
+                            "n_frames_truth_stage3_rejected_any",
                             "n_frames_lim_mag_truth_rejected",
+                            "n_frames_truth_uncertainty_rejected",
                             "n_detections_truth_frame_candidates",
                         ]
                     )
@@ -730,21 +878,83 @@ def build_predictions_and_triples(
                     frame_metrics = Stage3OrbitMetrics.from_kwargs(
                         orbit_id=pc.cast(oid_out, pa.large_string()),
                         n_frames_geometry_matched=pc.cast(g["n_frames_geometry_matched"], pa.int64()),
+                        n_frames_stage3_rejected_any=pc.cast(g["n_frames_stage3_rejected_any"], pa.int64()),
                         n_frames_lim_mag_rejected=pc.cast(g["n_frames_lim_mag_rejected"], pa.int64()),
+                        n_frames_uncertainty_rejected=pc.cast(g["n_frames_uncertainty_rejected"], pa.int64()),
                         n_frames_truth_geometry_matched=pc.cast(g["n_frames_truth_geometry_matched"], pa.int64()),
+                        n_frames_truth_stage3_rejected_any=pc.cast(
+                            g["n_frames_truth_stage3_rejected_any"], pa.int64()
+                        ),
                         n_frames_lim_mag_truth_rejected=pc.cast(g["n_frames_lim_mag_truth_rejected"], pa.int64()),
+                        n_frames_truth_uncertainty_rejected=pc.cast(
+                            g["n_frames_truth_uncertainty_rejected"], pa.int64()
+                        ),
                         n_detections_truth_frame_candidates=pc.cast(
                             g["n_detections_truth_frame_candidates"], pa.int64()
                         ),
+                        n_targets_preprop_viability_rejected=pa.array([0] * len(g), type=pa.int64()),
+                        n_targets_preprop_time_limited=pa.array([0] * len(g), type=pa.int64()),
+                        n_targets_failfast_dynamics_error=pa.array([0] * len(g), type=pa.int64()),
+                        n_targets_eval_total=pa.array([int(len(times))] * len(g), type=pa.int64()),
+                        n_targets_eval_after_policy=pa.array([int(len(times))] * len(g), type=pa.int64()),
+                        completed_full_time_period_check=pa.array([True] * len(g), type=pa.bool_()),
+                        preprop_decision=pa.array(["full"] * len(g), type=pa.large_string()),
+                        preprop_reason=pa.array(["policy_off"] * len(g), type=pa.large_string()),
+                        preprop_trigger_metric=pa.nulls(len(g), type=pa.large_string()),
+                        preprop_trigger_value=pa.nulls(len(g), type=pa.float64()),
+                        preprop_trigger_threshold=pa.nulls(len(g), type=pa.float64()),
+                        preprop_time_limit_days_applied=pa.nulls(len(g), type=pa.float64()),
+                        preprop_first_excluded_target_mjd_utc=pa.nulls(len(g), type=pa.float64()),
+                        failfast_stage=pa.nulls(len(g), type=pa.large_string()),
+                        failfast_reason=pa.nulls(len(g), type=pa.large_string()),
+                        failfast_time_mjd_tdb=pa.nulls(len(g), type=pa.float64()),
+                        failfast_t0_mjd_tdb=pa.nulls(len(g), type=pa.float64()),
+                        failfast_t1_mjd_tdb=pa.nulls(len(g), type=pa.float64()),
+                        failfast_dt_days=pa.nulls(len(g), type=pa.float64()),
                     )
                 else:
                     frame_metrics = Stage3OrbitMetrics.from_kwargs(
                         orbit_id=orbit_id_values,
                         n_frames_geometry_matched=pa.array([0] * len(orbit_id_values), type=pa.int64()),
+                        n_frames_stage3_rejected_any=pa.array([0] * len(orbit_id_values), type=pa.int64()),
                         n_frames_lim_mag_rejected=pa.array([0] * len(orbit_id_values), type=pa.int64()),
+                        n_frames_uncertainty_rejected=pa.array([0] * len(orbit_id_values), type=pa.int64()),
                         n_frames_truth_geometry_matched=pa.array([0] * len(orbit_id_values), type=pa.int64()),
+                        n_frames_truth_stage3_rejected_any=pa.array([0] * len(orbit_id_values), type=pa.int64()),
                         n_frames_lim_mag_truth_rejected=pa.array([0] * len(orbit_id_values), type=pa.int64()),
+                        n_frames_truth_uncertainty_rejected=pa.array([0] * len(orbit_id_values), type=pa.int64()),
                         n_detections_truth_frame_candidates=pa.array([0] * len(orbit_id_values), type=pa.int64()),
+                        n_targets_preprop_viability_rejected=pa.array([0] * len(orbit_id_values), type=pa.int64()),
+                        n_targets_preprop_time_limited=pa.array([0] * len(orbit_id_values), type=pa.int64()),
+                        n_targets_failfast_dynamics_error=pa.array([0] * len(orbit_id_values), type=pa.int64()),
+                        n_targets_eval_total=pa.array(
+                            [int(len(times))] * len(orbit_id_values), type=pa.int64()
+                        ),
+                        n_targets_eval_after_policy=pa.array(
+                            [int(len(times))] * len(orbit_id_values), type=pa.int64()
+                        ),
+                        completed_full_time_period_check=pa.array(
+                            [True] * len(orbit_id_values), type=pa.bool_()
+                        ),
+                        preprop_decision=pa.array(
+                            ["full"] * len(orbit_id_values), type=pa.large_string()
+                        ),
+                        preprop_reason=pa.array(
+                            ["policy_off"] * len(orbit_id_values), type=pa.large_string()
+                        ),
+                        preprop_trigger_metric=pa.nulls(len(orbit_id_values), type=pa.large_string()),
+                        preprop_trigger_value=pa.nulls(len(orbit_id_values), type=pa.float64()),
+                        preprop_trigger_threshold=pa.nulls(len(orbit_id_values), type=pa.float64()),
+                        preprop_time_limit_days_applied=pa.nulls(len(orbit_id_values), type=pa.float64()),
+                        preprop_first_excluded_target_mjd_utc=pa.nulls(
+                            len(orbit_id_values), type=pa.float64()
+                        ),
+                        failfast_stage=pa.nulls(len(orbit_id_values), type=pa.large_string()),
+                        failfast_reason=pa.nulls(len(orbit_id_values), type=pa.large_string()),
+                        failfast_time_mjd_tdb=pa.nulls(len(orbit_id_values), type=pa.float64()),
+                        failfast_t0_mjd_tdb=pa.nulls(len(orbit_id_values), type=pa.float64()),
+                        failfast_t1_mjd_tdb=pa.nulls(len(orbit_id_values), type=pa.float64()),
+                        failfast_dt_days=pa.nulls(len(orbit_id_values), type=pa.float64()),
                     )
 
                 # Merge footprint micro-timings across workers.
@@ -763,9 +973,13 @@ def build_predictions_and_triples(
             obsc_list = pc.cast(preds_tbl["obscode"], pa.large_string()).to_pylist()
             met_orbit_id: list[str] = []
             met_n_frames_geometry_matched: list[int] = []
+            met_n_frames_stage3_rejected_any: list[int] = []
             met_n_frames_lim_mag_rejected: list[int] = []
+            met_n_frames_uncertainty_rejected: list[int] = []
             met_n_frames_truth_geometry_matched: list[int] = []
+            met_n_frames_truth_stage3_rejected_any: list[int] = []
             met_n_frames_lim_mag_truth_rejected: list[int] = []
+            met_n_frames_truth_uncertainty_rejected: list[int] = []
             met_n_detections_truth_frame_candidates: list[int] = []
             triples_orbit_id: list[str] = []
             triples_target_idx: list[int] = []
@@ -782,9 +996,13 @@ def build_predictions_and_triples(
                     end += 1
 
                 n_geo_frames = 0
+                n_anyrej_frames = 0
                 n_limrej_frames = 0
+                n_uncrej_frames = 0
                 n_truth_geo_frames = 0
+                n_truth_anyrej_frames = 0
                 n_truth_limrej_frames = 0
+                n_truth_uncrej_frames = 0
                 n_truth_frame_candidates = 0
                 truth_for_orbit = truth_by_orbit_target.get(oid) if truth_by_orbit_target is not None else None
 
@@ -816,9 +1034,15 @@ def build_predictions_and_triples(
                             continue
                     n_pix = int(pix_arr.size)
                     n_geo_frames += n_pix
-                    is_faint = bool(faint[j])
-                    if is_faint:
+                    is_skip_lim_mag = bool(skip_lim_mag[j])
+                    is_skip_uncertainty = bool(skip_uncertainty[j])
+                    is_skip = bool(skip_stage3[j])
+                    if is_skip:
+                        n_anyrej_frames += n_pix
+                    if is_skip_lim_mag:
                         n_limrej_frames += n_pix
+                    if is_skip_uncertainty:
+                        n_uncrej_frames += n_pix
                     if truth_for_orbit is not None:
                         tf_pix = truth_for_orbit.get((oc, key_i))
                         if tf_pix:
@@ -829,15 +1053,19 @@ def build_predictions_and_triples(
                                 if int(hpix) not in pix_set:
                                     continue
                                 hit_frames += 1
-                                if not is_faint:
+                                if not is_skip:
                                     hit_truth_det += int(ntruth)
                             if hit_frames > 0:
                                 n_truth_geo_frames += int(hit_frames)
-                                if is_faint:
+                                if is_skip:
+                                    n_truth_anyrej_frames += int(hit_frames)
+                                if is_skip_lim_mag:
                                     n_truth_limrej_frames += int(hit_frames)
-                                else:
+                                if is_skip_uncertainty:
+                                    n_truth_uncrej_frames += int(hit_frames)
+                                if not is_skip:
                                     n_truth_frame_candidates += int(hit_truth_det)
-                    if is_faint:
+                    if is_skip:
                         continue
                     triples_orbit_id.extend([oid] * n_pix)
                     triples_target_idx.extend([ti] * n_pix)
@@ -848,9 +1076,13 @@ def build_predictions_and_triples(
 
                 met_orbit_id.append(oid)
                 met_n_frames_geometry_matched.append(int(n_geo_frames))
+                met_n_frames_stage3_rejected_any.append(int(n_anyrej_frames))
                 met_n_frames_lim_mag_rejected.append(int(n_limrej_frames))
+                met_n_frames_uncertainty_rejected.append(int(n_uncrej_frames))
                 met_n_frames_truth_geometry_matched.append(int(n_truth_geo_frames))
+                met_n_frames_truth_stage3_rejected_any.append(int(n_truth_anyrej_frames))
                 met_n_frames_lim_mag_truth_rejected.append(int(n_truth_limrej_frames))
+                met_n_frames_truth_uncertainty_rejected.append(int(n_truth_uncrej_frames))
                 met_n_detections_truth_frame_candidates.append(int(n_truth_frame_candidates))
                 start = end
 
@@ -867,13 +1099,40 @@ def build_predictions_and_triples(
             frame_metrics = Stage3OrbitMetrics.from_kwargs(
                 orbit_id=pa.array(met_orbit_id, type=pa.large_string()),
                 n_frames_geometry_matched=pa.array(met_n_frames_geometry_matched, type=pa.int64()),
+                n_frames_stage3_rejected_any=pa.array(met_n_frames_stage3_rejected_any, type=pa.int64()),
                 n_frames_lim_mag_rejected=pa.array(met_n_frames_lim_mag_rejected, type=pa.int64()),
+                n_frames_uncertainty_rejected=pa.array(met_n_frames_uncertainty_rejected, type=pa.int64()),
                 n_frames_truth_geometry_matched=pa.array(met_n_frames_truth_geometry_matched, type=pa.int64()),
+                n_frames_truth_stage3_rejected_any=pa.array(
+                    met_n_frames_truth_stage3_rejected_any, type=pa.int64()
+                ),
                 n_frames_lim_mag_truth_rejected=pa.array(met_n_frames_lim_mag_truth_rejected, type=pa.int64()),
+                n_frames_truth_uncertainty_rejected=pa.array(
+                    met_n_frames_truth_uncertainty_rejected, type=pa.int64()
+                ),
                 n_detections_truth_frame_candidates=pa.array(met_n_detections_truth_frame_candidates, type=pa.int64()),
+                n_targets_preprop_viability_rejected=pa.array([0] * len(met_orbit_id), type=pa.int64()),
+                n_targets_preprop_time_limited=pa.array([0] * len(met_orbit_id), type=pa.int64()),
+                n_targets_failfast_dynamics_error=pa.array([0] * len(met_orbit_id), type=pa.int64()),
+                n_targets_eval_total=pa.array([int(len(times))] * len(met_orbit_id), type=pa.int64()),
+                n_targets_eval_after_policy=pa.array([int(len(times))] * len(met_orbit_id), type=pa.int64()),
+                completed_full_time_period_check=pa.array([True] * len(met_orbit_id), type=pa.bool_()),
+                preprop_decision=pa.array(["full"] * len(met_orbit_id), type=pa.large_string()),
+                preprop_reason=pa.array(["policy_off"] * len(met_orbit_id), type=pa.large_string()),
+                preprop_trigger_metric=pa.nulls(len(met_orbit_id), type=pa.large_string()),
+                preprop_trigger_value=pa.nulls(len(met_orbit_id), type=pa.float64()),
+                preprop_trigger_threshold=pa.nulls(len(met_orbit_id), type=pa.float64()),
+                preprop_time_limit_days_applied=pa.nulls(len(met_orbit_id), type=pa.float64()),
+                preprop_first_excluded_target_mjd_utc=pa.nulls(len(met_orbit_id), type=pa.float64()),
+                failfast_stage=pa.nulls(len(met_orbit_id), type=pa.large_string()),
+                failfast_reason=pa.nulls(len(met_orbit_id), type=pa.large_string()),
+                failfast_time_mjd_tdb=pa.nulls(len(met_orbit_id), type=pa.float64()),
+                failfast_t0_mjd_tdb=pa.nulls(len(met_orbit_id), type=pa.float64()),
+                failfast_t1_mjd_tdb=pa.nulls(len(met_orbit_id), type=pa.float64()),
+                failfast_dt_days=pa.nulls(len(met_orbit_id), type=pa.float64()),
             )
 
-        preds_tbl_out = preds_tbl.drop(["_too_faint"])
+        preds_tbl_out = preds_tbl.drop(["_skip_lim_mag", "_skip_uncertainty", "_skip_stage3"])
         preds = PredictedTargets.from_pyarrow(preds_tbl_out)
         triples = PredictedTriples.from_pyarrow(triples_tbl)
 
@@ -889,19 +1148,106 @@ def build_predictions_and_triples(
             float(build_footprint_elapsed_s),
             float(build_triples_elapsed_s),
             int(n_pairs_skipped_faint),
+            int(n_pairs_skipped_uncertainty),
             micro_timings,
         )
 
     for i_orb in range(int(len(orbits))):
         orbit_single = orbits.take([int(i_orb)])
         oid = str(orbit_single.orbit_id[0].as_py())
+        met_orbit_id.append(oid)
+        met_frames_geom.append(0)
+        met_frames_stage3_any_rej.append(0)
+        met_frames_limmag_rej.append(0)
+        met_frames_uncertainty_rej.append(0)
+        met_frames_truth_geom.append(0)
+        met_frames_truth_stage3_any_rej.append(0)
+        met_frames_truth_limmag_rej.append(0)
+        met_frames_truth_uncertainty_rej.append(0)
+        met_truth_det_frame_candidates.append(0)
+        met_preprop_rejected.append(0)
+        met_preprop_time_limited.append(0)
+        met_failfast_dynamics_error.append(0)
+        met_targets_eval_total.append(int(len(times)))
+        met_targets_eval_after_policy.append(int(len(times)))
+        met_completed_full_time_period_check.append(True)
+        met_preprop_decision.append("full")
+        met_preprop_reason.append("policy_off")
+        met_preprop_trigger_metric.append(None)
+        met_preprop_trigger_value.append(None)
+        met_preprop_trigger_threshold.append(None)
+        met_preprop_time_limit_days_applied.append(None)
+        met_preprop_first_excluded_target_mjd_utc.append(None)
+        met_failfast_stage.append(None)
+        met_failfast_reason.append(None)
+        met_failfast_time_mjd_tdb.append(None)
+        met_failfast_t0_mjd_tdb.append(None)
+        met_failfast_t1_mjd_tdb.append(None)
+        met_failfast_dt_days.append(None)
+
+        idx_eval = np.arange(int(len(times)), dtype=np.int64)
+        if str(preprop_viability_policy).strip().lower() != "off":
+            decision = evaluate_preprop_viability_policy(
+                orbit=orbit_single,
+                policy_mode=str(preprop_viability_policy).strip().lower(),
+                short_arc_days_threshold=float(preprop_short_arc_days_threshold),
+                time_limit_days_short_arc=float(preprop_time_limit_days_short_arc),
+                time_limit_days_default=float(preprop_time_limit_days_default),
+                max_sigma_r_over_r=(
+                    None
+                    if preprop_max_sigma_r_over_r is None
+                    else float(preprop_max_sigma_r_over_r)
+                ),
+                max_covariance_condition=(
+                    None
+                    if preprop_max_covariance_condition is None
+                    else float(preprop_max_covariance_condition)
+                ),
+                fail_open_on_scoring_error=bool(preprop_fail_open_on_scoring_error),
+            )
+            met_preprop_decision[-1] = str(decision.decision)
+            met_preprop_reason[-1] = str(decision.reason)
+            met_preprop_trigger_metric[-1] = (
+                None if decision.trigger_metric is None else str(decision.trigger_metric)
+            )
+            met_preprop_trigger_value[-1] = (
+                None if decision.trigger_value is None else float(decision.trigger_value)
+            )
+            met_preprop_trigger_threshold[-1] = (
+                None if decision.trigger_threshold is None else float(decision.trigger_threshold)
+            )
+            if decision.decision == "skip":
+                met_preprop_rejected[-1] = 1
+                met_targets_eval_after_policy[-1] = 0
+                met_completed_full_time_period_check[-1] = False
+                continue
+            if decision.decision == "time_limited":
+                met_preprop_time_limited[-1] = 1
+                limit_days = float(decision.time_limit_days or preprop_time_limit_days_default)
+                met_preprop_time_limit_days_applied[-1] = float(limit_days)
+                epoch_mjd = float(
+                    orbit_single.coordinates.time.rescale("utc").mjd().to_numpy(zero_copy_only=False)[0]
+                )
+                idx_eval = np.nonzero(np.abs(mids - epoch_mjd) <= max(limit_days, 0.0))[0].astype(np.int64)
+                if idx_eval.size < int(len(times)):
+                    excluded = np.asarray(mids[np.setdiff1d(np.arange(int(len(times))), idx_eval)], dtype=np.float64)
+                    if excluded.size > 0:
+                        met_preprop_first_excluded_target_mjd_utc[-1] = float(np.min(excluded))
+                met_targets_eval_after_policy[-1] = int(idx_eval.size)
+                met_completed_full_time_period_check[-1] = bool(idx_eval.size == int(len(times)))
+                if idx_eval.size == 0:
+                    continue
+
+        obsc_eval = pa.array([str(obsc[int(i)].as_py()) for i in idx_eval.tolist()], type=pa.large_string())
+        mids_eval = mids[idx_eval]
+        times_eval = Timestamp.from_mjd(mids_eval, scale="utc")
 
         try:
             t_pred0 = time.perf_counter()
             pred = predict_targets(
                 orbit=orbit_single,
-                obscode=obsc,
-                times_utc=times,
+                obscode=obsc_eval,
+                times_utc=times_eval,
                 start_mjd=float(start_mjd_utc),
                 window_size_days=int(window_size_days),
                 strategy=str(stage2_strategy),
@@ -912,18 +1258,30 @@ def build_predictions_and_triples(
                 default_mag_slope_G=(0.15 if need_pred_mag else None),
             )
             propagation_elapsed_s += float(time.perf_counter() - t_pred0)
-        except Exception:
-            # Skip orbit on propagation failure (e.g. bad state or unsupported strategy).
-            continue
+        except DynamicsNumericalError as exc:
+            met_failfast_dynamics_error[-1] = 1
+            met_completed_full_time_period_check[-1] = False
+            met_failfast_stage[-1] = str(exc.stage)
+            met_failfast_reason[-1] = str(exc.reason)
+            ctx = dict(exc.context or {})
+            if "observation_time_mjd_tdb" in ctx and ctx["observation_time_mjd_tdb"] is not None:
+                met_failfast_time_mjd_tdb[-1] = float(ctx["observation_time_mjd_tdb"])
+            if "t0_mjd_tdb" in ctx and ctx["t0_mjd_tdb"] is not None:
+                met_failfast_t0_mjd_tdb[-1] = float(ctx["t0_mjd_tdb"])
+            if "t1_mjd_tdb" in ctx and ctx["t1_mjd_tdb"] is not None:
+                met_failfast_t1_mjd_tdb[-1] = float(ctx["t1_mjd_tdb"])
+            if "dt_days" in ctx and ctx["dt_days"] is not None:
+                met_failfast_dt_days[-1] = float(ctx["dt_days"])
+            raise
 
         eph = pred.ephem
-        if len(eph) != int(len(times)):
+        if len(eph) != int(len(times_eval)):
             raise RuntimeError("predict_targets returned unexpected length vs targets")
 
         lon = eph.coordinates.lon.to_numpy(zero_copy_only=False).astype(np.float64)
         lat = eph.coordinates.lat.to_numpy(zero_copy_only=False).astype(np.float64)
 
-        pred_mag_arr: pa.Array = pa.nulls(len(times), type=pa.float64())
+        pred_mag_arr: pa.Array = pa.nulls(len(times_eval), type=pa.float64())
         if need_pred_mag:
             if hasattr(eph, "predicted_magnitude_v") and not pc.all(
                 pc.is_null(eph.predicted_magnitude_v)
@@ -936,8 +1294,8 @@ def build_predictions_and_triples(
                 ).to_numpy(zero_copy_only=False).astype(np.float64)
                 pred_mag_np = convert_magnitude(
                     mags_v_np,
-                    source_filter_id=src_filter_id,
-                    target_filter_id=tgt_filter_id,
+                    source_filter_id=np.full(int(len(times_eval)), "V", dtype=object),
+                    target_filter_id=np.asarray([str(canon_arr[int(i)].as_py()) for i in idx_eval.tolist()], dtype=object),
                     composition="C",
                 )
                 pred_mag_arr = pc.if_else(
@@ -949,46 +1307,69 @@ def build_predictions_and_triples(
 
         too_faint = None
         if len(limit_codefid_keys) > 0 and not pc.all(pc.is_null(pred_mag_arr)).as_py():
+            idx_eval_pa = pa.array(idx_eval.tolist(), type=pa.int64())
+            limit_row = pc.take(limit_for_target, idx_eval_pa)
+            limit_margin_row = pc.take(limit_with_margin, idx_eval_pa)
             too_faint = pc.fill_null(
                 pc.and_(
-                    pc.is_valid(limit_for_target),
-                    pc.greater(pred_mag_arr, limit_with_margin),
+                    pc.is_valid(limit_row),
+                    pc.greater(pred_mag_arr, limit_margin_row),
                 ),
                 False,
             )
 
-        for i in range(int(len(times))):
-            cov_ll = pred.cov_ll_deg2[i]
+        for i_local in range(int(len(times_eval))):
+            i_global = int(idx_eval[i_local])
+            cov_ll = pred.cov_ll_deg2[i_local]
             c00, c01, c11 = pack_cov_ll(cov_ll)
 
             pred_orbit_id.append(oid)
-            pred_target_idx.append(int(i))
-            pred_obscode.append(str(obsc[i].as_py()))
-            pred_exposure_mjd_mid_utc.append(float(mids[i]))
-            pred_exposure_mjd_mid_key_us.append(int(key_us[i].as_py()))
+            pred_target_idx.append(int(i_global))
+            pred_obscode.append(str(obsc[i_global].as_py()))
+            pred_exposure_mjd_mid_utc.append(float(mids[i_global]))
+            pred_exposure_mjd_mid_key_us.append(int(key_us[i_global].as_py()))
             pred_canonical_filter_id.append(
-                str(canon_arr[i].as_py()) if canon_arr[i].as_py() is not None else None
+                str(canon_arr[i_global].as_py()) if canon_arr[i_global].as_py() is not None else None
             )
-            pred_lon_deg.append(float(lon[i]))
-            pred_lat_deg.append(float(lat[i]))
+            pred_lon_deg.append(float(lon[i_local]))
+            pred_lat_deg.append(float(lat[i_local]))
             pred_cov00.append(float(c00))
             pred_cov01.append(float(c01))
             pred_cov11.append(float(c11))
-            pm = pred_mag_list[i]
+            pm = pred_mag_list[i_local]
             pred_mag_out.append(None if pm is None else float(pm))
-            oc = str(obsc[i].as_py())
-            mjd_i = float(mids[i])
-            key_i = int(key_us[i].as_py())
+            oc = str(obsc[i_global].as_py())
+            mjd_i = float(mids[i_global])
+            key_i = int(key_us[i_global].as_py())
 
             is_faint = False
-            if too_faint is not None and bool(too_faint[i].as_py()):
+            if too_faint is not None and bool(too_faint[i_local].as_py()):
                 is_faint = True
                 n_pairs_skipped_faint += 1
+            is_uncertain = False
+            max_sigma_major_arcsec = (
+                None
+                if max_on_sky_sigma_major_arcsec is None
+                else float(max_on_sky_sigma_major_arcsec)
+            )
+            if max_sigma_major_arcsec is not None and np.isfinite(max_sigma_major_arcsec) and max_sigma_major_arcsec > 0.0:
+                sigma_major_arcsec = _on_sky_sigma_major_arcsec_from_cov_ll(
+                    lat_deg=np.asarray([float(lat[i_local])], dtype=np.float64),
+                    cov_ll_00_deg2=np.asarray([float(c00)], dtype=np.float64),
+                    cov_ll_01_deg2=np.asarray([float(c01)], dtype=np.float64),
+                    cov_ll_11_deg2=np.asarray([float(c11)], dtype=np.float64),
+                )[0]
+                if float(sigma_major_arcsec) > float(max_sigma_major_arcsec):
+                    is_uncertain = True
+                    n_pairs_skipped_uncertainty += 1
+            is_skip_lim_mag = bool(is_faint)
+            is_skip_uncertainty = bool(is_uncertain)
+            is_skip = bool(is_skip_lim_mag or is_skip_uncertainty)
 
             t_fp0 = time.perf_counter()
             pix = footprint.pixels_for_prediction(
-                lon0_deg=float(lon[i]),
-                lat0_deg=float(lat[i]),
+                lon0_deg=float(lon[i_local]),
+                lat0_deg=float(lat[i_local]),
                 cov_ll_deg2=cov_ll,
                 nside=int(healpix_nside),
                 timings=(footprint_timings if bool(detailed_timings) else None),
@@ -1011,17 +1392,13 @@ def build_predictions_and_triples(
                 continue
 
             # Per-orbit frame accounting (geometry vs limiting-magnitude).
-            if met_orbit_id and met_orbit_id[-1] == oid:
-                met_frames_geom[-1] += n_pix
-                if is_faint:
-                    met_frames_limmag_rej[-1] += n_pix
-            else:
-                met_orbit_id.append(oid)
-                met_frames_geom.append(n_pix)
-                met_frames_limmag_rej.append(n_pix if is_faint else 0)
-                met_frames_truth_geom.append(0)
-                met_frames_truth_limmag_rej.append(0)
-                met_truth_det_frame_candidates.append(0)
+            met_frames_geom[-1] += n_pix
+            if is_skip:
+                met_frames_stage3_any_rej[-1] += n_pix
+            if is_skip_lim_mag:
+                met_frames_limmag_rej[-1] += n_pix
+            if is_skip_uncertainty:
+                met_frames_uncertainty_rej[-1] += n_pix
 
             # Optional truth overlap accounting during Stage 3.
             if truth_by_orbit_target:
@@ -1036,22 +1413,26 @@ def build_predictions_and_triples(
                             if int(hpix) not in pix_set:
                                 continue
                             hit_frames += 1
-                            if not is_faint:
+                            if not is_skip:
                                 hit_truth_det += int(ntruth)
                         if hit_frames > 0:
                             met_frames_truth_geom[-1] += int(hit_frames)
-                            if is_faint:
+                            if is_skip:
+                                met_frames_truth_stage3_any_rej[-1] += int(hit_frames)
+                            if is_skip_lim_mag:
                                 met_frames_truth_limmag_rej[-1] += int(hit_frames)
-                            else:
+                            if is_skip_uncertainty:
+                                met_frames_truth_uncertainty_rej[-1] += int(hit_frames)
+                            if not is_skip:
                                 met_truth_det_frame_candidates[-1] += int(hit_truth_det)
 
-            # Only include frames that survive limiting-magnitude skipping in the join keys.
-            if is_faint:
+            # Only include frames that survive Stage-3 skip filters in the join keys.
+            if is_skip:
                 continue
 
             t_tr0 = time.perf_counter()
             trip_orbit_id.extend([oid] * n_pix)
-            trip_target_idx.extend([int(i)] * n_pix)
+            trip_target_idx.extend([int(i_global)] * n_pix)
             trip_obscode.extend([oc] * n_pix)
             trip_exposure_mjd_mid_utc.extend([mjd_i] * n_pix)
             trip_exposure_mjd_mid_key_us.extend([key_i] * n_pix)
@@ -1090,12 +1471,45 @@ def build_predictions_and_triples(
     frame_metrics = Stage3OrbitMetrics.from_kwargs(
         orbit_id=met_orbit_id,
         n_frames_geometry_matched=np.asarray(met_frames_geom, dtype=np.int64),
+        n_frames_stage3_rejected_any=np.asarray(met_frames_stage3_any_rej, dtype=np.int64),
         n_frames_lim_mag_rejected=np.asarray(met_frames_limmag_rej, dtype=np.int64),
+        n_frames_uncertainty_rejected=np.asarray(met_frames_uncertainty_rej, dtype=np.int64),
         n_frames_truth_geometry_matched=np.asarray(met_frames_truth_geom, dtype=np.int64),
+        n_frames_truth_stage3_rejected_any=np.asarray(
+            met_frames_truth_stage3_any_rej, dtype=np.int64
+        ),
         n_frames_lim_mag_truth_rejected=np.asarray(met_frames_truth_limmag_rej, dtype=np.int64),
+        n_frames_truth_uncertainty_rejected=np.asarray(
+            met_frames_truth_uncertainty_rej, dtype=np.int64
+        ),
         n_detections_truth_frame_candidates=np.asarray(
             met_truth_det_frame_candidates, dtype=np.int64
         ),
+        n_targets_preprop_viability_rejected=np.asarray(met_preprop_rejected, dtype=np.int64),
+        n_targets_preprop_time_limited=np.asarray(met_preprop_time_limited, dtype=np.int64),
+        n_targets_failfast_dynamics_error=np.asarray(met_failfast_dynamics_error, dtype=np.int64),
+        n_targets_eval_total=np.asarray(met_targets_eval_total, dtype=np.int64),
+        n_targets_eval_after_policy=np.asarray(met_targets_eval_after_policy, dtype=np.int64),
+        completed_full_time_period_check=np.asarray(
+            met_completed_full_time_period_check, dtype=np.bool_
+        ),
+        preprop_decision=pa.array(met_preprop_decision, type=pa.large_string()),
+        preprop_reason=pa.array(met_preprop_reason, type=pa.large_string()),
+        preprop_trigger_metric=pa.array(met_preprop_trigger_metric, type=pa.large_string()),
+        preprop_trigger_value=pa.array(met_preprop_trigger_value, type=pa.float64()),
+        preprop_trigger_threshold=pa.array(met_preprop_trigger_threshold, type=pa.float64()),
+        preprop_time_limit_days_applied=pa.array(
+            met_preprop_time_limit_days_applied, type=pa.float64()
+        ),
+        preprop_first_excluded_target_mjd_utc=pa.array(
+            met_preprop_first_excluded_target_mjd_utc, type=pa.float64()
+        ),
+        failfast_stage=pa.array(met_failfast_stage, type=pa.large_string()),
+        failfast_reason=pa.array(met_failfast_reason, type=pa.large_string()),
+        failfast_time_mjd_tdb=pa.array(met_failfast_time_mjd_tdb, type=pa.float64()),
+        failfast_t0_mjd_tdb=pa.array(met_failfast_t0_mjd_tdb, type=pa.float64()),
+        failfast_t1_mjd_tdb=pa.array(met_failfast_t1_mjd_tdb, type=pa.float64()),
+        failfast_dt_days=pa.array(met_failfast_dt_days, type=pa.float64()),
     )
 
     micro_timings = dict(stage2_timings)
@@ -1110,5 +1524,6 @@ def build_predictions_and_triples(
         float(build_footprint_elapsed_s),
         float(build_triples_elapsed_s),
         int(n_pairs_skipped_faint),
+        int(n_pairs_skipped_uncertainty),
         micro_timings,
     )

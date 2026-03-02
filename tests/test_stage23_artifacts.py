@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +18,7 @@ from precovery.search.backends.duckdb_parquet import DuckDbParquetBackend
 from precovery.search.backends.protocols import GateParams
 from precovery.search.pipeline_types import SubsetPaths
 from precovery.search.footprints import CovPolygonReconstructedMoc
+from precovery.search.run import precover_orbits_with_backend_for_benchmark
 
 from .testutils import make_sourceobs_of_orbit
 
@@ -291,3 +293,109 @@ def test_windowed_stage2_multi_center_has_unique_orbit_target_keys(
     preds = out.build.preds.table.select(["orbit_id", "target_idx"])
     gb = preds.group_by(["orbit_id", "target_idx"]).aggregate([("target_idx", "count")])
     assert gb.num_rows == preds.num_rows
+
+
+def test_disk_mode_benchmark_parity_small_subset(tmp_path: Path, sample_orbits: Orbits) -> None:
+    orbit = sample_orbits[0]
+    subset_dir = _write_subset_one_obs(subset_dir=tmp_path / "subset_disk_mode", orbit=orbit)
+    backend = DuckDbParquetBackend(parquet_path=subset_dir / "detections.parquet")
+    subset = SubsetPaths(subset_dir=subset_dir)
+
+    targets = backend.enumerate_targets(
+        subset=subset,
+        start_mjd_utc=49999.0,
+        end_mjd_utc=50001.0,
+        obscodes=("I41",),
+    )
+    pixels = backend.frame_pixels_by_target(subset=subset, targets=targets)
+    fp = CovPolygonReconstructedMoc(n_sigma=3.0, polygon_vertices=32)
+    gate = GateParams(innovation_gate_n_sigma=3.0, invalid_sigma_fill_floor_arcsec_global=0.10)
+
+    run_mem = precover_orbits_with_backend_for_benchmark(
+        backend=backend,
+        subset=subset,
+        orbits=orbit,
+        start_mjd_utc=49999.0,
+        end_mjd_utc=50001.0,
+        obscodes=("I41",),
+        window_size_days=7,
+        stage2_strategy="assist_window_then_2body_variants:sigma_points",
+        healpix_nside=32,
+        footprint=fp,
+        max_processes=1,
+        limit_codefid_keys=pa.array([], type=pa.large_string()),
+        limit_codefid_vals=pa.array([], type=pa.float64()),
+        faint_margin_mag=0.0,
+        gate=gate,
+        targets=targets,
+        dataset_pixels_by_target=pixels,
+        truth_frames=None,
+        truth_ids_key=None,
+        run_dir=tmp_path / "run_mem",
+        reuse_stage23_artifacts=False,
+        write_stage23_artifacts=True,
+        write_stage4_artifacts_flag=True,
+        detailed_timings=False,
+        execution_mode="memory",
+    )
+    run_disk = precover_orbits_with_backend_for_benchmark(
+        backend=backend,
+        subset=subset,
+        orbits=orbit,
+        start_mjd_utc=49999.0,
+        end_mjd_utc=50001.0,
+        obscodes=("I41",),
+        window_size_days=7,
+        stage2_strategy="assist_window_then_2body_variants:sigma_points",
+        healpix_nside=32,
+        footprint=fp,
+        max_processes=1,
+        limit_codefid_keys=pa.array([], type=pa.large_string()),
+        limit_codefid_vals=pa.array([], type=pa.float64()),
+        faint_margin_mag=0.0,
+        gate=gate,
+        targets=targets,
+        dataset_pixels_by_target=pixels,
+        truth_frames=None,
+        truth_ids_key=None,
+        run_dir=tmp_path / "run_disk",
+        reuse_stage23_artifacts=False,
+        write_stage23_artifacts=True,
+        write_stage4_artifacts_flag=True,
+        detailed_timings=False,
+        execution_mode="disk",
+        chunk_rows_stage23=0,
+        chunk_rows_stage4=0,
+        max_inflight_chunks=2,
+        min_free_disk_gb=0.01,
+    )
+
+    assert run_mem.stage3_orbit_metrics.table.equals(run_disk.stage3_orbit_metrics.table)
+    assert run_mem.stage4_orbit_metrics.table.equals(run_disk.stage4_orbit_metrics.table)
+    assert int(run_mem.n_unique_frames_selected) == int(run_disk.n_unique_frames_selected)
+    assert "n_frames_uncertainty_rejected" in run_disk.stage3_orbit_metrics.table.column_names
+    assert "n_frames_truth_uncertainty_rejected" in run_disk.stage3_orbit_metrics.table.column_names
+    assert "n_targets_preprop_viability_rejected" in run_disk.stage3_orbit_metrics.table.column_names
+    assert "n_targets_preprop_time_limited" in run_disk.stage3_orbit_metrics.table.column_names
+    assert "n_targets_failfast_dynamics_error" in run_disk.stage3_orbit_metrics.table.column_names
+    assert "n_detections_innov_ellipse_rejected" in run_disk.stage4_orbit_metrics.table.column_names
+    assert run_disk.n_detections_selected_exposure_keys is None
+    assert run_disk.n_detections_selected_frame_keys is None
+    assert run_disk.n_detections_healpixel_nonmatch is None
+
+    assert (tmp_path / "run_disk" / "stage23" / "manifest.json").exists()
+    assert (tmp_path / "run_disk" / "stage23" / "preds_dataset").exists()
+    assert (tmp_path / "run_disk" / "stage23" / "triples_dataset").exists()
+    assert (tmp_path / "run_disk" / "stage4" / "duckdb_parquet" / "accepted_detections_dataset").exists()
+    stage23_meta = json.loads((tmp_path / "run_disk" / "stage23" / "meta.json").read_text())
+    stage4_meta = json.loads(
+        (tmp_path / "run_disk" / "stage4" / "duckdb_parquet" / "meta.json").read_text()
+    )
+    chunking = stage23_meta.get("chunking", {})
+    assert chunking.get("stage23", {}).get("mode") == "auto_ram_budget"
+    assert chunking.get("stage4", {}).get("mode") == "auto_ram_budget"
+    assert int(chunking.get("row_budget_resolved", 0)) > 0
+    assert int(stage4_meta.get("stage4_subchunk_rows_resolved", 0)) > 0
+    assert "n_detections_selected_exposure_keys" in stage4_meta
+    assert "n_detections_selected_frame_keys" in stage4_meta
+    assert "n_detections_healpixel_nonmatch" in stage4_meta

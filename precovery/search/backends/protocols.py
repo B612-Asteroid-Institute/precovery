@@ -74,6 +74,9 @@ class BackendCapabilities:
     supports_sql_gate_rows: bool = False
     supports_filter_triples_to_existing_frames: bool = False
     supports_frame_pixels_by_target: bool = False
+    supports_fetch_candidates_from_triples_parquet: bool = False
+    supports_count_accepted_from_triples_parquet: bool = False
+    supports_detection_key_match_totals_from_triples_parquet: bool = False
 
 
 class SearchBackend(Protocol):
@@ -147,4 +150,45 @@ class SearchBackend(Protocol):
 
         This is the production “restrict footprints to dataset frames” primitive. Implementations
         that cannot support it cheaply should return an empty dict.
+        """
+
+    def fetch_candidates_from_triples_parquet(
+        self,
+        *,
+        subset: SubsetPaths,
+        triples_parquet: str,
+        limit: int | None = None,
+    ) -> CandidateDetections:
+        """
+        Optional fast path for file-first execution: fetch candidates by joining against
+        a parquet file containing PredictedTriples-compatible columns.
+        """
+
+    def count_accepted_from_triples_parquet(
+        self,
+        *,
+        subset: SubsetPaths,
+        triples_parquet: str,
+        preds: PredictedTargets,
+        gate: GateParams,
+    ) -> AcceptedCounts:
+        """
+        Optional fast path for file-first execution: return accepted counts by reading
+        triples from parquet (without requiring in-memory triple materialization).
+        """
+
+    def detection_key_match_totals_from_triples_parquet(
+        self,
+        *,
+        subset: SubsetPaths,
+        triples_parquet: str,
+    ) -> tuple[int | None, int | None, int | None]:
+        """
+        Optional backend-provided totals for selected-key accounting:
+          (n_detections_selected_exposure_keys,
+           n_detections_selected_frame_keys,
+           n_detections_healpixel_nonmatch)
+
+        Implementations that cannot provide this cheaply should return
+        (None, None, None).
         """

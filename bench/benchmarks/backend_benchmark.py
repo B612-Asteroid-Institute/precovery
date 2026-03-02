@@ -96,6 +96,43 @@ def _parse_args() -> argparse.Namespace:
         help="Max worker processes for propagation (0=default/auto; 1=single-process).",
     )
     p.add_argument(
+        "--execution-mode",
+        type=str,
+        default="memory",
+        choices=["memory", "disk"],
+        help="Pipeline execution mode (memory default, disk for file-first chunked execution).",
+    )
+    p.add_argument(
+        "--chunk-rows-stage23",
+        type=int,
+        default=0,
+        help="Approximate row budget per Stage23 chunk in disk mode (<=0 uses RAM-budget auto sizing).",
+    )
+    p.add_argument(
+        "--chunk-rows-stage4",
+        type=int,
+        default=0,
+        help="Approximate row budget per Stage4 chunk in disk mode (<=0 uses RAM-budget auto sizing).",
+    )
+    p.add_argument(
+        "--max-inflight-chunks",
+        type=int,
+        default=2,
+        help="Reserved disk-mode backpressure control for writer inflight chunks.",
+    )
+    p.add_argument(
+        "--runtime-tmp-dir",
+        type=str,
+        default="",
+        help="Optional temp directory override used by disk mode (TMPDIR/RAY_TMPDIR).",
+    )
+    p.add_argument(
+        "--min-free-disk-gb",
+        type=float,
+        default=10.0,
+        help="Disk-mode preflight minimum free disk in GB.",
+    )
+    p.add_argument(
         "--window-size-days",
         type=int,
         default=0,
@@ -146,6 +183,12 @@ def _parse_args() -> argparse.Namespace:
         default=0.0,
         help="Override innovation-ellipse gate n_sigma (<=0 uses workload default). "
         "This does not change the Stage-3 footprint n_sigma.",
+    )
+    p.add_argument(
+        "--max-on-sky-sigma-major-arcsec",
+        type=float,
+        default=None,
+        help="Optional Stage-3 uncertainty budget (major-axis 1-sigma, arcsec).",
     )
     p.add_argument(
         "--targets-from-truth",
@@ -212,10 +255,13 @@ def _aggregate_by_bin(*, per_orbit: pa.Table, group_cols: list[str]) -> pa.Table
         [
             "n_frames_candidates",
             "n_frames_geometry_matched",
+            "n_frames_stage3_rejected_any",
+            "n_frames_uncertainty_rejected",
             "n_frames_truth_available",
             "n_frames_truth_final",
             "n_detections_candidates",
             "n_detections_gate_matched",
+            "n_detections_innov_ellipse_rejected",
             "n_detections_magnitude_rejected",
             "n_detections_truth_total",
             "n_detections_truth_final",
@@ -227,10 +273,13 @@ def _aggregate_by_bin(*, per_orbit: pa.Table, group_cols: list[str]) -> pa.Table
         [
             ("orbit_id", "count"),
             ("n_frames_geometry_matched", "sum"),
+            ("n_frames_stage3_rejected_any", "sum"),
+            ("n_frames_uncertainty_rejected", "sum"),
             ("n_frames_truth_available", "sum"),
             ("n_frames_truth_final", "sum"),
             ("n_detections_candidates", "sum"),
             ("n_detections_gate_matched", "sum"),
+            ("n_detections_innov_ellipse_rejected", "sum"),
             ("n_detections_magnitude_rejected", "sum"),
             ("n_detections_truth_total", "sum"),
             ("n_detections_truth_final", "sum"),
@@ -382,6 +431,17 @@ def main() -> None:
         max_processes=None if int(args.max_processes) <= 0 else int(args.max_processes),
         compute_gate_totals=bool(args.gate_totals),
         detailed_timings=bool(args.detailed_timings),
+        execution_mode=str(args.execution_mode),
+        chunk_rows_stage23=int(args.chunk_rows_stage23),
+        chunk_rows_stage4=int(args.chunk_rows_stage4),
+        max_inflight_chunks=int(args.max_inflight_chunks),
+        runtime_tmp_dir=(None if str(args.runtime_tmp_dir).strip() == "" else str(args.runtime_tmp_dir)),
+        min_free_disk_gb=float(args.min_free_disk_gb),
+        max_on_sky_sigma_major_arcsec=(
+            None
+            if args.max_on_sky_sigma_major_arcsec is None
+            else float(args.max_on_sky_sigma_major_arcsec)
+        ),
     )
 
     # Print flat rows (one per backend) for easy diffing.

@@ -19,6 +19,7 @@ from adam_core.coordinates.origin import Origin, OriginCodes
 from adam_core.coordinates.spherical import SphericalCoordinates
 from adam_core.coordinates.transform import transform_coordinates
 from adam_core.dynamics.ephemeris import generate_ephemeris_2body
+from adam_core.dynamics.exceptions import DynamicsNumericalError
 from adam_core.dynamics.propagation import propagate_2body
 from adam_core.observers import Observers
 from adam_core.orbits import Orbits
@@ -38,6 +39,187 @@ PropagationStrategy = Literal[
     "assist_window_then_2body_variants:sigma_points",
     "assist_variants:sigma_points",
 ]
+
+
+PrepropPolicyMode = Literal["off", "static", "dynamic_short_arc"]
+PrepropPolicyDecision = Literal["full", "time_limited", "skip"]
+
+
+@dataclass(frozen=True)
+class PrepropViabilityDiagnostics:
+    sigma_r_over_r: float
+    sigma_v_over_v: float
+    covariance_condition: float
+    covariance_eigen_spread: float
+    sigma_point_r_max: float
+    sigma_point_v_max: float
+    short_arc_proxy_days: float
+    score: float
+
+
+@dataclass(frozen=True)
+class PrepropViabilityResult:
+    decision: PrepropPolicyDecision
+    reason: str
+    diagnostics: PrepropViabilityDiagnostics
+    time_limit_days: float | None = None
+    trigger_metric: str | None = None
+    trigger_value: float | None = None
+    trigger_threshold: float | None = None
+
+
+def evaluate_preprop_viability_policy(
+    *,
+    orbit: Orbits,
+    policy_mode: PrepropPolicyMode,
+    short_arc_days_threshold: float,
+    time_limit_days_short_arc: float,
+    time_limit_days_default: float,
+    max_sigma_r_over_r: float | None,
+    max_covariance_condition: float | None,
+    fail_open_on_scoring_error: bool,
+) -> PrepropViabilityResult:
+    """
+    Host-side pre-propagation viability policy for Stage-2 scheduling.
+    """
+    if str(policy_mode) == "off":
+        return PrepropViabilityResult(
+            decision="full",
+            reason="policy_off",
+            diagnostics=PrepropViabilityDiagnostics(
+                sigma_r_over_r=0.0,
+                sigma_v_over_v=0.0,
+                covariance_condition=1.0,
+                covariance_eigen_spread=1.0,
+                sigma_point_r_max=0.0,
+                sigma_point_v_max=0.0,
+                short_arc_proxy_days=np.inf,
+                score=1.0,
+            ),
+            time_limit_days=None,
+        )
+
+    try:
+        if len(orbit) != 1:
+            raise ValueError("evaluate_preprop_viability_policy expects len(orbit)==1")
+        cov = orbit.coordinates.covariance
+        if cov is None or cov.is_all_nan():
+            raise ValueError("orbit covariance is required for preprop viability policy")
+
+        state = np.asarray(orbit.coordinates.values[0], dtype=np.float64)
+        cov_m = np.asarray(cov.to_matrix()[0], dtype=np.float64)
+
+        r_norm = float(np.linalg.norm(state[0:3]))
+        v_norm = float(np.linalg.norm(state[3:6]))
+        sigma_r = float(np.sqrt(max(np.trace(cov_m[0:3, 0:3]), 0.0)))
+        sigma_v = float(np.sqrt(max(np.trace(cov_m[3:6, 3:6]), 0.0)))
+        sigma_r_over_r = float(sigma_r / max(r_norm, 1e-12))
+        sigma_v_over_v = float(sigma_v / max(v_norm, 1e-12))
+
+        eig = np.linalg.eigvalsh(0.5 * (cov_m + cov_m.T))
+        eig_abs = np.abs(eig[np.isfinite(eig)])
+        eig_pos = eig_abs[eig_abs > 1e-24]
+        covariance_eigen_spread = (
+            float(np.max(eig_pos) / np.min(eig_pos)) if eig_pos.size > 0 else np.inf
+        )
+        covariance_condition = float(np.linalg.cond(cov_m))
+
+        variants = VariantOrbits.create(orbit, method="sigma-point")
+        var_vals = np.asarray(variants.coordinates.values, dtype=np.float64)
+        sigma_point_r_max = float(np.nanmax(np.linalg.norm(var_vals[:, 0:3], axis=1)))
+        sigma_point_v_max = float(np.nanmax(np.linalg.norm(var_vals[:, 3:6], axis=1)))
+
+        short_arc_proxy_days = float(1.0 / max(sigma_v_over_v, 1e-12))
+
+        # Legacy informational score retained for diagnostics/backward compatibility only.
+        # Policy decisions below are based on independent threshold checks.
+        score = float(1.0 / (1.0 + sigma_r_over_r + sigma_v_over_v))
+
+        diag = PrepropViabilityDiagnostics(
+            sigma_r_over_r=sigma_r_over_r,
+            sigma_v_over_v=sigma_v_over_v,
+            covariance_condition=covariance_condition,
+            covariance_eigen_spread=covariance_eigen_spread,
+            sigma_point_r_max=sigma_point_r_max,
+            sigma_point_v_max=sigma_point_v_max,
+            short_arc_proxy_days=short_arc_proxy_days,
+            score=score,
+        )
+
+        max_cov_condition = (
+            None
+            if max_covariance_condition is None
+            else float(max(max_covariance_condition, 1.0))
+        )
+        max_sigma_r = (
+            None
+            if max_sigma_r_over_r is None
+            else float(max(max_sigma_r_over_r, 0.0))
+        )
+
+        if max_cov_condition is not None and covariance_condition > max_cov_condition:
+            return PrepropViabilityResult(
+                decision="skip",
+                reason="covariance_condition_exceeds_max",
+                diagnostics=diag,
+                time_limit_days=None,
+                trigger_metric="covariance_condition",
+                trigger_value=float(covariance_condition),
+                trigger_threshold=float(max_cov_condition),
+            )
+
+        if str(policy_mode) == "dynamic_short_arc" and short_arc_proxy_days <= float(
+            short_arc_days_threshold
+        ):
+            return PrepropViabilityResult(
+                decision="time_limited",
+                reason="short_arc_proxy_days_below_threshold",
+                diagnostics=diag,
+                time_limit_days=float(time_limit_days_short_arc),
+                trigger_metric="short_arc_proxy_days",
+                trigger_value=float(short_arc_proxy_days),
+                trigger_threshold=float(short_arc_days_threshold),
+            )
+
+        if max_sigma_r is not None and sigma_r_over_r > max_sigma_r:
+            return PrepropViabilityResult(
+                decision="time_limited",
+                reason="sigma_r_over_r_exceeds_max",
+                diagnostics=diag,
+                time_limit_days=float(time_limit_days_default),
+                trigger_metric="sigma_r_over_r",
+                trigger_value=float(sigma_r_over_r),
+                trigger_threshold=float(max_sigma_r),
+            )
+
+        return PrepropViabilityResult(
+            decision="full",
+            reason="viability_full",
+            diagnostics=diag,
+            time_limit_days=None,
+        )
+    except Exception as exc:
+        if bool(fail_open_on_scoring_error):
+            return PrepropViabilityResult(
+                decision="full",
+                reason="policy_scoring_error_fail_open",
+                diagnostics=PrepropViabilityDiagnostics(
+                    sigma_r_over_r=np.nan,
+                    sigma_v_over_v=np.nan,
+                    covariance_condition=np.nan,
+                    covariance_eigen_spread=np.nan,
+                    sigma_point_r_max=np.nan,
+                    sigma_point_v_max=np.nan,
+                    short_arc_proxy_days=np.nan,
+                    score=np.nan,
+                ),
+                time_limit_days=None,
+            )
+        raise DynamicsNumericalError(
+            stage="preprop_viability",
+            reason="policy_scoring_error",
+            context={"error": str(exc)},
+        ) from exc
 
 
 @lru_cache(maxsize=1)
@@ -448,6 +630,25 @@ def predict_targets_batched_assist_window_then_2body_variants_sigma_points(
     # Bound in-flight result rows (mean ephemeris rows) to avoid plasma backpressure.
     max_inflight_rows = int(max(40_000, n_workers * 40_000))
     inflight_rows = 0
+    drain_batch = int(max(2, n_workers * 2))
+
+    def _drain_ready_batch() -> None:
+        nonlocal pending, inflight_rows
+        if not pending:
+            return
+        n_wait = int(min(len(pending), drain_batch))
+        ready, pending = ray.wait(pending, num_returns=n_wait)
+        if not ready:
+            return
+        results = ray.get(ready)
+        drained_parts: list[Ephemeris] = []
+        for ref, (mean, tloc) in zip(ready, results, strict=True):
+            inflight_rows = int(max(0, inflight_rows - int(pending_rows.pop(ref, 0))))
+            drained_parts.append(mean)
+            if timings is not None:
+                for k, v in tloc.items():
+                    timings[k] = timings.get(k, 0.0) + float(v)
+        out_parts.append(drained_parts[0] if len(drained_parts) == 1 else qv.concatenate(drained_parts))
 
     for o0 in range(0, int(len(orbits)), int(orbit_chunk_size)):
         o1 = int(min(int(len(orbits)), int(o0) + int(orbit_chunk_size)))
@@ -535,14 +736,7 @@ def predict_targets_batched_assist_window_then_2body_variants_sigma_points(
                         len(pending) >= max_pending
                         or (inflight_rows + int(chunk_rows)) > max_inflight_rows
                     ):
-                        ready, pending = ray.wait(pending, num_returns=1)
-                        ref = ready[0]
-                        mean, tloc = ray.get(ref)
-                        inflight_rows = int(max(0, inflight_rows - int(pending_rows.pop(ref, 0))))
-                        out_parts.append(mean)
-                        if timings is not None:
-                            for k, v in tloc.items():
-                                timings[k] = timings.get(k, 0.0) + float(v)
+                        _drain_ready_batch()
 
                     fut = _stage2_windowed_sigma_points_center_time_chunk_remote.remote(
                         orb_center,
@@ -571,14 +765,7 @@ def predict_targets_batched_assist_window_then_2body_variants_sigma_points(
 
     if use_ray and pending:
         while pending:
-            ready, pending = ray.wait(pending, num_returns=1)
-            ref = ready[0]
-            mean, tloc = ray.get(ref)
-            inflight_rows = int(max(0, inflight_rows - int(pending_rows.pop(ref, 0))))
-            out_parts.append(mean)
-            if timings is not None:
-                for k, v in tloc.items():
-                    timings[k] = timings.get(k, 0.0) + float(v)
+            _drain_ready_batch()
 
     ephem_mean = out_parts[0] if len(out_parts) == 1 else qv.concatenate(out_parts)
     cov_ll = _cov_ll_from_ephemeris_spherical_cov(ephem_mean)

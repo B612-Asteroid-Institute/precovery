@@ -141,11 +141,7 @@ def _gate_keep_and_reject_masks(
         or gate.max_mag_residual_brighter_mag is not None
     )
 
-    # Vectorized mapping from candidates -> prediction columns via Arrow join.
-    cand_keys = candidates.table.select(["orbit_id", "target_idx"]).append_column(
-        "_row_idx",
-        pa.array(np.arange(len(candidates), dtype=np.int64), type=pa.int64()),
-    )
+    # Vectorized mapping from candidates -> prediction columns via key indexing.
     preds_cols = [
         "orbit_id",
         "target_idx",
@@ -158,30 +154,48 @@ def _gate_keep_and_reject_masks(
     if need_mag_residual_gate:
         preds_cols.append("pred_mag")
     preds_sub = preds.table.select([c for c in preds_cols if c in preds.table.column_names])
-    joined = cand_keys.join(preds_sub, keys=["orbit_id", "target_idx"], join_type="left outer")
-    if int(joined.num_rows) != int(len(candidates)):
-        raise RuntimeError(
-            "Failed to align candidates to preds via join. "
-            f"cand_rows={int(len(candidates))} joined_rows={int(joined.num_rows)}"
-        )
-    joined = joined.sort_by([("_row_idx", "ascending")])
-    if bool(pc.any(pc.is_null(joined["pred_lon_deg"])).as_py()):
+
+    sep = pa.scalar("|", type=pa.large_string())
+    cand_key = pc.binary_join_element_wise(
+        pc.cast(candidates.table["orbit_id"], pa.large_string()),
+        pc.cast(candidates.table["target_idx"], pa.large_string()),
+        sep,
+    )
+    pred_key = pc.binary_join_element_wise(
+        pc.cast(preds_sub["orbit_id"], pa.large_string()),
+        pc.cast(preds_sub["target_idx"], pa.large_string()),
+        sep,
+    )
+    pred_row_idx = pc.index_in(cand_key, value_set=pred_key)
+    bad = pc.less(pc.cast(pred_row_idx, pa.int64()), pa.scalar(0, type=pa.int64()))
+    if bool(pc.any(bad).as_py()):
         raise ValueError("Candidates contain (orbit_id,target_idx) not present in preds")
+    pred_row_idx = pc.cast(pred_row_idx, pa.int64())
 
-    lon0 = pc.cast(joined["pred_lon_deg"], pa.float64()).to_numpy(zero_copy_only=False).astype(
+    lon0 = pc.take(pc.cast(preds_sub["pred_lon_deg"], pa.float64()), pred_row_idx).to_numpy(
+        zero_copy_only=False
+    ).astype(
         np.float64, copy=False
     )
-    lat0 = pc.cast(joined["pred_lat_deg"], pa.float64()).to_numpy(zero_copy_only=False).astype(
+    lat0 = pc.take(pc.cast(preds_sub["pred_lat_deg"], pa.float64()), pred_row_idx).to_numpy(
+        zero_copy_only=False
+    ).astype(
         np.float64, copy=False
     )
 
-    c00 = pc.cast(joined["cov_ll_00"], pa.float64()).to_numpy(zero_copy_only=False).astype(
+    c00 = pc.take(pc.cast(preds_sub["cov_ll_00"], pa.float64()), pred_row_idx).to_numpy(
+        zero_copy_only=False
+    ).astype(
         np.float64, copy=False
     )
-    c01 = pc.cast(joined["cov_ll_01"], pa.float64()).to_numpy(zero_copy_only=False).astype(
+    c01 = pc.take(pc.cast(preds_sub["cov_ll_01"], pa.float64()), pred_row_idx).to_numpy(
+        zero_copy_only=False
+    ).astype(
         np.float64, copy=False
     )
-    c11 = pc.cast(joined["cov_ll_11"], pa.float64()).to_numpy(zero_copy_only=False).astype(
+    c11 = pc.take(pc.cast(preds_sub["cov_ll_11"], pa.float64()), pred_row_idx).to_numpy(
+        zero_copy_only=False
+    ).astype(
         np.float64, copy=False
     )
     cov = np.stack([c00, c01, c01, c11], axis=1).reshape(-1, 2, 2).astype(np.float64)
@@ -207,8 +221,8 @@ def _gate_keep_and_reject_masks(
     rejected_innov = ~keep_innov
 
     rejected_mag = np.zeros(len(candidates), dtype=bool)
-    idx = np.nonzero(keep_innov)[0]
-    if idx.size > 0:
+    keep_idx = np.nonzero(keep_innov)[0]
+    if keep_idx.size > 0:
         max_faint = gate.max_mag_residual_fainter_mag
         max_bright = gate.max_mag_residual_brighter_mag
         t_mag0 = None if timings is None else time.perf_counter()
@@ -217,17 +231,17 @@ def _gate_keep_and_reject_masks(
             cand_mag = pc.fill_null(pc.cast(candidates.mag, pa.float64()), nan).to_numpy(
                 zero_copy_only=False
             )
-            pred_mag = pc.fill_null(pc.cast(joined["pred_mag"], pa.float64()), nan).to_numpy(
-                zero_copy_only=False
-            )
-            resid = cand_mag[idx] - pred_mag[idx]
+            pred_mag_all = pc.fill_null(
+                pc.take(pc.cast(preds_sub["pred_mag"], pa.float64()), pred_row_idx), nan
+            ).to_numpy(zero_copy_only=False)
+            resid = cand_mag[keep_idx] - pred_mag_all[keep_idx]
             finite = np.isfinite(resid)
-            rej_sub = np.zeros(int(idx.size), dtype=bool)
+            rej_sub = np.zeros(int(keep_idx.size), dtype=bool)
             if max_faint is not None:
                 rej_sub |= finite & (resid > float(max_faint))
             if max_bright is not None:
                 rej_sub |= finite & (resid < -float(max_bright))
-            rejected_mag[idx] = np.asarray(rej_sub, dtype=bool)
+            rejected_mag[keep_idx] = np.asarray(rej_sub, dtype=bool)
         if timings is not None and t_mag0 is not None:
             dt = time.perf_counter() - t_mag0
             timings["gate.mag_residual_elapsed_s"] = timings.get("gate.mag_residual_elapsed_s", 0.0) + dt
