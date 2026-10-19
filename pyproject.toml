@@ -34,21 +34,24 @@ dependencies = [
     "pandas",
     "healpy",
     "requests",
-    "adam-core @ git+https://github.com/B612-Asteroid-Institute/adam_core.git@main",
+    "ray",
+    "adam-core==0.6.1",
 ]
 [dependency-groups]
 test = [
-    # Pin to a commit SHA (instead of a branch with `/`) because some PDM/unearth
-    # codepaths treat the revision as a filename during lock creation on Linux.
-    "adam-assist @ git+https://github.com/B612-Asteroid-Institute/adam-assist.git@ea0aa4949ca23bc7a8a93245365b48035f66c29b",
+    "adam-assist==0.5.0",
     "pytest",
     "black",
     "isort",
     "mypy",
+    # SQLAlchemy 2.1 removed the configured Mypy plugin module.
+    "sqlalchemy<2.1",
     "pytest-cov",
     "pytest-benchmark",
     "pytest-doctestplus",
-    "ruff",
+    # Ruff 0.16 changed an empty ignore list to enable rules this legacy
+    # configuration never selected; retain the established lint contract.
+    "ruff<0.16",
     "astroquery",
     "pytest-mock>=3.14.0",
     "snakeviz>=2.2.2",

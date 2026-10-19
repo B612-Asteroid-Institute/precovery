@@ -25,7 +25,6 @@ from adam_core.photometry.bandpasses import (
 )
 from adam_core.photometry.magnitude import predict_magnitudes
 from adam_core.propagator import Propagator
-from adam_core.ray_cluster import initialize_use_ray
 from adam_core.time import Timestamp
 
 try:
@@ -37,6 +36,7 @@ from .filter_limiting_magnitudes import FilterLimitingMagnitudes
 from .frame_db import FrameDB, FrameIndex, GenericFrame, HealpixFrame, WindowCenters
 from .healpix_geom import radec_to_healpixel
 from .observation import ObservationsTable
+from .ray_cluster import initialize_use_ray
 from .spherical_geom import haversine_distance_deg
 
 DEGREE = 1.0
